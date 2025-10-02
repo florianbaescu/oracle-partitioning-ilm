@@ -1014,9 +1014,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         DBMS_OUTPUT.PUT_LINE('Analyzing table: ' || v_task.source_owner || '.' || v_task.source_table);
 
-        -- Update task status
+        -- Update task status and reset error message (supports rerun)
         UPDATE dwh_migration_tasks
-        SET status = 'ANALYZING', analysis_date = SYSTIMESTAMP
+        SET status = 'ANALYZING',
+            analysis_date = SYSTIMESTAMP,
+            error_message = NULL
         WHERE task_id = p_task_id;
         COMMIT;
 
@@ -1185,46 +1187,77 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
-        -- Store analysis results
-        INSERT INTO dwh_migration_analysis (
-            task_id,
-            table_rows,
-            table_size_mb,
-            recommended_strategy,
-            recommendation_reason,
-            date_column_name,
-            date_column_type,
-            date_format_detected,
-            date_conversion_expr,
-            requires_conversion,
-            all_date_columns_analysis,
-            estimated_partitions,
-            avg_partition_size_mb,
-            estimated_compression_ratio,
-            estimated_space_savings_mb,
-            complexity_score,
-            dependent_objects,
-            blocking_issues
-        ) VALUES (
-            p_task_id,
-            v_num_rows,
-            v_table_size,
-            v_recommended_strategy,
-            v_reason,
-            v_date_column,
-            v_date_type,
-            v_date_format,
-            v_conversion_expr,
-            v_requires_conversion,
-            v_all_date_analysis,
-            v_partition_count,
-            CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
-            CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,  -- Estimate 4:1 compression
-            CASE WHEN v_task.use_compression = 'Y' THEN v_table_size * 0.75 ELSE 0 END,
-            v_complexity,
-            v_dependent_objects,
-            v_blocking_issues
-        ) RETURNING analysis_id INTO v_analysis_id;
+        -- Store or update analysis results (supports rerun)
+        MERGE INTO dwh_migration_analysis a
+        USING (SELECT p_task_id AS task_id FROM DUAL) src
+        ON (a.task_id = src.task_id)
+        WHEN MATCHED THEN
+            UPDATE SET
+                table_rows = v_num_rows,
+                table_size_mb = v_table_size,
+                recommended_strategy = v_recommended_strategy,
+                recommendation_reason = v_reason,
+                date_column_name = v_date_column,
+                date_column_type = v_date_type,
+                date_format_detected = v_date_format,
+                date_conversion_expr = v_conversion_expr,
+                requires_conversion = v_requires_conversion,
+                all_date_columns_analysis = v_all_date_analysis,
+                estimated_partitions = v_partition_count,
+                avg_partition_size_mb = CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
+                estimated_compression_ratio = CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
+                estimated_space_savings_mb = CASE WHEN v_task.use_compression = 'Y' THEN v_table_size * 0.75 ELSE 0 END,
+                complexity_score = v_complexity,
+                dependent_objects = v_dependent_objects,
+                blocking_issues = v_blocking_issues,
+                analysis_date = SYSTIMESTAMP
+        WHEN NOT MATCHED THEN
+            INSERT (
+                task_id,
+                table_rows,
+                table_size_mb,
+                recommended_strategy,
+                recommendation_reason,
+                date_column_name,
+                date_column_type,
+                date_format_detected,
+                date_conversion_expr,
+                requires_conversion,
+                all_date_columns_analysis,
+                estimated_partitions,
+                avg_partition_size_mb,
+                estimated_compression_ratio,
+                estimated_space_savings_mb,
+                complexity_score,
+                dependent_objects,
+                blocking_issues,
+                analysis_date
+            ) VALUES (
+                p_task_id,
+                v_num_rows,
+                v_table_size,
+                v_recommended_strategy,
+                v_reason,
+                v_date_column,
+                v_date_type,
+                v_date_format,
+                v_conversion_expr,
+                v_requires_conversion,
+                v_all_date_analysis,
+                v_partition_count,
+                CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
+                CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
+                CASE WHEN v_task.use_compression = 'Y' THEN v_table_size * 0.75 ELSE 0 END,
+                v_complexity,
+                v_dependent_objects,
+                v_blocking_issues,
+                SYSTIMESTAMP
+            );
+
+        -- Get analysis_id for newly inserted or updated record
+        SELECT analysis_id INTO v_analysis_id
+        FROM dwh_migration_analysis
+        WHERE task_id = p_task_id;
 
         -- Update task
         UPDATE dwh_migration_tasks
@@ -1246,11 +1279,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
     EXCEPTION
         WHEN OTHERS THEN
-            UPDATE dwh_migration_tasks
-            SET status = 'FAILED',
-                error_message = 'Analysis failed: ' || SQLERRM
-            WHERE task_id = p_task_id;
-            COMMIT;
+            DECLARE
+                v_error_msg VARCHAR2(4000) := SQLERRM;
+            BEGIN
+                UPDATE dwh_migration_tasks
+                SET status = 'FAILED',
+                    error_message = 'Analysis failed: ' || v_error_msg
+                WHERE task_id = p_task_id;
+                COMMIT;
+            END;
             RAISE;
     END analyze_table;
 

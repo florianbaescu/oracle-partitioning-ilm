@@ -624,14 +624,18 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
     EXCEPTION
         WHEN OTHERS THEN
-            UPDATE dwh_migration_tasks
-            SET status = 'FAILED',
-                execution_end = SYSTIMESTAMP,
-                error_message = SQLERRM
-            WHERE task_id = p_task_id;
-            COMMIT;
+            DECLARE
+                v_error_msg VARCHAR2(4000) := SQLERRM;
+            BEGIN
+                UPDATE dwh_migration_tasks
+                SET status = 'FAILED',
+                    execution_end = SYSTIMESTAMP,
+                    error_message = v_error_msg
+                WHERE task_id = p_task_id;
+                COMMIT;
 
-            DBMS_OUTPUT.PUT_LINE('ERROR: Migration failed - ' || SQLERRM);
+                DBMS_OUTPUT.PUT_LINE('ERROR: Migration failed - ' || v_error_msg);
+            END;
             RAISE;
     END execute_migration;
 
