@@ -87,6 +87,126 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
     END get_date_columns;
 
 
+    FUNCTION get_column_usage_score(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_column_name VARCHAR2
+    ) RETURN NUMBER
+    AS
+        v_usage_count NUMBER := 0;
+        v_view_where_count NUMBER := 0;
+        v_view_join_count NUMBER := 0;
+        v_source_where_count NUMBER := 0;
+        v_source_join_count NUMBER := 0;
+        v_index_count NUMBER := 0;
+        v_col_pattern VARCHAR2(200);
+    BEGIN
+        v_col_pattern := UPPER(p_column_name);
+
+        -- Check usage in views - WHERE clauses
+        BEGIN
+            SELECT COUNT(*)
+            INTO v_view_where_count
+            FROM dba_views
+            WHERE owner = p_owner
+            AND (
+                UPPER(text) LIKE '%WHERE%' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' %'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' BETWEEN%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' IN%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_view_where_count := 0;
+        END;
+
+        -- Check usage in views - JOIN conditions
+        BEGIN
+            SELECT COUNT(*)
+            INTO v_view_join_count
+            FROM dba_views
+            WHERE owner = p_owner
+            AND (
+                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%JOIN%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_view_join_count := 0;
+        END;
+
+        -- Check usage in stored procedures, functions, packages - WHERE clauses
+        BEGIN
+            SELECT COUNT(*)
+            INTO v_source_where_count
+            FROM dba_source
+            WHERE owner = p_owner
+            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+            AND (
+                UPPER(text) LIKE '%WHERE%' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' %'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' BETWEEN%'
+                OR UPPER(text) LIKE '% ' || v_col_pattern || ' IN%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_source_where_count := 0;
+        END;
+
+        -- Check usage in stored procedures, functions, packages - JOIN conditions
+        BEGIN
+            SELECT COUNT(*)
+            INTO v_source_join_count
+            FROM dba_source
+            WHERE owner = p_owner
+            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+            AND (
+                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%JOIN%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_source_join_count := 0;
+        END;
+
+        -- Check if column is indexed (strongest indicator - actual query usage)
+        BEGIN
+            SELECT COUNT(*)
+            INTO v_index_count
+            FROM dba_ind_columns ic
+            JOIN dba_indexes i ON i.owner = ic.index_owner AND i.index_name = ic.index_name
+            WHERE ic.table_owner = p_owner
+            AND ic.table_name = p_table_name
+            AND ic.column_name = p_column_name;
+        EXCEPTION WHEN OTHERS THEN
+            v_index_count := 0;
+        END;
+
+        -- Calculate weighted score
+        -- Indexes: weight 15 (strongest - proven query usage with statistics)
+        -- WHERE clauses in code: weight 3 (filtering = partition pruning benefit)
+        -- JOIN conditions: weight 2 (join predicates benefit from pruning)
+        v_usage_count := (v_index_count * 15) +
+                        (v_source_where_count * 3) +
+                        (v_source_join_count * 2) +
+                        (v_view_where_count * 3) +
+                        (v_view_join_count * 2);
+
+        RETURN v_usage_count;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 0;
+    END get_column_usage_score;
+
+
     FUNCTION analyze_date_column(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
@@ -98,7 +218,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
         p_non_null_count OUT NUMBER,
         p_null_percentage OUT NUMBER,
         p_has_time_component OUT VARCHAR2,
-        p_distinct_dates OUT NUMBER
+        p_distinct_dates OUT NUMBER,
+        p_usage_score OUT NUMBER
     ) RETURN BOOLEAN
     AS
         v_sql VARCHAR2(4000);
@@ -157,6 +278,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 p_has_time_component := 'N';
                 p_distinct_dates := NULL;  -- Not needed if no time component
             END IF;
+
+            -- Get column usage score (how often used in queries/code)
+            p_usage_score := get_column_usage_score(p_owner, p_table_name, p_column_name);
 
             RETURN TRUE;
         END IF;
@@ -220,7 +344,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             SELECT 1 FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM')
+            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
             AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
             FETCH FIRST 1 ROW ONLY
         );
@@ -255,7 +379,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM')
+            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
             AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
             FETCH FIRST 1 ROW ONLY;
             RETURN TRUE;
@@ -282,10 +406,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
         WHERE owner = p_owner
         AND table_name = p_table_name
         AND (
-            UPPER(column_name) IN ('EVENT_DTTM', 'EVENT_TIMESTAMP', 'EVENT_DATE', 'EVENT_TIME', 'AUDIT_DTTM', 'CAPTURE_DTTM', 'INGESTION_DTTM')
+            UPPER(column_name) IN ('EVENT_DTTM', 'EVENT_TIMESTAMP', 'EVENT_DATE', 'EVENT_TIME', 'AUDIT_DTTM', 'CAPTURE_DTTM', 'INGESTION_DTTM',
+                                    'TRN_DT', 'TXN_DATE', 'TRANSACTION_DATE', 'DATA_TRANZACTIEI', 'LOG_DATE')
             OR UPPER(table_name) LIKE '%EVENT%'
             OR UPPER(table_name) LIKE '%AUDIT%'
             OR UPPER(table_name) LIKE '%LOG%'
+            OR UPPER(table_name) LIKE '%TRN%'
+            OR UPPER(table_name) LIKE '%TRANSACTION%'
         );
 
         IF v_count > 0 THEN
@@ -295,15 +422,21 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 FROM dba_tab_columns
                 WHERE owner = p_owner
                 AND table_name = p_table_name
-                AND UPPER(column_name) IN ('EVENT_DTTM', 'EVENT_TIMESTAMP', 'EVENT_DATE', 'AUDIT_DTTM', 'CAPTURE_DTTM', 'INGESTION_DTTM', 'CREATED_DTTM', 'INSERT_DTTM')
+                AND UPPER(column_name) IN ('EVENT_DTTM', 'EVENT_TIMESTAMP', 'EVENT_DATE', 'AUDIT_DTTM', 'CAPTURE_DTTM', 'INGESTION_DTTM',
+                                            'CREATED_DTTM', 'INSERT_DTTM', 'TRN_DT', 'TXN_DATE', 'TRANSACTION_DATE', 'DATA_TRANZACTIEI', 'LOG_DATE')
                 AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
                 ORDER BY
                     CASE UPPER(column_name)
                         WHEN 'EVENT_DTTM' THEN 1
                         WHEN 'EVENT_TIMESTAMP' THEN 2
-                        WHEN 'AUDIT_DTTM' THEN 3
-                        WHEN 'CAPTURE_DTTM' THEN 4
-                        ELSE 5
+                        WHEN 'TRANSACTION_DATE' THEN 3
+                        WHEN 'TXN_DATE' THEN 4
+                        WHEN 'TRN_DT' THEN 5
+                        WHEN 'DATA_TRANZACTIEI' THEN 6
+                        WHEN 'LOG_DATE' THEN 7
+                        WHEN 'AUDIT_DTTM' THEN 8
+                        WHEN 'CAPTURE_DTTM' THEN 9
+                        ELSE 10
                     END
                 FETCH FIRST 1 ROW ONLY;
 
@@ -557,14 +690,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 FROM dba_tab_columns
                 WHERE owner = p_owner
                 AND table_name = p_table_name
-                AND UPPER(column_name) IN ('LOAD_DTTM', 'LOAD_DATE', 'LOAD_TIMESTAMP', 'INSERT_DTTM', 'CREATED_DTTM', 'INGESTION_DTTM', 'CAPTURE_DTTM')
+                AND UPPER(column_name) IN ('LOAD_DTTM', 'LOAD_DATE', 'LOAD_TIMESTAMP', 'INSERT_DTTM', 'CREATED_DTTM', 'INGESTION_DTTM', 'CAPTURE_DTTM',
+                                            'EXTRACTDATE', 'EXTRCT_DATE', 'RUN_DATE', 'PURGE_DATE', 'VAL_DT')
                 AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
                 ORDER BY
                     CASE UPPER(column_name)
                         WHEN 'LOAD_DTTM' THEN 1
                         WHEN 'LOAD_DATE' THEN 2
                         WHEN 'LOAD_TIMESTAMP' THEN 3
-                        ELSE 4
+                        WHEN 'EXTRACTDATE' THEN 4
+                        WHEN 'EXTRCT_DATE' THEN 5
+                        WHEN 'RUN_DATE' THEN 6
+                        WHEN 'VAL_DT' THEN 7
+                        WHEN 'PURGE_DATE' THEN 8
+                        ELSE 9
                     END
                 FETCH FIRST 1 ROW ONLY;
 
@@ -603,7 +742,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 AND (
                     UPPER(column_name) IN ('HIST_DATE', 'HIST_DTTM', 'HIST_TIMESTAMP', 'HISTORY_DATE', 'HISTORY_DTTM',
                                            'SNAPSHOT_DATE', 'SNAPSHOT_DTTM', 'ARCHIVE_DATE', 'ARCHIVE_DTTM',
-                                           'CREATED_DATE', 'CREATED_DTTM', 'INSERT_DATE', 'INSERT_DTTM')
+                                           'CREATED_DATE', 'CREATED_DTTM', 'INSERT_DATE', 'INSERT_DTTM',
+                                           'HIST_DATA', 'HIST_MONTH')
                     OR UPPER(column_name) LIKE 'HIST_%DATE%'
                     OR UPPER(column_name) LIKE 'HISTORY_%DATE%'
                     OR UPPER(column_name) LIKE 'SNAPSHOT_%'
@@ -613,11 +753,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                     CASE UPPER(column_name)
                         WHEN 'HIST_DATE' THEN 1
                         WHEN 'HIST_DTTM' THEN 2
-                        WHEN 'HISTORY_DATE' THEN 3
-                        WHEN 'SNAPSHOT_DATE' THEN 4
-                        WHEN 'ARCHIVE_DATE' THEN 5
-                        WHEN 'CREATED_DATE' THEN 6
-                        ELSE 7
+                        WHEN 'HIST_MONTH' THEN 3
+                        WHEN 'HIST_DATA' THEN 4
+                        WHEN 'HISTORY_DATE' THEN 5
+                        WHEN 'SNAPSHOT_DATE' THEN 6
+                        WHEN 'ARCHIVE_DATE' THEN 7
+                        WHEN 'CREATED_DATE' THEN 8
+                        ELSE 9
                     END
                 FETCH FIRST 1 ROW ONLY;
 
@@ -1126,6 +1268,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             v_has_time_component VARCHAR2(1);
             v_distinct_dates NUMBER;
             v_selected_has_time VARCHAR2(1) := 'N';
+            v_usage_score NUMBER;
+            v_max_usage_score NUMBER := 0;
+            v_selected_usage_score NUMBER := 0;
             v_json_analysis VARCHAR2(32767);
             v_first_json BOOLEAN := TRUE;
         BEGIN
@@ -1176,7 +1321,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                         v_task.source_owner, v_task.source_table, v_date_columns(i),
                         v_min_date, v_max_date, v_range_days,
                         v_null_count, v_non_null_count, v_null_percentage,
-                        v_has_time_component, v_distinct_dates
+                        v_has_time_component, v_distinct_dates, v_usage_score
                     ) THEN
                         -- Build JSON entry for this date column
                         IF NOT v_first_json THEN
@@ -1196,6 +1341,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                             '"null_percentage":' || v_null_percentage || ',' ||
                             '"has_time_component":"' || v_has_time_component || '",' ||
                             '"distinct_dates":' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' ||
+                            '"usage_score":' || v_usage_score || ',' ||
                             '"is_primary":' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END ||
                         '}';
 
@@ -1205,33 +1351,42 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                             TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' ||
                             TO_CHAR(v_max_date, 'YYYY-MM-DD') ||
                             ' (' || v_range_days || ' days, ' || v_null_percentage || '% NULLs' ||
-                            CASE WHEN v_has_time_component = 'Y' THEN ', has time component' ELSE '' END || ')');
+                            CASE WHEN v_has_time_component = 'Y' THEN ', has time component' ELSE '' END ||
+                            ', usage score: ' || v_usage_score || ')');
 
-                        -- Track NULL percentage and time component of selected column
+                        -- Track stats of selected column
                         IF v_date_columns(i) = v_date_column THEN
                             v_selected_null_pct := v_null_percentage;
                             v_selected_has_time := v_has_time_component;
+                            v_selected_usage_score := v_usage_score;
                         END IF;
 
-                        -- If no stereotype found, pick column with widest range
+                        -- If no stereotype found, pick column with best combination of:
+                        -- 1. Highest usage score (primary factor)
+                        -- 2. Widest range (secondary factor if usage scores are similar)
                         IF NOT v_date_found THEN
-                            IF v_range_days > v_max_range THEN
+                            -- Prefer column with higher usage score, or if similar usage, prefer wider range
+                            IF v_usage_score > v_max_usage_score OR
+                               (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range) THEN
                                 v_max_range := v_range_days;
+                                v_max_usage_score := v_usage_score;
                                 v_date_column := v_date_columns(i);
                                 v_date_type := 'DATE';
                                 v_date_format := 'STANDARD';
                                 v_conversion_expr := v_date_column;
                                 v_selected_null_pct := v_null_percentage;
                                 v_selected_has_time := v_has_time_component;
+                                v_selected_usage_score := v_usage_score;
                             END IF;
                         END IF;
                     END IF;
                 END LOOP;
 
-                -- If we found a date column via range analysis
+                -- If we found a date column via range/usage analysis
                 IF NOT v_date_found AND v_date_column IS NOT NULL THEN
                     v_date_found := TRUE;
-                    DBMS_OUTPUT.PUT_LINE('Selected date column by range: ' || v_date_column || ' (' || v_max_range || ' days)');
+                    DBMS_OUTPUT.PUT_LINE('Selected date column: ' || v_date_column ||
+                        ' (usage score: ' || v_selected_usage_score || ', range: ' || v_max_range || ' days)');
                 END IF;
 
                 -- Add warning if selected column has NULLs
