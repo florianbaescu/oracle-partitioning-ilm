@@ -104,42 +104,75 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
         v_col_pattern := UPPER(p_column_name);
 
         -- Check usage in views - WHERE clauses
+        -- Match column on BOTH left and right side of operators, with or without table alias
         BEGIN
             SELECT COUNT(*)
             INTO v_view_where_count
             FROM dba_views
             WHERE owner = p_owner
             AND (
-                UPPER(text) LIKE '%WHERE%' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' %'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' BETWEEN%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' IN%'
+                -- Column on left side of operator
+                UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '>%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '<%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' !=%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' BETWEEN%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IN%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IS %'
+                -- Column on right side of operator
+                OR UPPER(text) LIKE '%WHERE%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%=' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%> ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%>' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%< ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%<' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%!= ' || v_col_pattern || '%'
+                -- With table alias (t.column_name, o.column_name, etc)
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '%WHERE%= %.' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%> %.' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%< %.' || v_col_pattern || '%'
             );
         EXCEPTION WHEN OTHERS THEN
             v_view_where_count := 0;
         END;
 
         -- Check usage in views - JOIN conditions
+        -- Match column on BOTH left and right side, with or without table alias
         BEGIN
             SELECT COUNT(*)
             INTO v_view_join_count
             FROM dba_views
             WHERE owner = p_owner
             AND (
-                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%JOIN%' || v_col_pattern || ' =%'
+                -- Column on left side of JOIN condition
+                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '=%'
                 OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
                 OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
+                -- Column on right side of JOIN condition
+                OR UPPER(text) LIKE '%JOIN%ON%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%JOIN%ON%=' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%ON%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%ON%=' || v_col_pattern || '%'
+                -- With table alias
+                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%ON%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%= %.' || v_col_pattern || '%'
             );
         EXCEPTION WHEN OTHERS THEN
             v_view_join_count := 0;
         END;
 
         -- Check usage in stored procedures, functions, packages - WHERE clauses
+        -- Match column on BOTH left and right side, with or without table alias
         BEGIN
             SELECT COUNT(*)
             INTO v_source_where_count
@@ -147,20 +180,40 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             WHERE owner = p_owner
             AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
             AND (
-                UPPER(text) LIKE '%WHERE%' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' %'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' BETWEEN%'
-                OR UPPER(text) LIKE '% ' || v_col_pattern || ' IN%'
+                -- Column on left side of operator
+                UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '>%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '<%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' !=%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' BETWEEN%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IN%'
+                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IS %'
+                -- Column on right side of operator
+                OR UPPER(text) LIKE '%WHERE%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%=' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%> ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%>' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%< ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%<' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%!= ' || v_col_pattern || '%'
+                -- With table alias
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' >%'
+                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' <%'
+                OR UPPER(text) LIKE '%WHERE%= %.' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%> %.' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%WHERE%< %.' || v_col_pattern || '%'
             );
         EXCEPTION WHEN OTHERS THEN
             v_source_where_count := 0;
         END;
 
         -- Check usage in stored procedures, functions, packages - JOIN conditions
+        -- Match column on BOTH left and right side, with or without table alias
         BEGIN
             SELECT COUNT(*)
             INTO v_source_join_count
@@ -168,10 +221,21 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             WHERE owner = p_owner
             AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
             AND (
-                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%JOIN%' || v_col_pattern || ' =%'
+                -- Column on left side of JOIN condition
+                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '=%'
                 OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
                 OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
+                -- Column on right side of JOIN condition
+                OR UPPER(text) LIKE '%JOIN%ON%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%JOIN%ON%=' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%ON%= ' || v_col_pattern || '%'
+                OR UPPER(text) LIKE '%ON%=' || v_col_pattern || '%'
+                -- With table alias
+                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || '=%'
+                OR UPPER(text) LIKE '%ON%.' || v_col_pattern || ' =%'
+                OR UPPER(text) LIKE '%ON%= %.' || v_col_pattern || '%'
             );
         EXCEPTION WHEN OTHERS THEN
             v_source_join_count := 0;
