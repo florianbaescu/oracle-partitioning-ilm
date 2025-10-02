@@ -588,10 +588,108 @@ END;
 
 
 -- =============================================================================
--- SECTION 12: TROUBLESHOOTING
+-- SECTION 12: COMPREHENSIVE DATE COLUMN ANALYSIS
 -- =============================================================================
 
--- Example 27: Find failed migrations
+-- Example 27: View all date columns analyzed for a table
+SELECT * FROM dwh_v_date_column_analysis
+WHERE source_table = 'SALES_FACT';
+
+-- Example 28: Parse JSON to see all date columns for a specific task
+SELECT
+    task_name,
+    source_table,
+    primary_date_column,
+    date_format_detected,
+    JSON_QUERY(all_date_columns_analysis, '$[*]' WITH WRAPPER) AS all_columns_json
+FROM dwh_v_date_column_analysis
+WHERE task_id = 1;
+
+-- Example 29: Extract detailed date column info from JSON
+-- Shows all date columns with their ranges and characteristics
+SELECT
+    a.task_name,
+    a.source_table,
+    jt.*
+FROM dwh_v_date_column_analysis a,
+JSON_TABLE(
+    a.all_date_columns_analysis, '$[*]'
+    COLUMNS (
+        column_name VARCHAR2(128) PATH '$.column_name',
+        data_type VARCHAR2(30) PATH '$.data_type',
+        min_date VARCHAR2(20) PATH '$.min_date',
+        max_date VARCHAR2(20) PATH '$.max_date',
+        range_days NUMBER PATH '$.range_days',
+        range_years NUMBER PATH '$.range_years',
+        is_primary VARCHAR2(5) PATH '$.is_primary'
+    )
+) jt
+WHERE a.task_id = 1
+ORDER BY jt.range_days DESC;
+
+-- Example 30: Find tables with multiple date columns
+SELECT
+    task_name,
+    source_table,
+    primary_date_column,
+    JSON_VALUE(all_date_columns_analysis, '$.size()') AS num_date_columns,
+    all_date_columns_analysis
+FROM dwh_v_date_column_analysis
+WHERE JSON_VALUE(all_date_columns_analysis, '$.size()') > 1
+ORDER BY num_date_columns DESC;
+
+-- Example 31: Analyze a table with non-standard date columns
+-- This example shows how the analyzer handles tables without stereotype patterns
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    -- Create task for a table with custom date columns
+    INSERT INTO dwh_migration_tasks (
+        task_name, source_owner, source_table, status
+    ) VALUES (
+        'Analyze Custom Date Table', USER, 'MY_CUSTOM_TABLE', 'PENDING'
+    ) RETURNING task_id INTO v_task_id;
+
+    -- Run analysis - it will analyze ALL date columns
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+
+    -- View comprehensive analysis
+    DBMS_OUTPUT.PUT_LINE('=== Date Column Analysis Results ===');
+
+    FOR col IN (
+        SELECT jt.*
+        FROM dwh_migration_analysis a,
+        JSON_TABLE(
+            a.all_date_columns_analysis, '$[*]'
+            COLUMNS (
+                column_name VARCHAR2(128) PATH '$.column_name',
+                min_date VARCHAR2(20) PATH '$.min_date',
+                max_date VARCHAR2(20) PATH '$.max_date',
+                range_days NUMBER PATH '$.range_days',
+                is_primary VARCHAR2(5) PATH '$.is_primary'
+            )
+        ) jt
+        WHERE a.task_id = v_task_id
+        ORDER BY jt.range_days DESC
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE(
+            col.column_name || ': ' ||
+            col.min_date || ' to ' || col.max_date ||
+            ' (' || col.range_days || ' days)' ||
+            CASE WHEN col.is_primary = 'true' THEN ' [PRIMARY]' ELSE '' END
+        );
+    END LOOP;
+
+    COMMIT;
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 13: TROUBLESHOOTING
+-- =============================================================================
+
+-- Example 32: Find failed migrations
 SELECT
     task_id,
     task_name,

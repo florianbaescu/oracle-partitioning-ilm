@@ -1003,6 +1003,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_date_type VARCHAR2(30);
         v_conversion_expr VARCHAR2(500);
         v_requires_conversion CHAR(1) := 'N';
+        v_all_date_analysis CLOB;
+        v_date_found BOOLEAN := FALSE;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
@@ -1026,18 +1028,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         v_table_size := get_table_size_mb(v_task.source_owner, v_task.source_table);
 
-        -- Check for standard DATE/TIMESTAMP columns first (preferred for partitioning)
+        -- Comprehensive date column analysis
         DECLARE
             v_scd2_type VARCHAR2(30);
             v_event_column VARCHAR2(128);
             v_staging_column VARCHAR2(128);
             v_hist_column VARCHAR2(128);
+            v_date_columns SYS.ODCIVARCHAR2LIST;
+            v_min_date DATE;
+            v_max_date DATE;
+            v_range_days NUMBER;
+            v_max_range NUMBER := 0;
+            v_json_analysis VARCHAR2(32767);
         BEGIN
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
                 v_date_type := 'DATE';
                 v_date_format := v_scd2_type;
                 v_conversion_expr := v_date_column;
+                v_date_found := TRUE;
                 DBMS_OUTPUT.PUT_LINE('Detected SCD2 date column: ' || v_date_column || ' (Type: ' || v_scd2_type || ')');
             -- Try Events pattern
             ELSIF detect_events_table(v_task.source_owner, v_task.source_table, v_event_column) THEN
@@ -1045,6 +1054,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_date_type := 'DATE';
                 v_date_format := 'EVENTS';
                 v_conversion_expr := v_date_column;
+                v_date_found := TRUE;
                 DBMS_OUTPUT.PUT_LINE('Detected Events date column: ' || v_date_column);
             -- Try Staging pattern
             ELSIF detect_staging_table(v_task.source_owner, v_task.source_table, v_staging_column) THEN
@@ -1052,6 +1062,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_date_type := 'DATE';
                 v_date_format := 'STAGING';
                 v_conversion_expr := v_date_column;
+                v_date_found := TRUE;
                 DBMS_OUTPUT.PUT_LINE('Detected Staging date column: ' || v_date_column);
             -- Try HIST pattern
             ELSIF detect_hist_table(v_task.source_owner, v_task.source_table, v_hist_column) THEN
@@ -1059,41 +1070,68 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_date_type := 'DATE';
                 v_date_format := 'HIST';
                 v_conversion_expr := v_date_column;
+                v_date_found := TRUE;
                 DBMS_OUTPUT.PUT_LINE('Detected HIST date column: ' || v_date_column);
-            ELSE
-                -- Try to find any DATE column
-                DECLARE
-                    v_date_columns SYS.ODCIVARCHAR2LIST;
-                    v_min_date DATE;
-                    v_max_date DATE;
-                    v_range_days NUMBER;
-                    v_max_range NUMBER := 0;
-                BEGIN
-                    v_date_columns := get_date_columns(v_task.source_owner, v_task.source_table);
+            END IF;
 
-                    IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
-                        -- Find date column with widest range
-                        FOR i IN 1..v_date_columns.COUNT LOOP
-                            IF analyze_date_column(
-                                v_task.source_owner, v_task.source_table, v_date_columns(i),
-                                v_min_date, v_max_date, v_range_days
-                            ) THEN
-                                IF v_range_days > v_max_range THEN
-                                    v_max_range := v_range_days;
-                                    v_date_column := v_date_columns(i);
-                                    v_date_type := 'DATE';
-                                    v_date_format := 'STANDARD';
-                                    v_conversion_expr := v_date_column;
-                                END IF;
+            -- Analyze ALL date columns for comprehensive analysis
+            DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE);
+            DBMS_LOB.APPEND(v_all_date_analysis, '[');
+
+            v_date_columns := get_date_columns(v_task.source_owner, v_task.source_table);
+
+            IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
+                DBMS_OUTPUT.PUT_LINE('Analyzing ' || v_date_columns.COUNT || ' date column(s)...');
+
+                FOR i IN 1..v_date_columns.COUNT LOOP
+                    IF analyze_date_column(
+                        v_task.source_owner, v_task.source_table, v_date_columns(i),
+                        v_min_date, v_max_date, v_range_days
+                    ) THEN
+                        -- Build JSON entry for this date column
+                        IF i > 1 THEN
+                            DBMS_LOB.APPEND(v_all_date_analysis, ',');
+                        END IF;
+
+                        v_json_analysis := '{' ||
+                            '"column_name":"' || v_date_columns(i) || '",' ||
+                            '"data_type":"DATE",' ||
+                            '"min_date":"' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' ||
+                            '"max_date":"' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' ||
+                            '"range_days":' || v_range_days || ',' ||
+                            '"range_years":' || ROUND(v_range_days/365.25, 2) || ',' ||
+                            '"is_primary":' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END ||
+                        '}';
+
+                        DBMS_LOB.APPEND(v_all_date_analysis, v_json_analysis);
+
+                        DBMS_OUTPUT.PUT_LINE('  - ' || v_date_columns(i) || ': ' ||
+                            TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' ||
+                            TO_CHAR(v_max_date, 'YYYY-MM-DD') || ' (' || v_range_days || ' days)');
+
+                        -- If no stereotype found, pick column with widest range
+                        IF NOT v_date_found THEN
+                            IF v_range_days > v_max_range THEN
+                                v_max_range := v_range_days;
+                                v_date_column := v_date_columns(i);
+                                v_date_type := 'DATE';
+                                v_date_format := 'STANDARD';
+                                v_conversion_expr := v_date_column;
                             END IF;
-                        END LOOP;
-
-                        IF v_date_column IS NOT NULL THEN
-                            DBMS_OUTPUT.PUT_LINE('Detected standard date column: ' || v_date_column || ' (Range: ' || v_max_range || ' days)');
                         END IF;
                     END IF;
-                END;
+                END LOOP;
+
+                -- If we found a date column via range analysis
+                IF NOT v_date_found AND v_date_column IS NOT NULL THEN
+                    v_date_found := TRUE;
+                    DBMS_OUTPUT.PUT_LINE('Selected date column by range: ' || v_date_column || ' (' || v_max_range || ' days)');
+                END IF;
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('No DATE/TIMESTAMP columns found');
             END IF;
+
+            DBMS_LOB.APPEND(v_all_date_analysis, ']');
         END;
 
         -- If no standard DATE column found, check for non-standard formats (NUMBER or VARCHAR-based dates)
@@ -1159,6 +1197,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             date_format_detected,
             date_conversion_expr,
             requires_conversion,
+            all_date_columns_analysis,
             estimated_partitions,
             avg_partition_size_mb,
             estimated_compression_ratio,
@@ -1177,6 +1216,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_date_format,
             v_conversion_expr,
             v_requires_conversion,
+            v_all_date_analysis,
             v_partition_count,
             CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
             CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,  -- Estimate 4:1 compression

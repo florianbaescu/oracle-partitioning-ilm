@@ -117,11 +117,14 @@ CREATE TABLE dwh_migration_analysis (
     recommendation_reason VARCHAR2(1000),
 
     -- Date column conversion (for non-standard date formats)
-    date_column_name    VARCHAR2(128),         -- Original date column name
+    date_column_name    VARCHAR2(128),         -- Primary date column selected for partitioning
     date_column_type    VARCHAR2(30),          -- Original data type (NUMBER, VARCHAR2, etc.)
     date_format_detected VARCHAR2(50),         -- Detected format (YYYYMMDD, UNIX_TIMESTAMP, etc.)
     date_conversion_expr VARCHAR2(500),        -- Conversion expression for migration
     requires_conversion CHAR(1) DEFAULT 'N',   -- Y if date conversion needed
+
+    -- Comprehensive date column analysis (JSON format)
+    all_date_columns_analysis CLOB,            -- JSON array of all date columns analyzed
 
     -- Partition estimates
     estimated_partitions NUMBER,
@@ -465,6 +468,34 @@ GROUP BY
     t.owner, t.table_name, t.num_rows, s.bytes,
     t.partitioned, t.compression
 ORDER BY t.num_rows DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- Date Column Analysis View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_date_column_analysis AS
+SELECT
+    t.task_id,
+    t.task_name,
+    t.source_owner,
+    t.source_table,
+    a.date_column_name AS primary_date_column,
+    a.date_column_type,
+    a.date_format_detected,
+    a.requires_conversion,
+    a.all_date_columns_analysis,
+    -- Extract JSON array length to show count of date columns
+    JSON_VALUE(a.all_date_columns_analysis, '$.size()') AS total_date_columns,
+    a.recommended_strategy,
+    a.recommendation_reason,
+    a.analysis_date
+FROM dwh_migration_tasks t
+JOIN dwh_migration_analysis a ON a.task_id = t.task_id
+WHERE a.all_date_columns_analysis IS NOT NULL
+ORDER BY a.analysis_date DESC;
+
+COMMENT ON VIEW dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
 
 
 -- =============================================================================
