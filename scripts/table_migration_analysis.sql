@@ -100,143 +100,222 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_source_join_count NUMBER := 0;
         v_index_count NUMBER := 0;
         v_col_pattern VARCHAR2(200);
+        v_text_clob CLOB;
+        v_where_found BOOLEAN;
+        v_join_found BOOLEAN;
     BEGIN
         v_col_pattern := UPPER(p_column_name);
 
         -- Check usage in views - WHERE clauses
         -- Match column on BOTH left and right side of operators, with or without table alias
+        -- Handle LONG column properly by converting to CLOB
         BEGIN
-            SELECT COUNT(*)
-            INTO v_view_where_count
-            FROM dba_views
-            WHERE owner = p_owner
-            AND (
-                -- Column on left side of operator
-                UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '>%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '<%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' !=%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' BETWEEN%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IN%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IS %'
-                -- Column on right side of operator
-                OR UPPER(text) LIKE '%WHERE%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%=' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%> ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%>' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%< ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%<' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%!= ' || v_col_pattern || '%'
-                -- With table alias (t.column_name, o.column_name, etc)
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '%WHERE%= %.' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%> %.' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%< %.' || v_col_pattern || '%'
-            );
+            FOR rec IN (
+                SELECT view_name, text
+                FROM dba_views
+                WHERE owner = p_owner
+            ) LOOP
+                BEGIN
+                    -- Convert LONG to CLOB
+                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
+                    DBMS_LOB.APPEND(v_text_clob, rec.text);
+
+                    v_where_found := FALSE;
+
+                    -- Check WHERE clause patterns (column on left or right, with or without alias)
+                    IF DBMS_LOB.INSTR(v_text_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            -- Column on left
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            -- Column on right
+                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            -- With alias
+                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+
+                    IF v_where_found THEN
+                        v_view_where_count := v_view_where_count + 1;
+                    END IF;
+
+                    DBMS_LOB.FREETEMPORARY(v_text_clob);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
+                            DBMS_LOB.FREETEMPORARY(v_text_clob);
+                        END IF;
+                END;
+            END LOOP;
         EXCEPTION WHEN OTHERS THEN
             v_view_where_count := 0;
         END;
 
         -- Check usage in views - JOIN conditions
         -- Match column on BOTH left and right side, with or without table alias
+        -- Handle LONG column properly
         BEGIN
-            SELECT COUNT(*)
-            INTO v_view_join_count
-            FROM dba_views
-            WHERE owner = p_owner
-            AND (
-                -- Column on left side of JOIN condition
-                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
-                -- Column on right side of JOIN condition
-                OR UPPER(text) LIKE '%JOIN%ON%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%JOIN%ON%=' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%ON%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%ON%=' || v_col_pattern || '%'
-                -- With table alias
-                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%ON%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%ON%= %.' || v_col_pattern || '%'
-            );
+            FOR rec IN (
+                SELECT view_name, text
+                FROM dba_views
+                WHERE owner = p_owner
+            ) LOOP
+                BEGIN
+                    -- Convert LONG to CLOB
+                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
+                    DBMS_LOB.APPEND(v_text_clob, rec.text);
+
+                    v_join_found := FALSE;
+
+                    -- Check JOIN condition patterns
+                    IF DBMS_LOB.INSTR(v_text_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            -- Column on left of JOIN
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            -- Column on right of JOIN
+                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            -- With alias
+                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+
+                    IF v_join_found THEN
+                        v_view_join_count := v_view_join_count + 1;
+                    END IF;
+
+                    DBMS_LOB.FREETEMPORARY(v_text_clob);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
+                            DBMS_LOB.FREETEMPORARY(v_text_clob);
+                        END IF;
+                END;
+            END LOOP;
         EXCEPTION WHEN OTHERS THEN
             v_view_join_count := 0;
         END;
 
         -- Check usage in stored procedures, functions, packages - WHERE clauses
         -- Match column on BOTH left and right side, with or without table alias
+        -- Use DBMS_METADATA or CLOB aggregation to get complete source without truncation
         BEGIN
-            SELECT COUNT(*)
-            INTO v_source_where_count
-            FROM dba_source
-            WHERE owner = p_owner
-            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
-            AND (
-                -- Column on left side of operator
-                UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '>%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || '<%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' !=%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' BETWEEN%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IN%'
-                OR UPPER(text) LIKE '%WHERE%' || v_col_pattern || ' IS %'
-                -- Column on right side of operator
-                OR UPPER(text) LIKE '%WHERE%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%=' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%> ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%>' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%< ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%<' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%!= ' || v_col_pattern || '%'
-                -- With table alias
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' >%'
-                OR UPPER(text) LIKE '%WHERE%.' || v_col_pattern || ' <%'
-                OR UPPER(text) LIKE '%WHERE%= %.' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%> %.' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%WHERE%< %.' || v_col_pattern || '%'
-            );
+            FOR obj IN (
+                SELECT DISTINCT name, type
+                FROM dba_source
+                WHERE owner = p_owner
+                AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+            ) LOOP
+                BEGIN
+                    -- Aggregate all lines into CLOB using XML to avoid LISTAGG limit
+                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
+
+                    FOR line IN (
+                        SELECT text
+                        FROM dba_source
+                        WHERE owner = p_owner
+                        AND name = obj.name
+                        AND type = obj.type
+                        ORDER BY line
+                    ) LOOP
+                        DBMS_LOB.APPEND(v_text_clob, line.text);
+                    END LOOP;
+
+                    -- Search in complete source code (no truncation)
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_text_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            -- Column on left
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            -- Column on right
+                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            -- With alias
+                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+
+                    IF v_where_found THEN
+                        v_source_where_count := v_source_where_count + 1;
+                    END IF;
+
+                    DBMS_LOB.FREETEMPORARY(v_text_clob);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
+                            DBMS_LOB.FREETEMPORARY(v_text_clob);
+                        END IF;
+                END;
+            END LOOP;
         EXCEPTION WHEN OTHERS THEN
             v_source_where_count := 0;
         END;
 
         -- Check usage in stored procedures, functions, packages - JOIN conditions
         -- Match column on BOTH left and right side, with or without table alias
+        -- Use CLOB aggregation for complete source without truncation
         BEGIN
-            SELECT COUNT(*)
-            INTO v_source_join_count
-            FROM dba_source
-            WHERE owner = p_owner
-            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
-            AND (
-                -- Column on left side of JOIN condition
-                UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%JOIN%ON%' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%ON%' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%ON%' || v_col_pattern || '=%'
-                -- Column on right side of JOIN condition
-                OR UPPER(text) LIKE '%JOIN%ON%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%JOIN%ON%=' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%ON%= ' || v_col_pattern || '%'
-                OR UPPER(text) LIKE '%ON%=' || v_col_pattern || '%'
-                -- With table alias
-                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%JOIN%ON%.' || v_col_pattern || '=%'
-                OR UPPER(text) LIKE '%ON%.' || v_col_pattern || ' =%'
-                OR UPPER(text) LIKE '%ON%= %.' || v_col_pattern || '%'
-            );
+            FOR obj IN (
+                SELECT DISTINCT name, type
+                FROM dba_source
+                WHERE owner = p_owner
+                AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+            ) LOOP
+                BEGIN
+                    -- Aggregate all lines into CLOB
+                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
+
+                    FOR line IN (
+                        SELECT text
+                        FROM dba_source
+                        WHERE owner = p_owner
+                        AND name = obj.name
+                        AND type = obj.type
+                        ORDER BY line
+                    ) LOOP
+                        DBMS_LOB.APPEND(v_text_clob, line.text);
+                    END LOOP;
+
+                    -- Search in complete source code
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_text_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            -- Column on left
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            -- Column on right
+                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            -- With alias
+                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+
+                    IF v_join_found THEN
+                        v_source_join_count := v_source_join_count + 1;
+                    END IF;
+
+                    DBMS_LOB.FREETEMPORARY(v_text_clob);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
+                            DBMS_LOB.FREETEMPORARY(v_text_clob);
+                        END IF;
+                END;
+            END LOOP;
         EXCEPTION WHEN OTHERS THEN
             v_source_join_count := 0;
         END;
