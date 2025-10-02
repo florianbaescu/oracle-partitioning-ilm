@@ -59,7 +59,7 @@ BEGIN
             BEGIN
                 -- Check if auto execution is enabled
                 SELECT config_value INTO v_enabled
-                FROM dwh_ilm_config
+                FROM cmr.dwh_ilm_config
                 WHERE config_key = ''ENABLE_AUTO_EXECUTION'';
 
                 IF v_enabled = ''Y'' THEN

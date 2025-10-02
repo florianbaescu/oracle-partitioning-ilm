@@ -97,7 +97,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             END IF;
         END IF;
 
-        INSERT INTO dwh_ilm_execution_log (
+        INSERT INTO cmr.dwh_ilm_execution_log (
             policy_id, policy_name, table_owner, table_name, partition_name,
             execution_start, execution_end, duration_seconds, status,
             action_type, action_sql,
@@ -375,17 +375,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
     BEGIN
         -- Get queue item
         SELECT * INTO v_queue
-        FROM dwh_ilm_evaluation_queue
+        FROM cmr.dwh_ilm_evaluation_queue
         WHERE queue_id = p_queue_id
         FOR UPDATE;
 
         -- Get policy
         SELECT * INTO v_policy
-        FROM dwh_ilm_policies
+        FROM cmr.dwh_ilm_policies
         WHERE policy_id = v_queue.policy_id;
 
         -- Update queue status
-        UPDATE dwh_ilm_evaluation_queue
+        UPDATE cmr.dwh_ilm_evaluation_queue
         SET execution_status = 'RUNNING'
         WHERE queue_id = p_queue_id;
         COMMIT;
@@ -488,7 +488,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         );
 
         -- Update queue
-        UPDATE dwh_ilm_evaluation_queue
+        UPDATE cmr.dwh_ilm_evaluation_queue
         SET execution_status = 'EXECUTED',
             execution_id = v_execution_id
         WHERE queue_id = p_queue_id;
@@ -500,7 +500,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             ROLLBACK;
             DBMS_OUTPUT.PUT_LINE('ERROR executing action: ' || SQLERRM);
 
-            UPDATE dwh_ilm_evaluation_queue
+            UPDATE cmr.dwh_ilm_evaluation_queue
             SET execution_status = 'FAILED'
             WHERE queue_id = p_queue_id;
 
@@ -518,7 +518,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
         FOR queue_item IN (
             SELECT queue_id
-            FROM dwh_ilm_evaluation_queue
+            FROM cmr.dwh_ilm_evaluation_queue
             WHERE policy_id = p_policy_id
             AND execution_status = 'PENDING'
             AND eligible = 'Y'
@@ -561,8 +561,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 q.policy_id,
                 p.policy_name,
                 p.priority
-            FROM dwh_ilm_evaluation_queue q
-            JOIN dwh_ilm_policies p ON p.policy_id = q.policy_id
+            FROM cmr.dwh_ilm_evaluation_queue q
+            JOIN cmr.dwh_ilm_policies p ON p.policy_id = q.policy_id
             WHERE q.execution_status = 'PENDING'
             AND q.eligible = 'Y'
             AND p.enabled = 'Y'
@@ -574,7 +574,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
             FOR queue_item IN (
                 SELECT queue_id
-                FROM dwh_ilm_evaluation_queue
+                FROM cmr.dwh_ilm_evaluation_queue
                 WHERE policy_id = pol.policy_id
                 AND execution_status = 'PENDING'
                 AND eligible = 'Y'

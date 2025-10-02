@@ -92,7 +92,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         ELSE
             -- Fall back to access tracking
             SELECT days_since_write INTO v_age_days
-            FROM dwh_ilm_partition_access
+            FROM cmr.dwh_ilm_partition_access
             WHERE table_owner = p_table_owner
             AND table_name = p_table_name
             AND partition_name = p_partition_name;
@@ -136,7 +136,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         v_temperature VARCHAR2(10);
     BEGIN
         SELECT temperature INTO v_temperature
-        FROM dwh_ilm_partition_access
+        FROM cmr.dwh_ilm_partition_access
         WHERE table_owner = p_table_owner
         AND table_name = p_table_name
         AND partition_name = p_partition_name;
@@ -172,7 +172,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
     BEGIN
         -- Get policy details
         SELECT * INTO v_policy
-        FROM dwh_ilm_policies
+        FROM cmr.dwh_ilm_policies
         WHERE policy_id = p_policy_id;
 
         -- Check if policy is enabled
@@ -292,7 +292,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
     BEGIN
         -- Get policy
         SELECT * INTO v_policy
-        FROM dwh_ilm_policies
+        FROM cmr.dwh_ilm_policies
         WHERE policy_id = p_policy_id;
 
         DBMS_OUTPUT.PUT_LINE('Evaluating policy: ' || v_policy.policy_name);
@@ -317,7 +317,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
                 v_count := v_count + 1;
 
                 -- Add to evaluation queue
-                INSERT INTO dwh_ilm_evaluation_queue (
+                INSERT INTO cmr.dwh_ilm_evaluation_queue (
                     policy_id, table_owner, table_name, partition_name,
                     evaluation_date, eligible, reason, execution_status
                 ) VALUES (
@@ -351,7 +351,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
 
         FOR pol IN (
             SELECT policy_id, policy_name
-            FROM dwh_ilm_policies
+            FROM cmr.dwh_ilm_policies
             WHERE table_owner = p_table_owner
             AND table_name = p_table_name
             AND enabled = 'Y'
@@ -376,7 +376,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         DBMS_OUTPUT.PUT_LINE('========================================');
 
         -- Clear old evaluation queue
-        DELETE FROM dwh_ilm_evaluation_queue
+        DELETE FROM cmr.dwh_ilm_evaluation_queue
         WHERE execution_status = 'PENDING'
         AND evaluation_date < SYSTIMESTAMP - INTERVAL '7' DAY;
 
@@ -388,7 +388,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         -- Evaluate each enabled policy
         FOR pol IN (
             SELECT policy_id, policy_name, table_owner, table_name
-            FROM dwh_ilm_policies
+            FROM cmr.dwh_ilm_policies
             WHERE enabled = 'Y'
             ORDER BY priority, policy_id
         ) LOOP
@@ -398,7 +398,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
 
         -- Get total eligible count
         SELECT COUNT(*) INTO v_total_eligible
-        FROM dwh_ilm_evaluation_queue
+        FROM cmr.dwh_ilm_evaluation_queue
         WHERE execution_status = 'PENDING'
         AND eligible = 'Y';
 
@@ -416,10 +416,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         v_deleted NUMBER;
     BEGIN
         IF p_policy_id IS NULL THEN
-            DELETE FROM dwh_ilm_evaluation_queue
+            DELETE FROM cmr.dwh_ilm_evaluation_queue
             WHERE execution_status = 'PENDING';
         ELSE
-            DELETE FROM dwh_ilm_evaluation_queue
+            DELETE FROM cmr.dwh_ilm_evaluation_queue
             WHERE policy_id = p_policy_id
             AND execution_status = 'PENDING';
         END IF;

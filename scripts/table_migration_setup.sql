@@ -11,7 +11,7 @@
 -- Migration Projects - Track migration initiatives
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_migration_projects (
+CREATE TABLE cmr.dwh_migration_projects (
     project_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     project_name        VARCHAR2(100) NOT NULL UNIQUE,
     description         VARCHAR2(500),
@@ -24,14 +24,14 @@ CREATE TABLE dwh_migration_projects (
     CONSTRAINT chk_proj_status CHECK (status IN ('PLANNING', 'ANALYSIS', 'READY', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'ROLLED_BACK'))
 );
 
-COMMENT ON TABLE dwh_migration_projects IS 'Migration project tracking';
+COMMENT ON TABLE cmr.dwh_migration_projects IS 'Migration project tracking';
 
 
 -- -----------------------------------------------------------------------------
 -- Migration Tasks - Individual table migrations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_migration_tasks (
+CREATE TABLE cmr.dwh_migration_tasks (
     task_id             NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     project_id          NUMBER,
     task_name           VARCHAR2(100) NOT NULL,
@@ -82,23 +82,23 @@ CREATE TABLE dwh_migration_tasks (
     created_by          VARCHAR2(50) DEFAULT USER,
     created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
 
-    CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES dwh_migration_projects(project_id),
+    CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
     CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'ANALYZING', 'ANALYZED', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')),
     CONSTRAINT chk_mig_method CHECK (migration_method IN ('ONLINE', 'OFFLINE', 'CTAS', 'EXCHANGE'))
 );
 
-CREATE INDEX idx_mig_task_project ON dwh_migration_tasks(project_id);
-CREATE INDEX idx_mig_task_source ON dwh_migration_tasks(source_owner, source_table);
-CREATE INDEX idx_mig_task_status ON dwh_migration_tasks(status);
+CREATE INDEX idx_mig_task_project ON cmr.dwh_migration_tasks(project_id);
+CREATE INDEX idx_mig_task_source ON cmr.dwh_migration_tasks(source_owner, source_table);
+CREATE INDEX idx_mig_task_status ON cmr.dwh_migration_tasks(status);
 
-COMMENT ON TABLE dwh_migration_tasks IS 'Individual table migration tasks';
+COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
 
 
 -- -----------------------------------------------------------------------------
 -- Migration Analysis Results - Store analysis recommendations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_migration_analysis (
+CREATE TABLE cmr.dwh_migration_analysis (
     analysis_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id             NUMBER NOT NULL,
 
@@ -144,19 +144,19 @@ CREATE TABLE dwh_migration_analysis (
 
     analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
 
-    CONSTRAINT fk_mig_analysis_task FOREIGN KEY (task_id) REFERENCES dwh_migration_tasks(task_id)
+    CONSTRAINT fk_mig_analysis_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
 );
 
-CREATE INDEX idx_mig_analysis_task ON dwh_migration_analysis(task_id);
+CREATE INDEX idx_mig_analysis_task ON cmr.dwh_migration_analysis(task_id);
 
-COMMENT ON TABLE dwh_migration_analysis IS 'Analysis results and recommendations for migrations';
+COMMENT ON TABLE cmr.dwh_migration_analysis IS 'Analysis results and recommendations for migrations';
 
 
 -- -----------------------------------------------------------------------------
 -- Migration Execution Log - Detailed step-by-step log
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_migration_execution_log (
+CREATE TABLE cmr.dwh_migration_execution_log (
     log_id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id             NUMBER NOT NULL,
 
@@ -174,19 +174,19 @@ CREATE TABLE dwh_migration_execution_log (
     error_code          NUMBER,
     error_message       VARCHAR2(4000),
 
-    CONSTRAINT fk_mig_log_task FOREIGN KEY (task_id) REFERENCES dwh_migration_tasks(task_id)
+    CONSTRAINT fk_mig_log_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
 );
 
-CREATE INDEX idx_mig_log_task ON dwh_migration_execution_log(task_id, step_number);
+CREATE INDEX idx_mig_log_task ON cmr.dwh_migration_execution_log(task_id, step_number);
 
-COMMENT ON TABLE dwh_migration_execution_log IS 'Detailed execution log for migrations';
+COMMENT ON TABLE cmr.dwh_migration_execution_log IS 'Detailed execution log for migrations';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Policy Templates for Migrations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_migration_ilm_templates (
+CREATE TABLE cmr.dwh_migration_ilm_templates (
     template_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     template_name       VARCHAR2(100) NOT NULL UNIQUE,
     description         VARCHAR2(500),
@@ -199,10 +199,10 @@ CREATE TABLE dwh_migration_ilm_templates (
     created_date        TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 
-COMMENT ON TABLE dwh_migration_ilm_templates IS 'ILM policy templates for newly migrated tables';
+COMMENT ON TABLE cmr.dwh_migration_ilm_templates IS 'ILM policy templates for newly migrated tables';
 
 -- Insert default templates
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'FACT_TABLE_STANDARD',
     'Standard ILM policies for fact tables: compress at 90d, tier at 12m, archive at 36m',
@@ -215,7 +215,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'DIMENSION_LARGE',
     'ILM policies for large dimension tables',
@@ -225,7 +225,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'STAGING_MINIMAL',
     'Minimal retention for staging tables',
@@ -235,7 +235,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'SCD2_EFFECTIVE_DATE',
     'ILM policies for SCD2 tables with effective_date - compress old versions, retain history',
@@ -247,7 +247,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'SCD2_VALID_FROM_TO',
     'ILM policies for SCD2 tables with valid_from_dttm/valid_to_dttm - compress old versions',
@@ -259,7 +259,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'EVENTS_SHORT_RETENTION',
     'ILM policies for event tables with 90-day retention (clickstream, app events)',
@@ -271,7 +271,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'EVENTS_COMPLIANCE',
     'ILM policies for audit/compliance event tables with 7-year retention',
@@ -285,7 +285,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'STAGING_7DAY',
     'Staging tables with 7-day retention',
@@ -295,7 +295,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'STAGING_CDC',
     'CDC staging tables with 30-day retention and compression',
@@ -306,7 +306,7 @@ VALUES (
     ]'
 );
 
-INSERT INTO dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
+INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
 VALUES (
     'STAGING_ERROR_QUARANTINE',
     'Error/quarantine tables with 1-year retention',
@@ -319,7 +319,7 @@ VALUES (
 );
 
 -- Historical/Snapshot Tables - Monthly retention
-INSERT INTO dwh_migration_ilm_templates VALUES (
+INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
     'HIST_MONTHLY',
     'Historical tables with monthly snapshots - 3 year retention',
     'HIST',
@@ -332,7 +332,7 @@ INSERT INTO dwh_migration_ilm_templates VALUES (
 );
 
 -- Historical/Snapshot Tables - Yearly snapshots
-INSERT INTO dwh_migration_ilm_templates VALUES (
+INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
     'HIST_YEARLY',
     'Historical tables with yearly snapshots - 7 year retention',
     'HIST',
@@ -345,7 +345,7 @@ INSERT INTO dwh_migration_ilm_templates VALUES (
 );
 
 -- Historical/Snapshot Tables - Compliance (permanent retention)
-INSERT INTO dwh_migration_ilm_templates VALUES (
+INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
     'HIST_COMPLIANCE',
     'Historical tables for compliance - permanent retention with compression',
     'HIST',
@@ -367,7 +367,7 @@ COMMIT;
 -- Migration Dashboard
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_migration_dashboard AS
+CREATE OR REPLACE VIEW cmr.dwh_v_migration_dashboard AS
 SELECT
     p.project_id,
     p.project_name,
@@ -382,8 +382,8 @@ SELECT
     p.created_date,
     p.started_date,
     p.completed_date
-FROM dwh_migration_projects p
-LEFT JOIN dwh_migration_tasks t ON t.project_id = p.project_id
+FROM cmr.dwh_migration_projects p
+LEFT JOIN cmr.dwh_migration_tasks t ON t.project_id = p.project_id
 GROUP BY
     p.project_id, p.project_name, p.status,
     p.created_date, p.started_date, p.completed_date
@@ -394,7 +394,7 @@ ORDER BY p.created_date DESC;
 -- Task Status View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_migration_task_status AS
+CREATE OR REPLACE VIEW cmr.dwh_v_migration_task_status AS
 SELECT
     t.task_id,
     t.task_name,
@@ -420,9 +420,9 @@ SELECT
     t.execution_end,
     t.duration_seconds,
     t.can_rollback
-FROM dwh_migration_tasks t
-LEFT JOIN dwh_migration_projects p ON p.project_id = t.project_id
-LEFT JOIN dwh_migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+LEFT JOIN cmr.dwh_migration_projects p ON p.project_id = t.project_id
+LEFT JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 ORDER BY t.created_date DESC;
 
 
@@ -430,7 +430,7 @@ ORDER BY t.created_date DESC;
 -- Candidate Tables for Migration
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_migration_candidates AS
+CREATE OR REPLACE VIEW cmr.dwh_v_migration_candidates AS
 SELECT
     t.owner,
     t.table_name,
@@ -474,7 +474,7 @@ ORDER BY t.num_rows DESC;
 -- Date Column Analysis View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_date_column_analysis AS
+CREATE OR REPLACE VIEW cmr.dwh_v_date_column_analysis AS
 SELECT
     t.task_id,
     t.task_name,
@@ -490,12 +490,12 @@ SELECT
     a.recommended_strategy,
     a.recommendation_reason,
     a.analysis_date
-FROM dwh_migration_tasks t
-JOIN dwh_migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE a.all_date_columns_analysis IS NOT NULL
 ORDER BY a.analysis_date DESC;
 
-COMMENT ON VIEW dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
+COMMENT ON VIEW cmr.dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
 
 
 -- =============================================================================
@@ -532,7 +532,7 @@ FROM user_tables
 WHERE table_name LIKE 'MIGRATION_%';
 
 SELECT 'ILM Templates Loaded: ' || COUNT(*) AS info
-FROM dwh_migration_ilm_templates;
+FROM cmr.dwh_migration_ilm_templates;
 
 PROMPT
 PROMPT ========================================
@@ -542,6 +542,6 @@ PROMPT
 PROMPT Next Steps:
 PROMPT 1. Install analysis package: @scripts/table_dwh_migration_analysis.sql
 PROMPT 2. Install execution package: @scripts/table_migration_execution.sql
-PROMPT 3. View candidates: SELECT * FROM dwh_v_migration_candidates;
+PROMPT 3. View candidates: SELECT * FROM cmr.dwh_v_migration_candidates;
 PROMPT
 PROMPT ========================================

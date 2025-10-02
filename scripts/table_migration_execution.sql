@@ -68,7 +68,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                      EXTRACT(MINUTE FROM (p_end_time - p_start_time)) * 60 +
                      EXTRACT(HOUR FROM (p_end_time - p_start_time)) * 3600;
 
-        INSERT INTO dwh_migration_execution_log (
+        INSERT INTO cmr.dwh_migration_execution_log (
             task_id, step_number, step_name, step_type, sql_statement,
             start_time, end_time, duration_seconds, status,
             error_code, error_message
@@ -123,8 +123,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         BEGIN
             SELECT requires_conversion, date_column_name
             INTO v_requires_conversion, v_date_column
-            FROM dwh_migration_analysis
-            WHERE task_id = (SELECT task_id FROM dwh_migration_tasks
+            FROM cmr.dwh_migration_analysis
+            WHERE task_id = (SELECT task_id FROM cmr.dwh_migration_tasks
                             WHERE source_owner = p_task.source_owner
                             AND source_table = p_task.source_table);
         EXCEPTION
@@ -363,7 +363,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_old_table VARCHAR2(128);
     BEGIN
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         DBMS_OUTPUT.PUT_LINE('Migrating using CTAS method: ' || v_task.source_table);
@@ -396,7 +396,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             -- Check if date conversion is required
             SELECT requires_conversion, date_column_name, date_conversion_expr
             INTO v_requires_conversion, v_date_column, v_conversion_expr
-            FROM dwh_migration_analysis
+            FROM cmr.dwh_migration_analysis
             WHERE task_id = p_task_id;
 
             IF v_requires_conversion = 'Y' AND v_date_column IS NOT NULL THEN
@@ -480,7 +480,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 'SUCCESS', v_start, SYSTIMESTAMP);
 
         -- Update task with backup name
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET backup_table_name = v_old_table,
             can_rollback = 'Y'
         WHERE task_id = p_task_id;
@@ -507,7 +507,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_start TIMESTAMP;
     BEGIN
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         DBMS_OUTPUT.PUT_LINE('Online redefinition not yet implemented');
@@ -544,7 +544,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     BEGIN
         -- Get task
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id
         FOR UPDATE;
 
@@ -564,7 +564,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_source_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
         -- Update status
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET status = 'RUNNING',
             execution_start = v_start_time
         WHERE task_id = p_task_id;
@@ -603,7 +603,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END IF;
 
         -- Update task
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET status = 'COMPLETED',
             execution_end = v_end_time,
             duration_seconds = EXTRACT(SECOND FROM (v_end_time - v_start_time)) +
@@ -627,7 +627,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DECLARE
                 v_error_msg VARCHAR2(4000) := SQLERRM;
             BEGIN
-                UPDATE dwh_migration_tasks
+                UPDATE cmr.dwh_migration_tasks
                 SET status = 'FAILED',
                     execution_end = SYSTIMESTAMP,
                     error_message = v_error_msg
@@ -648,7 +648,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     BEGIN
         FOR task IN (
             SELECT task_id, source_table
-            FROM dwh_migration_tasks
+            FROM cmr.dwh_migration_tasks
             WHERE (p_project_id IS NULL OR project_id = p_project_id)
             AND status IN ('READY', 'ANALYZED')
             AND validation_status = 'READY'
@@ -682,7 +682,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_policy_name VARCHAR2(100);
     BEGIN
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         IF v_task.ilm_policy_template IS NULL THEN
@@ -691,7 +691,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END IF;
 
         SELECT * INTO v_template
-        FROM dwh_migration_ilm_templates
+        FROM cmr.dwh_migration_ilm_templates
         WHERE template_name = v_task.ilm_policy_template;
 
         DBMS_OUTPUT.PUT_LINE('Applying ILM policies from template: ' || v_template.template_name);
@@ -716,7 +716,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_sql VARCHAR2(4000);
     BEGIN
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         IF v_task.backup_table_name IS NULL THEN
@@ -754,7 +754,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_sql VARCHAR2(4000);
     BEGIN
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         IF v_task.can_rollback != 'Y' OR v_task.backup_table_name IS NULL THEN
@@ -773,7 +773,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         EXECUTE IMMEDIATE v_sql;
 
         -- Update task
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET status = 'ROLLED_BACK',
             can_rollback = 'N'
         WHERE task_id = p_task_id;

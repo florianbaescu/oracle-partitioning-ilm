@@ -97,24 +97,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     ) RETURN BOOLEAN
     AS
         v_sql VARCHAR2(4000);
-        v_count NUMBER;
+        v_error_code NUMBER;
+        v_error_msg VARCHAR2(4000);
     BEGIN
-        -- Check if column has data
-        v_sql := 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
-                ' WHERE ' || p_column_name || ' IS NOT NULL';
-
-        EXECUTE IMMEDIATE v_sql INTO v_count;
-
-        IF v_count = 0 THEN
-            RETURN FALSE;
-        END IF;
-
-        -- Get date range
+        -- Get date range in a single query (optimized - no separate COUNT)
         v_sql := 'SELECT MIN(' || p_column_name || '), MAX(' || p_column_name || ')' ||
-                ' FROM ' || p_owner || '.' || p_table_name;
+                ' FROM ' || p_owner || '.' || p_table_name ||
+                ' WHERE ' || p_column_name || ' IS NOT NULL';
 
         EXECUTE IMMEDIATE v_sql INTO p_min_date, p_max_date;
 
+        -- If MIN/MAX are NULL, column has no data
         IF p_min_date IS NOT NULL AND p_max_date IS NOT NULL THEN
             p_range_days := p_max_date - p_min_date;
             RETURN TRUE;
@@ -123,6 +116,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         RETURN FALSE;
     EXCEPTION
         WHEN OTHERS THEN
+            v_error_code := SQLCODE;
+            v_error_msg := SQLERRM;
+
+            -- Log specific error types
+            IF v_error_code = -942 THEN
+                DBMS_OUTPUT.PUT_LINE('  ERROR analyzing ' || p_column_name || ': Table or view does not exist');
+            ELSIF v_error_code = -1031 THEN
+                DBMS_OUTPUT.PUT_LINE('  ERROR analyzing ' || p_column_name || ': Insufficient privileges to read table');
+            ELSIF v_error_code = -904 THEN
+                DBMS_OUTPUT.PUT_LINE('  ERROR analyzing ' || p_column_name || ': Invalid column name');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  ERROR analyzing ' || p_column_name || ': ' || v_error_msg);
+            END IF;
+
             RETURN FALSE;
     END analyze_date_column;
 
@@ -997,6 +1004,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_table_size NUMBER;
         v_dependent_objects CLOB;
         v_blocking_issues CLOB;
+        v_warnings CLOB;
         v_num_rows NUMBER;
         v_date_column VARCHAR2(128);
         v_date_format VARCHAR2(50);
@@ -1005,30 +1013,52 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_requires_conversion CHAR(1) := 'N';
         v_all_date_analysis CLOB;
         v_date_found BOOLEAN := FALSE;
+        v_error_count NUMBER := 0;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
-        FROM dwh_migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id
         FOR UPDATE;
 
         DBMS_OUTPUT.PUT_LINE('Analyzing table: ' || v_task.source_owner || '.' || v_task.source_table);
 
         -- Update task status and reset error message (supports rerun)
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET status = 'ANALYZING',
             analysis_date = SYSTIMESTAMP,
             error_message = NULL
         WHERE task_id = p_task_id;
         COMMIT;
 
-        -- Get table statistics
-        SELECT num_rows INTO v_num_rows
-        FROM dba_tables
-        WHERE owner = v_task.source_owner
-        AND table_name = v_task.source_table;
+        -- Initialize warnings tracking
+        DBMS_LOB.CREATETEMPORARY(v_warnings, TRUE);
+        DBMS_LOB.APPEND(v_warnings, '[');
 
-        v_table_size := get_table_size_mb(v_task.source_owner, v_task.source_table);
+        -- Get table statistics
+        BEGIN
+            SELECT num_rows INTO v_num_rows
+            FROM dba_tables
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_LOB.APPEND(v_warnings, '{"type":"ERROR","issue":"Table not found in DBA_TABLES","action":"Verify table exists and gather statistics"}');
+                v_num_rows := NULL;
+            WHEN OTHERS THEN
+                DBMS_LOB.APPEND(v_warnings, '{"type":"ERROR","issue":"Cannot access table metadata: ' || REPLACE(SQLERRM, '"', '\"') || '","action":"Check privileges"}');
+                v_num_rows := NULL;
+        END;
+
+        BEGIN
+            v_table_size := get_table_size_mb(v_task.source_owner, v_task.source_table);
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                DBMS_LOB.APPEND(v_warnings, '{"type":"WARNING","issue":"Cannot calculate table size: ' || REPLACE(SQLERRM, '"', '\"') || '"}');
+                v_error_count := v_error_count + 1;
+                v_table_size := 0;
+        END;
 
         -- Comprehensive date column analysis
         DECLARE
@@ -1187,8 +1217,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
+        -- Close warnings JSON array
+        DBMS_LOB.APPEND(v_warnings, ']');
+
         -- Store or update analysis results (supports rerun)
-        MERGE INTO dwh_migration_analysis a
+        MERGE INTO cmr.dwh_migration_analysis a
         USING (SELECT p_task_id AS task_id FROM DUAL) src
         ON (a.task_id = src.task_id)
         WHEN MATCHED THEN
@@ -1210,6 +1243,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 complexity_score = v_complexity,
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
+                warnings = v_warnings,
                 analysis_date = SYSTIMESTAMP
         WHEN NOT MATCHED THEN
             INSERT (
@@ -1231,6 +1265,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 complexity_score,
                 dependent_objects,
                 blocking_issues,
+                warnings,
                 analysis_date
             ) VALUES (
                 p_task_id,
@@ -1251,16 +1286,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_complexity,
                 v_dependent_objects,
                 v_blocking_issues,
+                v_warnings,
                 SYSTIMESTAMP
             );
 
         -- Get analysis_id for newly inserted or updated record
         SELECT analysis_id INTO v_analysis_id
-        FROM dwh_migration_analysis
+        FROM cmr.dwh_migration_analysis
         WHERE task_id = p_task_id;
 
         -- Update task
-        UPDATE dwh_migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET status = 'ANALYZED',
             source_rows = v_num_rows,
             source_size_mb = v_table_size,
@@ -1282,7 +1318,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             DECLARE
                 v_error_msg VARCHAR2(4000) := SQLERRM;
             BEGIN
-                UPDATE dwh_migration_tasks
+                UPDATE cmr.dwh_migration_tasks
                 SET status = 'FAILED',
                     error_message = 'Analysis failed: ' || v_error_msg
                 WHERE task_id = p_task_id;
@@ -1299,7 +1335,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     BEGIN
         FOR task IN (
             SELECT task_id, source_owner, source_table
-            FROM dwh_migration_tasks
+            FROM cmr.dwh_migration_tasks
             WHERE (p_project_id IS NULL OR project_id = p_project_id)
             AND status IN ('PENDING', 'READY')
             ORDER BY task_id

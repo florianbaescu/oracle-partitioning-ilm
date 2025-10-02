@@ -11,7 +11,7 @@
 -- ILM Policy Definitions
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_dwh_ilm_policies (
+CREATE TABLE cmr.dwh_ilm_policies (
     policy_id           NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     policy_name         VARCHAR2(100) NOT NULL UNIQUE,
     table_owner         VARCHAR2(30) DEFAULT USER,
@@ -49,17 +49,17 @@ CREATE TABLE dwh_dwh_ilm_policies (
     CONSTRAINT chk_action_type CHECK (action_type IN ('COMPRESS', 'MOVE', 'READ_ONLY', 'DROP', 'TRUNCATE', 'CUSTOM'))
 );
 
-CREATE INDEX idx_dwh_ilm_policies_table ON dwh_ilm_policies(table_owner, table_name);
-CREATE INDEX idx_dwh_ilm_policies_enabled ON dwh_ilm_policies(enabled, priority);
+CREATE INDEX idx_dwh_ilm_policies_table ON cmr.dwh_ilm_policies(table_owner, table_name);
+CREATE INDEX idx_dwh_ilm_policies_enabled ON cmr.dwh_ilm_policies(enabled, priority);
 
-COMMENT ON TABLE dwh_ilm_policies IS 'Custom ILM policy definitions';
+COMMENT ON TABLE cmr.dwh_ilm_policies IS 'Custom ILM policy definitions';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Execution History
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_ilm_execution_log (
+CREATE TABLE cmr.dwh_ilm_execution_log (
     execution_id        NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     policy_id           NUMBER NOT NULL,
     policy_name         VARCHAR2(100),
@@ -92,22 +92,22 @@ CREATE TABLE dwh_ilm_execution_log (
     executed_by         VARCHAR2(50) DEFAULT USER,
     execution_mode      VARCHAR2(20),
 
-    CONSTRAINT fk_ilm_exec_policy FOREIGN KEY (policy_id) REFERENCES dwh_ilm_policies(policy_id)
+    CONSTRAINT fk_ilm_exec_policy FOREIGN KEY (policy_id) REFERENCES cmr.dwh_ilm_policies(policy_id)
 );
 
-CREATE INDEX idx_ilm_exec_policy ON dwh_ilm_execution_log(policy_id);
-CREATE INDEX idx_ilm_exec_table ON dwh_ilm_execution_log(table_owner, table_name, partition_name);
-CREATE INDEX idx_ilm_exec_date ON dwh_ilm_execution_log(execution_start);
-CREATE INDEX idx_ilm_exec_status ON dwh_ilm_execution_log(status);
+CREATE INDEX idx_ilm_exec_policy ON cmr.dwh_ilm_execution_log(policy_id);
+CREATE INDEX idx_ilm_exec_table ON cmr.dwh_ilm_execution_log(table_owner, table_name, partition_name);
+CREATE INDEX idx_ilm_exec_date ON cmr.dwh_ilm_execution_log(execution_start);
+CREATE INDEX idx_ilm_exec_status ON cmr.dwh_ilm_execution_log(status);
 
-COMMENT ON TABLE dwh_ilm_execution_log IS 'History of ILM policy executions';
+COMMENT ON TABLE cmr.dwh_ilm_execution_log IS 'History of ILM policy executions';
 
 
 -- -----------------------------------------------------------------------------
 -- Partition Access Tracking (Custom Heat Map)
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_ilm_partition_access (
+CREATE TABLE cmr.dwh_ilm_partition_access (
     table_owner         VARCHAR2(30),
     table_name          VARCHAR2(128),
     partition_name      VARCHAR2(128),
@@ -135,17 +135,17 @@ CREATE TABLE dwh_ilm_partition_access (
     CONSTRAINT pk_dwh_ilm_partition_access PRIMARY KEY (table_owner, table_name, partition_name)
 );
 
-CREATE INDEX idx_ilm_access_temp ON dwh_ilm_partition_access(temperature);
-CREATE INDEX idx_ilm_access_write ON dwh_ilm_partition_access(days_since_write);
+CREATE INDEX idx_ilm_access_temp ON cmr.dwh_ilm_partition_access(temperature);
+CREATE INDEX idx_ilm_access_write ON cmr.dwh_ilm_partition_access(days_since_write);
 
-COMMENT ON TABLE dwh_ilm_partition_access IS 'Custom partition access tracking for ILM';
+COMMENT ON TABLE cmr.dwh_ilm_partition_access IS 'Custom partition access tracking for ILM';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Policy Evaluation Queue
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_ilm_evaluation_queue (
+CREATE TABLE cmr.dwh_ilm_evaluation_queue (
     queue_id            NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     policy_id           NUMBER NOT NULL,
     table_owner         VARCHAR2(30),
@@ -162,21 +162,21 @@ CREATE TABLE dwh_ilm_evaluation_queue (
     execution_status    VARCHAR2(20) DEFAULT 'PENDING',  -- PENDING, SCHEDULED, EXECUTED, FAILED
     execution_id        NUMBER,
 
-    CONSTRAINT fk_ilm_queue_policy FOREIGN KEY (policy_id) REFERENCES dwh_ilm_policies(policy_id),
-    CONSTRAINT fk_ilm_queue_exec FOREIGN KEY (execution_id) REFERENCES dwh_ilm_execution_log(execution_id)
+    CONSTRAINT fk_ilm_queue_policy FOREIGN KEY (policy_id) REFERENCES cmr.dwh_ilm_policies(policy_id),
+    CONSTRAINT fk_ilm_queue_exec FOREIGN KEY (execution_id) REFERENCES cmr.dwh_ilm_execution_log(execution_id)
 );
 
-CREATE INDEX idx_ilm_queue_status ON dwh_ilm_evaluation_queue(execution_status);
-CREATE INDEX idx_ilm_queue_eligible ON dwh_ilm_evaluation_queue(eligible, scheduled_date);
+CREATE INDEX idx_ilm_queue_status ON cmr.dwh_ilm_evaluation_queue(execution_status);
+CREATE INDEX idx_ilm_queue_eligible ON cmr.dwh_ilm_evaluation_queue(eligible, scheduled_date);
 
-COMMENT ON TABLE dwh_ilm_evaluation_queue IS 'Queue of partitions eligible for ILM actions';
+COMMENT ON TABLE cmr.dwh_ilm_evaluation_queue IS 'Queue of partitions eligible for ILM actions';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Configuration
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE dwh_ilm_config (
+CREATE TABLE cmr.dwh_ilm_config (
     config_key          VARCHAR2(100) PRIMARY KEY,
     config_value        VARCHAR2(4000),
     description         VARCHAR2(500),
@@ -185,36 +185,36 @@ CREATE TABLE dwh_ilm_config (
 );
 
 -- Insert default configuration
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('ENABLE_AUTO_EXECUTION', 'Y', 'Enable automatic policy execution via scheduler');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('EXECUTION_WINDOW_START', '22:00', 'Start time for ILM operations (HH24:MI)');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('EXECUTION_WINDOW_END', '06:00', 'End time for ILM operations (HH24:MI)');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('MAX_CONCURRENT_OPERATIONS', '4', 'Maximum number of concurrent partition operations');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('ACCESS_TRACKING_ENABLED', 'Y', 'Enable partition access tracking');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('HOT_THRESHOLD_DAYS', '90', 'Days threshold for HOT classification');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('WARM_THRESHOLD_DAYS', '365', 'Days threshold for WARM classification');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('COLD_THRESHOLD_DAYS', '1095', 'Days threshold for COLD classification (3 years)');
 
-INSERT INTO dwh_ilm_config (config_key, config_value, description) VALUES
+INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
     ('LOG_RETENTION_DAYS', '365', 'Days to retain execution logs');
 
 COMMIT;
 
-COMMENT ON TABLE dwh_ilm_config IS 'Configuration parameters for custom ILM framework';
+COMMENT ON TABLE cmr.dwh_ilm_config IS 'Configuration parameters for custom ILM framework';
 
 
 -- =============================================================================
@@ -240,11 +240,11 @@ SELECT
     p.priority,
     COUNT(q.queue_id) AS pending_actions,
     MAX(e.execution_end) AS last_execution
-FROM dwh_ilm_policies p
-LEFT JOIN dwh_ilm_evaluation_queue q
+FROM cmr.dwh_ilm_policies p
+LEFT JOIN cmr.dwh_ilm_evaluation_queue q
     ON q.policy_id = p.policy_id
     AND q.execution_status = 'PENDING'
-LEFT JOIN dwh_ilm_execution_log e
+LEFT JOIN cmr.dwh_ilm_execution_log e
     ON e.policy_id = p.policy_id
     AND e.status = 'SUCCESS'
 WHERE p.enabled = 'Y'
@@ -271,7 +271,7 @@ SELECT
     ROUND(AVG(duration_seconds), 2) AS avg_duration_sec,
     ROUND(SUM(space_saved_mb), 2) AS total_space_saved_mb,
     MAX(execution_end) AS last_execution
-FROM dwh_ilm_execution_log
+FROM cmr.dwh_ilm_execution_log
 GROUP BY table_owner, table_name, policy_name, action_type
 ORDER BY total_space_saved_mb DESC NULLS LAST;
 
@@ -299,7 +299,7 @@ SELECT
         WHEN a.days_since_write > 1095 THEN 'Purge candidate'
         ELSE 'Unknown'
     END AS recommendation
-FROM dwh_ilm_partition_access a
+FROM cmr.dwh_ilm_partition_access a
 ORDER BY a.days_since_write DESC;
 
 
@@ -321,16 +321,16 @@ CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
 BEGIN
     -- Get thresholds from config
     SELECT TO_NUMBER(config_value) INTO v_hot_threshold
-    FROM dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
 
     SELECT TO_NUMBER(config_value) INTO v_warm_threshold
-    FROM dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
 
     SELECT TO_NUMBER(config_value) INTO v_cold_threshold
-    FROM dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
 
     -- Merge partition data
-    MERGE INTO dwh_ilm_partition_access a
+    MERGE INTO cmr.dwh_ilm_partition_access a
     USING (
         SELECT
             tp.table_owner,
@@ -398,9 +398,9 @@ CREATE OR REPLACE PROCEDURE cleanup_execution_logs AS
     v_deleted NUMBER;
 BEGIN
     SELECT TO_NUMBER(config_value) INTO v_retention_days
-    FROM dwh_ilm_config WHERE config_key = 'LOG_RETENTION_DAYS';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'LOG_RETENTION_DAYS';
 
-    DELETE FROM dwh_ilm_execution_log
+    DELETE FROM cmr.dwh_ilm_execution_log
     WHERE execution_start < SYSTIMESTAMP - v_retention_days
     AND status IN ('SUCCESS', 'FAILED');
 
@@ -430,10 +430,10 @@ BEGIN
     SELECT TO_CHAR(SYSDATE, 'HH24:MI') INTO v_current_time FROM DUAL;
 
     SELECT config_value INTO v_start_time
-    FROM dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_START';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_START';
 
     SELECT config_value INTO v_end_time
-    FROM dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_END';
+    FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_END';
 
     -- Handle overnight windows
     IF v_start_time > v_end_time THEN
@@ -456,7 +456,7 @@ AS
     v_value VARCHAR2(4000);
 BEGIN
     SELECT config_value INTO v_value
-    FROM dwh_ilm_config
+    FROM cmr.dwh_ilm_config
     WHERE config_key = p_config_key;
 
     RETURN v_value;
@@ -472,7 +472,7 @@ END;
 -- =============================================================================
 
 -- Grant access to other schemas if needed
--- GRANT SELECT, INSERT, UPDATE, DELETE ON dwh_ilm_policies TO <schema>;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON cmr.dwh_ilm_policies TO <schema>;
 -- GRANT SELECT ON v_ilm_active_policies TO <schema>;
 
 
@@ -489,5 +489,5 @@ FROM DUAL;
 
 SELECT
     'Configuration Parameters: ' ||
-    (SELECT COUNT(*) FROM dwh_ilm_config) AS info
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_config) AS info
 FROM DUAL;
