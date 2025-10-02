@@ -62,7 +62,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
 END pck_dwh_table_migration_analyzer;
 /
 
-CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_USER AS
+CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
     -- ==========================================================================
     -- Private Helper Functions
