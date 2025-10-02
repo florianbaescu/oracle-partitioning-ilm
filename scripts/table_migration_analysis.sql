@@ -96,227 +96,321 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_usage_count NUMBER := 0;
         v_view_where_count NUMBER := 0;
         v_view_join_count NUMBER := 0;
+        v_mview_where_count NUMBER := 0;
+        v_mview_join_count NUMBER := 0;
         v_source_where_count NUMBER := 0;
         v_source_join_count NUMBER := 0;
         v_index_count NUMBER := 0;
         v_col_pattern VARCHAR2(200);
-        v_text_clob CLOB;
+        v_ddl_clob CLOB;
         v_where_found BOOLEAN;
         v_join_found BOOLEAN;
     BEGIN
         v_col_pattern := UPPER(p_column_name);
 
-        -- Check usage in views - WHERE clauses
-        -- Match column on BOTH left and right side of operators, with or without table alias
-        -- Handle LONG column properly by converting to CLOB
+        -- Check usage in views - using DBMS_METADATA
         BEGIN
             FOR rec IN (
-                SELECT view_name, text
+                SELECT view_name
                 FROM dba_views
                 WHERE owner = p_owner
             ) LOOP
                 BEGIN
-                    -- Convert LONG to CLOB
-                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
-                    DBMS_LOB.APPEND(v_text_clob, rec.text);
-
-                    v_where_found := FALSE;
+                    -- Get view DDL using DBMS_METADATA
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('VIEW', rec.view_name, p_owner);
 
                     -- Check WHERE clause patterns (column on left or right, with or without alias)
-                    IF DBMS_LOB.INSTR(v_text_clob, 'WHERE', 1, 1) > 0 THEN
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
                         v_where_found :=
                             -- Column on left
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' >', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' <', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
                             -- Column on right
-                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '>' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
                             -- With alias
-                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
                     END IF;
 
                     IF v_where_found THEN
                         v_view_where_count := v_view_where_count + 1;
                     END IF;
 
-                    DBMS_LOB.FREETEMPORARY(v_text_clob);
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
-                            DBMS_LOB.FREETEMPORARY(v_text_clob);
-                        END IF;
-                END;
-            END LOOP;
-        EXCEPTION WHEN OTHERS THEN
-            v_view_where_count := 0;
-        END;
-
-        -- Check usage in views - JOIN conditions
-        -- Match column on BOTH left and right side, with or without table alias
-        -- Handle LONG column properly
-        BEGIN
-            FOR rec IN (
-                SELECT view_name, text
-                FROM dba_views
-                WHERE owner = p_owner
-            ) LOOP
-                BEGIN
-                    -- Convert LONG to CLOB
-                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
-                    DBMS_LOB.APPEND(v_text_clob, rec.text);
-
-                    v_join_found := FALSE;
-
                     -- Check JOIN condition patterns
-                    IF DBMS_LOB.INSTR(v_text_clob, 'JOIN', 1, 1) > 0 THEN
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
                         v_join_found :=
                             -- Column on left of JOIN
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
                             -- Column on right of JOIN
-                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
                             -- With alias
-                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
                     END IF;
 
                     IF v_join_found THEN
                         v_view_join_count := v_view_join_count + 1;
                     END IF;
-
-                    DBMS_LOB.FREETEMPORARY(v_text_clob);
                 EXCEPTION
                     WHEN OTHERS THEN
-                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
-                            DBMS_LOB.FREETEMPORARY(v_text_clob);
-                        END IF;
+                        NULL; -- Skip objects that cannot be retrieved
                 END;
             END LOOP;
         EXCEPTION WHEN OTHERS THEN
+            v_view_where_count := 0;
             v_view_join_count := 0;
         END;
 
-        -- Check usage in stored procedures, functions, packages - WHERE clauses
-        -- Match column on BOTH left and right side, with or without table alias
-        -- Use DBMS_METADATA or CLOB aggregation to get complete source without truncation
+        -- Check usage in materialized views - using DBMS_METADATA
         BEGIN
-            FOR obj IN (
-                SELECT DISTINCT name, type
-                FROM dba_source
+            FOR rec IN (
+                SELECT mview_name
+                FROM dba_mviews
                 WHERE owner = p_owner
-                AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
             ) LOOP
                 BEGIN
-                    -- Aggregate all lines into CLOB using XML to avoid LISTAGG limit
-                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
+                    -- Get materialized view DDL using DBMS_METADATA
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW', rec.mview_name, p_owner);
 
-                    FOR line IN (
-                        SELECT text
-                        FROM dba_source
-                        WHERE owner = p_owner
-                        AND name = obj.name
-                        AND type = obj.type
-                        ORDER BY line
-                    ) LOOP
-                        DBMS_LOB.APPEND(v_text_clob, line.text);
-                    END LOOP;
-
-                    -- Search in complete source code (no truncation)
+                    -- Check WHERE clause patterns
                     v_where_found := FALSE;
-                    IF DBMS_LOB.INSTR(v_text_clob, 'WHERE', 1, 1) > 0 THEN
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
                         v_where_found :=
                             -- Column on left
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' >', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' <', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
                             -- Column on right
-                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '>' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
                             -- With alias
-                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
                     END IF;
 
                     IF v_where_found THEN
-                        v_source_where_count := v_source_where_count + 1;
+                        v_mview_where_count := v_mview_where_count + 1;
                     END IF;
 
-                    DBMS_LOB.FREETEMPORARY(v_text_clob);
+                    -- Check JOIN condition patterns
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            -- Column on left
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            -- Column on right
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            -- With alias
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+
+                    IF v_join_found THEN
+                        v_mview_join_count := v_mview_join_count + 1;
+                    END IF;
                 EXCEPTION
                     WHEN OTHERS THEN
-                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
-                            DBMS_LOB.FREETEMPORARY(v_text_clob);
-                        END IF;
+                        NULL; -- Skip objects that cannot be retrieved
+                END;
+            END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+            v_mview_where_count := 0;
+            v_mview_join_count := 0;
+        END;
+
+        -- Check usage in packages, procedures, functions - using DBMS_METADATA
+        BEGIN
+            -- Packages
+            FOR rec IN (
+                SELECT object_name
+                FROM dba_objects
+                WHERE owner = p_owner
+                AND object_type = 'PACKAGE'
+            ) LOOP
+                BEGIN
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('PACKAGE', rec.object_name, p_owner);
+
+                    -- Check WHERE clause
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_where_found THEN v_source_where_count := v_source_where_count + 1; END IF;
+
+                    -- Check JOIN clause
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_join_found THEN v_source_join_count := v_source_join_count + 1; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+            END LOOP;
+
+            -- Package Bodies
+            FOR rec IN (
+                SELECT object_name
+                FROM dba_objects
+                WHERE owner = p_owner
+                AND object_type = 'PACKAGE BODY'
+            ) LOOP
+                BEGIN
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('PACKAGE_BODY', rec.object_name, p_owner);
+
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_where_found THEN v_source_where_count := v_source_where_count + 1; END IF;
+
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_join_found THEN v_source_join_count := v_source_join_count + 1; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+            END LOOP;
+
+            -- Procedures
+            FOR rec IN (
+                SELECT object_name
+                FROM dba_objects
+                WHERE owner = p_owner
+                AND object_type = 'PROCEDURE'
+            ) LOOP
+                BEGIN
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('PROCEDURE', rec.object_name, p_owner);
+
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_where_found THEN v_source_where_count := v_source_where_count + 1; END IF;
+
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_join_found THEN v_source_join_count := v_source_join_count + 1; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+            END LOOP;
+
+            -- Functions
+            FOR rec IN (
+                SELECT object_name
+                FROM dba_objects
+                WHERE owner = p_owner
+                AND object_type = 'FUNCTION'
+            ) LOOP
+                BEGIN
+                    v_ddl_clob := DBMS_METADATA.GET_DDL('FUNCTION', rec.object_name, p_owner);
+
+                    v_where_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'WHERE', 1, 1) > 0 THEN
+                        v_where_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' >', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' <', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' BETWEEN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' IN', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '>' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '<' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_where_found THEN v_source_where_count := v_source_where_count + 1; END IF;
+
+                    v_join_found := FALSE;
+                    IF DBMS_LOB.INSTR(v_ddl_clob, 'JOIN', 1, 1) > 0 THEN
+                        v_join_found :=
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, v_col_pattern || '=', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '=' || v_col_pattern, 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
+                            DBMS_LOB.INSTR(v_ddl_clob, '= .' || v_col_pattern, 1, 1) > 0;
+                    END IF;
+                    IF v_join_found THEN v_source_join_count := v_source_join_count + 1; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
                 END;
             END LOOP;
         EXCEPTION WHEN OTHERS THEN
             v_source_where_count := 0;
-        END;
-
-        -- Check usage in stored procedures, functions, packages - JOIN conditions
-        -- Match column on BOTH left and right side, with or without table alias
-        -- Use CLOB aggregation for complete source without truncation
-        BEGIN
-            FOR obj IN (
-                SELECT DISTINCT name, type
-                FROM dba_source
-                WHERE owner = p_owner
-                AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
-            ) LOOP
-                BEGIN
-                    -- Aggregate all lines into CLOB
-                    DBMS_LOB.CREATETEMPORARY(v_text_clob, TRUE);
-
-                    FOR line IN (
-                        SELECT text
-                        FROM dba_source
-                        WHERE owner = p_owner
-                        AND name = obj.name
-                        AND type = obj.type
-                        ORDER BY line
-                    ) LOOP
-                        DBMS_LOB.APPEND(v_text_clob, line.text);
-                    END LOOP;
-
-                    -- Search in complete source code
-                    v_join_found := FALSE;
-                    IF DBMS_LOB.INSTR(v_text_clob, 'JOIN', 1, 1) > 0 THEN
-                        v_join_found :=
-                            -- Column on left
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, v_col_pattern || '=', 1, 1) > 0 OR
-                            -- Column on right
-                            DBMS_LOB.INSTR(v_text_clob, '= ' || v_col_pattern, 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '=' || v_col_pattern, 1, 1) > 0 OR
-                            -- With alias
-                            DBMS_LOB.INSTR(v_text_clob, '.' || v_col_pattern || ' =', 1, 1) > 0 OR
-                            DBMS_LOB.INSTR(v_text_clob, '= .' || v_col_pattern, 1, 1) > 0;
-                    END IF;
-
-                    IF v_join_found THEN
-                        v_source_join_count := v_source_join_count + 1;
-                    END IF;
-
-                    DBMS_LOB.FREETEMPORARY(v_text_clob);
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        IF DBMS_LOB.ISTEMPORARY(v_text_clob) = 1 THEN
-                            DBMS_LOB.FREETEMPORARY(v_text_clob);
-                        END IF;
-                END;
-            END LOOP;
-        EXCEPTION WHEN OTHERS THEN
             v_source_join_count := 0;
         END;
 
@@ -341,7 +435,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         (v_source_where_count * 3) +
                         (v_source_join_count * 2) +
                         (v_view_where_count * 3) +
-                        (v_view_join_count * 2);
+                        (v_view_join_count * 2) +
+                        (v_mview_where_count * 3) +
+                        (v_mview_join_count * 2);
 
         RETURN v_usage_count;
     EXCEPTION
