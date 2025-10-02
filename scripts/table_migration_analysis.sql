@@ -3,7 +3,7 @@
 -- Analyzes tables and recommends optimal partitioning strategies
 -- =============================================================================
 
-CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AS
+CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER AS
     -- Main analysis procedures
     PROCEDURE analyze_table(
         p_task_id NUMBER
@@ -62,7 +62,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AS
 END pck_dwh_table_migration_analyzer;
 /
 
-CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
+CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_USER AS
 
     -- ==========================================================================
     -- Private Helper Functions
