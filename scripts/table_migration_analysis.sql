@@ -93,23 +93,71 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
         p_column_name VARCHAR2,
         p_min_date OUT DATE,
         p_max_date OUT DATE,
-        p_range_days OUT NUMBER
+        p_range_days OUT NUMBER,
+        p_null_count OUT NUMBER,
+        p_non_null_count OUT NUMBER,
+        p_null_percentage OUT NUMBER,
+        p_has_time_component OUT VARCHAR2,
+        p_distinct_dates OUT NUMBER
     ) RETURN BOOLEAN
     AS
         v_sql VARCHAR2(4000);
         v_error_code NUMBER;
         v_error_msg VARCHAR2(4000);
+        v_total_count NUMBER;
+        v_min_time VARCHAR2(8);
+        v_max_time VARCHAR2(8);
+        v_time_sample NUMBER;
     BEGIN
-        -- Get date range in a single query (optimized - no separate COUNT)
-        v_sql := 'SELECT MIN(' || p_column_name || '), MAX(' || p_column_name || ')' ||
-                ' FROM ' || p_owner || '.' || p_table_name ||
-                ' WHERE ' || p_column_name || ' IS NOT NULL';
+        -- Get date range and NULL statistics in a single query
+        v_sql := 'SELECT ' ||
+                '  MIN(' || p_column_name || '), ' ||
+                '  MAX(' || p_column_name || '), ' ||
+                '  COUNT(*), ' ||
+                '  COUNT(' || p_column_name || '), ' ||
+                '  COUNT(*) - COUNT(' || p_column_name || '), ' ||
+                '  TO_CHAR(MIN(' || p_column_name || '), ''HH24:MI:SS''), ' ||
+                '  TO_CHAR(MAX(' || p_column_name || '), ''HH24:MI:SS'') ' ||
+                ' FROM ' || p_owner || '.' || p_table_name;
 
-        EXECUTE IMMEDIATE v_sql INTO p_min_date, p_max_date;
+        EXECUTE IMMEDIATE v_sql INTO p_min_date, p_max_date, v_total_count, p_non_null_count, p_null_count, v_min_time, v_max_time;
 
-        -- If MIN/MAX are NULL, column has no data
+        -- Calculate NULL percentage
+        IF v_total_count > 0 THEN
+            p_null_percentage := ROUND((p_null_count / v_total_count) * 100, 2);
+        ELSE
+            p_null_percentage := 0;
+        END IF;
+
+        -- If MIN/MAX are NULL, column has no non-NULL data
         IF p_min_date IS NOT NULL AND p_max_date IS NOT NULL THEN
             p_range_days := p_max_date - p_min_date;
+
+            -- Check if column has time component (not all midnight)
+            -- Sample: check if any non-midnight times exist
+            v_sql := 'SELECT COUNT(*) FROM (' ||
+                    '  SELECT ' || p_column_name ||
+                    '  FROM ' || p_owner || '.' || p_table_name ||
+                    '  WHERE ' || p_column_name || ' IS NOT NULL' ||
+                    '    AND ' || p_column_name || ' != TRUNC(' || p_column_name || ')' ||
+                    '  AND ROWNUM <= 1' ||
+                    ')';
+
+            EXECUTE IMMEDIATE v_sql INTO v_time_sample;
+
+            IF v_time_sample > 0 OR v_min_time != '00:00:00' OR v_max_time != '00:00:00' THEN
+                p_has_time_component := 'Y';
+
+                -- Get distinct date count (without time)
+                v_sql := 'SELECT COUNT(DISTINCT TRUNC(' || p_column_name || ')) ' ||
+                        'FROM ' || p_owner || '.' || p_table_name ||
+                        ' WHERE ' || p_column_name || ' IS NOT NULL';
+                EXECUTE IMMEDIATE v_sql INTO p_distinct_dates;
+            ELSE
+                p_has_time_component := 'N';
+                p_distinct_dates := NULL;  -- Not needed if no time component
+            END IF;
+
             RETURN TRUE;
         END IF;
 
@@ -1071,7 +1119,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
             v_max_date DATE;
             v_range_days NUMBER;
             v_max_range NUMBER := 0;
+            v_null_count NUMBER;
+            v_non_null_count NUMBER;
+            v_null_percentage NUMBER;
+            v_selected_null_pct NUMBER := 0;
+            v_has_time_component VARCHAR2(1);
+            v_distinct_dates NUMBER;
+            v_selected_has_time VARCHAR2(1) := 'N';
             v_json_analysis VARCHAR2(32767);
+            v_first_json BOOLEAN := TRUE;
         BEGIN
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
@@ -1118,12 +1174,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 FOR i IN 1..v_date_columns.COUNT LOOP
                     IF analyze_date_column(
                         v_task.source_owner, v_task.source_table, v_date_columns(i),
-                        v_min_date, v_max_date, v_range_days
+                        v_min_date, v_max_date, v_range_days,
+                        v_null_count, v_non_null_count, v_null_percentage,
+                        v_has_time_component, v_distinct_dates
                     ) THEN
                         -- Build JSON entry for this date column
-                        IF i > 1 THEN
+                        IF NOT v_first_json THEN
                             DBMS_LOB.APPEND(v_all_date_analysis, ',');
                         END IF;
+                        v_first_json := FALSE;
 
                         v_json_analysis := '{' ||
                             '"column_name":"' || v_date_columns(i) || '",' ||
@@ -1132,6 +1191,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                             '"max_date":"' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' ||
                             '"range_days":' || v_range_days || ',' ||
                             '"range_years":' || ROUND(v_range_days/365.25, 2) || ',' ||
+                            '"null_count":' || v_null_count || ',' ||
+                            '"non_null_count":' || v_non_null_count || ',' ||
+                            '"null_percentage":' || v_null_percentage || ',' ||
+                            '"has_time_component":"' || v_has_time_component || '",' ||
+                            '"distinct_dates":' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' ||
                             '"is_primary":' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END ||
                         '}';
 
@@ -1139,7 +1203,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
 
                         DBMS_OUTPUT.PUT_LINE('  - ' || v_date_columns(i) || ': ' ||
                             TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' ||
-                            TO_CHAR(v_max_date, 'YYYY-MM-DD') || ' (' || v_range_days || ' days)');
+                            TO_CHAR(v_max_date, 'YYYY-MM-DD') ||
+                            ' (' || v_range_days || ' days, ' || v_null_percentage || '% NULLs' ||
+                            CASE WHEN v_has_time_component = 'Y' THEN ', has time component' ELSE '' END || ')');
+
+                        -- Track NULL percentage and time component of selected column
+                        IF v_date_columns(i) = v_date_column THEN
+                            v_selected_null_pct := v_null_percentage;
+                            v_selected_has_time := v_has_time_component;
+                        END IF;
 
                         -- If no stereotype found, pick column with widest range
                         IF NOT v_date_found THEN
@@ -1149,6 +1221,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                                 v_date_type := 'DATE';
                                 v_date_format := 'STANDARD';
                                 v_conversion_expr := v_date_column;
+                                v_selected_null_pct := v_null_percentage;
+                                v_selected_has_time := v_has_time_component;
                             END IF;
                         END IF;
                     END IF;
@@ -1158,6 +1232,35 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AUTHID CURRENT_U
                 IF NOT v_date_found AND v_date_column IS NOT NULL THEN
                     v_date_found := TRUE;
                     DBMS_OUTPUT.PUT_LINE('Selected date column by range: ' || v_date_column || ' (' || v_max_range || ' days)');
+                END IF;
+
+                -- Add warning if selected column has NULLs
+                IF v_date_found AND v_selected_null_pct > 0 THEN
+                    IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                    DBMS_LOB.APPEND(v_warnings,
+                        '{"type":"WARNING",' ||
+                        '"issue":"Selected date column ' || v_date_column || ' has ' || v_selected_null_pct || '% NULL values",' ||
+                        '"action":"Consider: 1) Choose different date column, 2) Use DEFAULT partition for NULLs, 3) Populate NULL values before migration"}');
+                    v_error_count := v_error_count + 1;
+
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has ' || v_selected_null_pct || '% NULL values');
+
+                    -- Escalate to blocking issue if >25% NULLs
+                    IF v_selected_null_pct > 25 THEN
+                        DBMS_OUTPUT.PUT_LINE('CRITICAL: >25% NULL values - strongly recommend addressing before migration');
+                    END IF;
+                END IF;
+
+                -- Add warning if selected column has time component
+                IF v_date_found AND v_selected_has_time = 'Y' THEN
+                    IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                    DBMS_LOB.APPEND(v_warnings,
+                        '{"type":"WARNING",' ||
+                        '"issue":"Selected date column ' || v_date_column || ' contains time component (HH:MI:SS)",' ||
+                        '"action":"Partition key must use TRUNC(' || v_date_column || ') for daily partitions or TO_CHAR(' || v_date_column || ', ''YYYY-MM'') for monthly partitions"}');
+                    v_error_count := v_error_count + 1;
+
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has time component - use TRUNC() in partition key');
                 END IF;
             ELSE
                 DBMS_OUTPUT.PUT_LINE('No DATE/TIMESTAMP columns found');
