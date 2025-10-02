@@ -1,0 +1,657 @@
+-- =============================================================================
+-- Table Migration Framework - Usage Examples
+-- Complete examples of migrating non-partitioned tables to partitioned
+-- =============================================================================
+
+-- =============================================================================
+-- SECTION 1: VIEWING CANDIDATES FOR MIGRATION
+-- =============================================================================
+
+-- View all non-partitioned tables that are good candidates
+SELECT * FROM v_migration_candidates
+WHERE migration_priority IN ('HIGH PRIORITY', 'MEDIUM PRIORITY')
+ORDER BY size_mb DESC;
+
+-- View specific table details
+SELECT
+    table_name,
+    num_rows,
+    size_mb,
+    num_indexes,
+    num_constraints,
+    migration_priority,
+    recommendation_reason
+FROM v_migration_candidates
+WHERE table_name = 'SALES_FACT_STAGING';
+
+
+-- =============================================================================
+-- SECTION 2: CREATING A MIGRATION PROJECT
+-- =============================================================================
+
+-- Example 1: Create a migration project
+INSERT INTO migration_projects (project_name, description, status)
+VALUES (
+    'Q1_2024_TABLE_PARTITIONING',
+    'Migrate key fact tables to partitioned structures for Q1 2024',
+    'PLANNING'
+);
+COMMIT;
+
+-- Get the project ID
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    SELECT project_id INTO v_project_id
+    FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+    DBMS_OUTPUT.PUT_LINE('Project ID: ' || v_project_id);
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 3: CREATING MIGRATION TASKS
+-- =============================================================================
+
+-- Example 2: Create migration task with automatic strategy recommendation
+INSERT INTO migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    migration_method,
+    use_compression,
+    compression_type,
+    apply_ilm_policies,
+    ilm_policy_template,
+    status
+)
+SELECT
+    project_id,
+    'Migrate SALES_FACT',
+    USER,
+    'SALES_FACT',
+    'CTAS',
+    'Y',
+    'QUERY HIGH',
+    'Y',
+    'FACT_TABLE_STANDARD',
+    'PENDING'
+FROM migration_projects
+WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+COMMIT;
+
+
+-- Example 3: Create migration task with explicit partition strategy
+INSERT INTO migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    interval_clause,
+    migration_method,
+    use_compression,
+    compression_type,
+    target_tablespace,
+    parallel_degree,
+    apply_ilm_policies,
+    ilm_policy_template,
+    status
+)
+SELECT
+    project_id,
+    'Migrate ORDER_FACT',
+    USER,
+    'ORDER_FACT',
+    'RANGE(order_date)',  -- Explicit partition strategy
+    'order_date',
+    'NUMTOYMINTERVAL(1,''MONTH'')',  -- Monthly interval
+    'CTAS',
+    'Y',
+    'QUERY HIGH',
+    'TBS_HOT',
+    8,
+    'Y',
+    'FACT_TABLE_STANDARD',
+    'PENDING'
+FROM migration_projects
+WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+COMMIT;
+
+
+-- Example 4: Composite partitioning (Range-Hash)
+INSERT INTO migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    subpartition_type,
+    subpartition_key,
+    interval_clause,
+    migration_method,
+    use_compression,
+    compression_type,
+    status
+)
+VALUES (
+    (SELECT project_id FROM migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate WEB_EVENTS',
+    USER,
+    'WEB_EVENTS',
+    'RANGE(event_date)',
+    'event_date',
+    'HASH(session_id) SUBPARTITIONS 8',
+    'session_id',
+    'NUMTODSINTERVAL(1,''DAY'')',
+    'CTAS',
+    'Y',
+    'QUERY HIGH',
+    'PENDING'
+);
+
+COMMIT;
+
+
+-- Example 5: Large dimension table with hash partitioning
+INSERT INTO migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    migration_method,
+    use_compression,
+    compression_type,
+    apply_ilm_policies,
+    ilm_policy_template,
+    status
+)
+VALUES (
+    (SELECT project_id FROM migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate CUSTOMER_DIM',
+    USER,
+    'CUSTOMER_DIM',
+    'HASH(customer_id) PARTITIONS 16',
+    'customer_id',
+    'CTAS',
+    'Y',
+    'QUERY HIGH',
+    'Y',
+    'DIMENSION_LARGE',
+    'PENDING'
+);
+
+COMMIT;
+
+
+-- =============================================================================
+-- SECTION 4: ANALYZING TABLES
+-- =============================================================================
+
+-- Example 6: Analyze a single task
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    SELECT task_id INTO v_task_id
+    FROM migration_tasks
+    WHERE task_name = 'Migrate SALES_FACT';
+
+    table_migration_analyzer.analyze_table(v_task_id);
+END;
+/
+
+
+-- Example 7: Analyze all pending tasks in a project
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    SELECT project_id INTO v_project_id
+    FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+    table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+END;
+/
+
+
+-- Example 8: Review analysis results
+SELECT
+    t.task_name,
+    t.source_table,
+    a.recommended_strategy,
+    a.recommendation_reason,
+    a.table_rows,
+    ROUND(a.table_size_mb, 2) AS table_size_mb,
+    a.estimated_partitions,
+    ROUND(a.avg_partition_size_mb, 2) AS avg_partition_size_mb,
+    a.estimated_compression_ratio,
+    ROUND(a.estimated_space_savings_mb, 2) AS estimated_savings_mb,
+    a.complexity_score,
+    a.estimated_downtime_minutes
+FROM migration_tasks t
+JOIN migration_analysis a ON a.task_id = t.task_id
+WHERE t.project_id = (
+    SELECT project_id FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
+)
+ORDER BY t.task_id;
+
+
+-- Example 9: Check for blocking issues
+SELECT
+    t.task_name,
+    t.source_table,
+    t.validation_status,
+    a.blocking_issues
+FROM migration_tasks t
+JOIN migration_analysis a ON a.task_id = t.task_id
+WHERE a.blocking_issues IS NOT NULL
+AND DBMS_LOB.GETLENGTH(a.blocking_issues) > 2;
+
+
+-- =============================================================================
+-- SECTION 5: EXECUTING MIGRATIONS
+-- =============================================================================
+
+-- Example 10: Execute a single migration
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    SELECT task_id INTO v_task_id
+    FROM migration_tasks
+    WHERE task_name = 'Migrate SALES_FACT';
+
+    table_migration_executor.execute_migration(v_task_id);
+END;
+/
+
+
+-- Example 11: Execute all ready tasks in a project (one at a time for safety)
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    SELECT project_id INTO v_project_id
+    FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+    table_migration_executor.execute_all_ready_tasks(
+        p_project_id => v_project_id,
+        p_max_tasks => 1  -- Limit to 1 for safety
+    );
+END;
+/
+
+
+-- Example 12: Execute with manual control
+-- Step 1: Review what will be migrated
+SELECT
+    task_id,
+    task_name,
+    source_table,
+    partition_type,
+    migration_method,
+    status,
+    validation_status
+FROM migration_tasks
+WHERE project_id = (
+    SELECT project_id FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
+)
+AND status IN ('READY', 'ANALYZED')
+AND validation_status = 'READY'
+ORDER BY task_id;
+
+-- Step 2: Execute specific task
+EXEC table_migration_executor.execute_migration(1);  -- Replace 1 with actual task_id
+
+
+-- =============================================================================
+-- SECTION 6: MONITORING MIGRATIONS
+-- =============================================================================
+
+-- Example 13: View project dashboard
+SELECT * FROM v_migration_dashboard
+ORDER BY created_date DESC;
+
+
+-- Example 14: View task status
+SELECT * FROM v_migration_task_status
+WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
+ORDER BY task_id;
+
+
+-- Example 15: View execution logs for a task
+SELECT
+    step_number,
+    step_name,
+    step_type,
+    status,
+    duration_seconds,
+    error_message
+FROM migration_execution_log
+WHERE task_id = 1  -- Replace with actual task_id
+ORDER BY step_number;
+
+
+-- Example 16: Monitor running migration
+SELECT
+    t.task_id,
+    t.task_name,
+    t.source_table,
+    t.status,
+    TO_CHAR(t.execution_start, 'YYYY-MM-DD HH24:MI:SS') AS started,
+    ROUND((SYSTIMESTAMP - t.execution_start) * 24 * 60, 1) AS running_minutes,
+    l.step_number,
+    l.step_name,
+    l.status AS step_status
+FROM migration_tasks t
+LEFT JOIN (
+    SELECT task_id, MAX(step_number) AS step_number
+    FROM migration_execution_log
+    GROUP BY task_id
+) ls ON ls.task_id = t.task_id
+LEFT JOIN migration_execution_log l
+    ON l.task_id = t.task_id
+    AND l.step_number = ls.step_number
+WHERE t.status = 'RUNNING';
+
+
+-- =============================================================================
+-- SECTION 7: POST-MIGRATION VALIDATION
+-- =============================================================================
+
+-- Example 17: Verify partition structure
+SELECT
+    table_name,
+    partition_name,
+    partition_position,
+    high_value,
+    num_rows,
+    compression,
+    tablespace_name
+FROM user_tab_partitions
+WHERE table_name = 'SALES_FACT'
+ORDER BY partition_position DESC
+FETCH FIRST 10 ROWS ONLY;
+
+
+-- Example 18: Compare sizes before and after
+SELECT
+    task_name,
+    source_table,
+    ROUND(source_size_mb, 2) AS source_mb,
+    ROUND(target_size_mb, 2) AS target_mb,
+    ROUND(space_saved_mb, 2) AS saved_mb,
+    ROUND((space_saved_mb / NULLIF(source_size_mb, 0)) * 100, 1) AS savings_pct,
+    ROUND(duration_seconds / 60, 1) AS duration_min
+FROM migration_tasks
+WHERE status = 'COMPLETED'
+ORDER BY space_saved_mb DESC;
+
+
+-- Example 19: Validate row counts
+DECLARE
+    v_task_id NUMBER := 1;  -- Replace with actual task_id
+BEGIN
+    table_migration_executor.validate_migration(v_task_id);
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 8: ILM POLICY APPLICATION
+-- =============================================================================
+
+-- Example 20: Check ILM policies created for migrated table
+SELECT * FROM ilm_policies
+WHERE table_name = 'SALES_FACT'
+ORDER BY priority;
+
+
+-- Example 21: Manually apply ILM policies after migration
+DECLARE
+    v_task_id NUMBER := 1;  -- Replace with actual task_id
+BEGIN
+    table_migration_executor.apply_ilm_policies(v_task_id);
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 9: ROLLBACK
+-- =============================================================================
+
+-- Example 22: Check if rollback is possible
+SELECT
+    task_id,
+    task_name,
+    source_table,
+    backup_table_name,
+    can_rollback,
+    status
+FROM migration_tasks
+WHERE can_rollback = 'Y';
+
+
+-- Example 23: Rollback a migration
+DECLARE
+    v_task_id NUMBER := 1;  -- Replace with actual task_id
+BEGIN
+    -- WARNING: This will revert to the old non-partitioned table
+    table_migration_executor.rollback_migration(v_task_id);
+END;
+/
+
+
+-- Example 24: Clean up old backup tables (after verifying migration)
+DECLARE
+    v_sql VARCHAR2(1000);
+BEGIN
+    FOR rec IN (
+        SELECT source_owner, backup_table_name
+        FROM migration_tasks
+        WHERE status = 'COMPLETED'
+        AND backup_table_name IS NOT NULL
+        AND execution_end < SYSDATE - 30  -- Older than 30 days
+    ) LOOP
+        v_sql := 'DROP TABLE ' || rec.source_owner || '.' || rec.backup_table_name || ' PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropping: ' || rec.backup_table_name);
+        EXECUTE IMMEDIATE v_sql;
+
+        UPDATE migration_tasks
+        SET can_rollback = 'N', backup_table_name = NULL
+        WHERE backup_table_name = rec.backup_table_name;
+    END LOOP;
+
+    COMMIT;
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 10: COMPLETE WORKFLOW EXAMPLE
+-- =============================================================================
+
+-- Example 25: Complete migration workflow for a single table
+DECLARE
+    v_project_id NUMBER;
+    v_task_id NUMBER;
+BEGIN
+    -- Step 1: Create project
+    INSERT INTO migration_projects (project_name, description, status)
+    VALUES ('SINGLE_TABLE_MIGRATION', 'Migrate SALES_FACT_2023', 'PLANNING')
+    RETURNING project_id INTO v_project_id;
+
+    -- Step 2: Create task
+    INSERT INTO migration_tasks (
+        project_id, task_name, source_owner, source_table,
+        partition_type, partition_key, interval_clause,
+        migration_method, use_compression, compression_type,
+        apply_ilm_policies, ilm_policy_template, status
+    ) VALUES (
+        v_project_id, 'Migrate SALES_FACT_2023', USER, 'SALES_FACT_2023',
+        'RANGE(sale_date)', 'sale_date', 'NUMTOYMINTERVAL(1,''MONTH'')',
+        'CTAS', 'Y', 'QUERY HIGH',
+        'Y', 'FACT_TABLE_STANDARD', 'PENDING'
+    ) RETURNING task_id INTO v_task_id;
+
+    COMMIT;
+
+    -- Step 3: Analyze
+    DBMS_OUTPUT.PUT_LINE('Analyzing table...');
+    table_migration_analyzer.analyze_table(v_task_id);
+
+    -- Step 4: Review analysis
+    FOR rec IN (
+        SELECT recommended_strategy, complexity_score, estimated_downtime_minutes
+        FROM migration_analysis WHERE task_id = v_task_id
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('Strategy: ' || rec.recommended_strategy);
+        DBMS_OUTPUT.PUT_LINE('Complexity: ' || rec.complexity_score || '/10');
+        DBMS_OUTPUT.PUT_LINE('Est. downtime: ' || rec.estimated_downtime_minutes || ' min');
+    END LOOP;
+
+    -- Step 5: Execute (comment out until ready)
+    -- DBMS_OUTPUT.PUT_LINE('Executing migration...');
+    -- table_migration_executor.execute_migration(v_task_id);
+
+    -- Step 6: Validate (after execution)
+    -- table_migration_executor.validate_migration(v_task_id);
+
+    DBMS_OUTPUT.PUT_LINE('Workflow complete - review and execute when ready');
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 11: BATCH MIGRATION WORKFLOW
+-- =============================================================================
+
+-- Example 26: Migrate multiple tables in sequence
+DECLARE
+    v_project_id NUMBER;
+    v_tables SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST(
+        'SALES_FACT', 'ORDER_FACT', 'INVENTORY_FACT'
+    );
+    v_task_id NUMBER;
+BEGIN
+    -- Create project
+    INSERT INTO migration_projects (project_name, description, status)
+    VALUES ('BATCH_FACT_MIGRATION', 'Migrate all fact tables', 'PLANNING')
+    RETURNING project_id INTO v_project_id;
+
+    -- Create tasks for each table
+    FOR i IN 1..v_tables.COUNT LOOP
+        INSERT INTO migration_tasks (
+            project_id, task_name, source_owner, source_table,
+            migration_method, use_compression, compression_type,
+            apply_ilm_policies, ilm_policy_template, status
+        ) VALUES (
+            v_project_id, 'Migrate ' || v_tables(i), USER, v_tables(i),
+            'CTAS', 'Y', 'QUERY HIGH',
+            'Y', 'FACT_TABLE_STANDARD', 'PENDING'
+        );
+    END LOOP;
+
+    COMMIT;
+
+    -- Analyze all
+    DBMS_OUTPUT.PUT_LINE('Analyzing tables...');
+    table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+
+    -- Review results
+    FOR rec IN (
+        SELECT t.task_name, t.validation_status, a.complexity_score
+        FROM migration_tasks t
+        JOIN migration_analysis a ON a.task_id = t.task_id
+        WHERE t.project_id = v_project_id
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE(rec.task_name || ' - ' ||
+                           rec.validation_status || ' (complexity: ' ||
+                           rec.complexity_score || ')');
+    END LOOP;
+
+    -- Execute all ready tasks (one at a time)
+    -- table_migration_executor.execute_all_ready_tasks(v_project_id, 3);
+
+END;
+/
+
+
+-- =============================================================================
+-- SECTION 12: TROUBLESHOOTING
+-- =============================================================================
+
+-- Example 27: Find failed migrations
+SELECT
+    task_id,
+    task_name,
+    source_table,
+    status,
+    error_message,
+    execution_start,
+    execution_end
+FROM migration_tasks
+WHERE status = 'FAILED'
+ORDER BY execution_start DESC;
+
+
+-- Example 28: Find failed steps in migration
+SELECT
+    l.task_id,
+    t.task_name,
+    l.step_number,
+    l.step_name,
+    l.error_code,
+    l.error_message
+FROM migration_execution_log l
+JOIN migration_tasks t ON t.task_id = l.task_id
+WHERE l.status = 'FAILED'
+ORDER BY l.start_time DESC;
+
+
+-- Example 29: Retry failed migration (after fixing issues)
+DECLARE
+    v_task_id NUMBER := 1;  -- Replace with failed task_id
+BEGIN
+    -- Reset task status
+    UPDATE migration_tasks
+    SET status = 'READY',
+        error_message = NULL,
+        execution_start = NULL,
+        execution_end = NULL
+    WHERE task_id = v_task_id;
+
+    COMMIT;
+
+    -- Retry
+    table_migration_executor.execute_migration(v_task_id);
+END;
+/
+
+
+-- =============================================================================
+-- CLEANUP EXAMPLES
+-- =============================================================================
+
+-- Remove all tasks from a project
+DELETE FROM migration_tasks
+WHERE project_id = (
+    SELECT project_id FROM migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
+);
+
+-- Remove a project
+DELETE FROM migration_projects
+WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+COMMIT;
