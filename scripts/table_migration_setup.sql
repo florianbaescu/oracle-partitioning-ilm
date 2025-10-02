@@ -4,6 +4,51 @@
 -- =============================================================================
 
 -- =============================================================================
+-- SECTION 0: CLEANUP (FOR RERUNNABLE SCRIPT)
+-- =============================================================================
+
+-- Drop tables in reverse dependency order
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_execution_log CASCADE CONSTRAINTS';
+    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_execution_log');
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_analysis CASCADE CONSTRAINTS';
+    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_analysis');
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_tasks CASCADE CONSTRAINTS';
+    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_tasks');
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_projects CASCADE CONSTRAINTS';
+    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_projects');
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_ilm_templates CASCADE CONSTRAINTS';
+    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_ilm_templates');
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
+-- =============================================================================
 -- SECTION 1: MIGRATION METADATA TABLES
 -- =============================================================================
 
@@ -201,160 +246,215 @@ CREATE TABLE cmr.dwh_migration_ilm_templates (
 
 COMMENT ON TABLE cmr.dwh_migration_ilm_templates IS 'ILM policy templates for newly migrated tables';
 
--- Insert default templates
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'FACT_TABLE_STANDARD',
-    'Standard ILM policies for fact tables: compress at 90d, tier at 12m, archive at 36m',
-    'FACT',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
-        {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 301}
-    ]'
-);
+-- Insert default templates (using MERGE for rerunnable script)
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'FACT_TABLE_STANDARD' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'FACT_TABLE_STANDARD',
+        'Standard ILM policies for fact tables: compress at 90d, tier at 12m, archive at 36m',
+        'FACT',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+            {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 301}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'DIMENSION_LARGE',
-    'ILM policies for large dimension tables',
-    'DIMENSION',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_180D", "age_days": 180, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'DIMENSION_LARGE' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'DIMENSION_LARGE',
+        'ILM policies for large dimension tables',
+        'DIMENSION',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_180D", "age_days": 180, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'STAGING_MINIMAL',
-    'Minimal retention for staging tables',
-    'STAGING',
-    '[
-        {"policy_name": "{TABLE}_PURGE_30D", "age_days": 30, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'STAGING_MINIMAL' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'STAGING_MINIMAL',
+        'Minimal retention for staging tables',
+        'STAGING',
+        '[
+            {"policy_name": "{TABLE}_PURGE_30D", "age_days": 30, "action": "DROP", "priority": 900}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'SCD2_EFFECTIVE_DATE',
-    'ILM policies for SCD2 tables with effective_date - compress old versions, retain history',
-    'SCD2',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'SCD2_EFFECTIVE_DATE' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'SCD2_EFFECTIVE_DATE',
+        'ILM policies for SCD2 tables with effective_date - compress old versions, retain history',
+        'SCD2',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'SCD2_VALID_FROM_TO',
-    'ILM policies for SCD2 tables with valid_from_dttm/valid_to_dttm - compress old versions',
-    'SCD2',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'SCD2_VALID_FROM_TO' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'SCD2_VALID_FROM_TO',
+        'ILM policies for SCD2 tables with valid_from_dttm/valid_to_dttm - compress old versions',
+        'SCD2',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'EVENTS_SHORT_RETENTION',
-    'ILM policies for event tables with 90-day retention (clickstream, app events)',
-    'EVENTS',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_7D", "age_days": 7, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_30D", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_PURGE_90D", "age_days": 90, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'EVENTS_SHORT_RETENTION' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'EVENTS_SHORT_RETENTION',
+        'ILM policies for event tables with 90-day retention (clickstream, app events)',
+        'EVENTS',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_7D", "age_days": 7, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_30D", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_PURGE_90D", "age_days": 90, "action": "DROP", "priority": 900}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'EVENTS_COMPLIANCE',
-    'ILM policies for audit/compliance event tables with 7-year retention',
-    'EVENTS',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
-        {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 400},
-        {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'EVENTS_COMPLIANCE' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'EVENTS_COMPLIANCE',
+        'ILM policies for audit/compliance event tables with 7-year retention',
+        'EVENTS',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 400},
+            {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'STAGING_7DAY',
-    'Staging tables with 7-day retention',
-    'STAGING',
-    '[
-        {"policy_name": "{TABLE}_PURGE_7D", "age_days": 7, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'STAGING_7DAY' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'STAGING_7DAY',
+        'Staging tables with 7-day retention',
+        'STAGING',
+        '[
+            {"policy_name": "{TABLE}_PURGE_7D", "age_days": 7, "action": "DROP", "priority": 900}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'STAGING_CDC',
-    'CDC staging tables with 30-day retention and compression',
-    'STAGING',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_3D", "age_days": 3, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_PURGE_30D", "age_days": 30, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'STAGING_CDC' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'STAGING_CDC',
+        'CDC staging tables with 30-day retention and compression',
+        'STAGING',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_3D", "age_days": 3, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_PURGE_30D", "age_days": 30, "action": "DROP", "priority": 900}
+        ]'
+    );
 
-INSERT INTO cmr.dwh_migration_ilm_templates (template_name, description, table_type, policies_json)
-VALUES (
-    'STAGING_ERROR_QUARANTINE',
-    'Error/quarantine tables with 1-year retention',
-    'STAGING',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_30D", "age_days": 30, "action": "COMPRESS", "compression": "QUERY LOW", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_6M", "age_months": 6, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_PURGE_12M", "age_months": 12, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'STAGING_ERROR_QUARANTINE' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'STAGING_ERROR_QUARANTINE',
+        'Error/quarantine tables with 1-year retention',
+        'STAGING',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_30D", "age_days": 30, "action": "COMPRESS", "compression": "QUERY LOW", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_6M", "age_months": 6, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_PURGE_12M", "age_months": 12, "action": "DROP", "priority": 900}
+        ]'
+    );
 
 -- Historical/Snapshot Tables - Monthly retention
-INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
-    'HIST_MONTHLY',
-    'Historical tables with monthly snapshots - 3 year retention',
-    'HIST',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_3M", "age_months": 3, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_READONLY_24M", "age_months": 24, "action": "READ_ONLY", "priority": 300},
-        {"policy_name": "{TABLE}_PURGE_36M", "age_months": 36, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'HIST_MONTHLY' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'HIST_MONTHLY',
+        'Historical tables with monthly snapshots - 3 year retention',
+        'HIST',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_3M", "age_months": 3, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_24M", "age_months": 24, "action": "READ_ONLY", "priority": 300},
+            {"policy_name": "{TABLE}_PURGE_36M", "age_months": 36, "action": "DROP", "priority": 900}
+        ]'
+    );
 
 -- Historical/Snapshot Tables - Yearly snapshots
-INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
-    'HIST_YEARLY',
-    'Historical tables with yearly snapshots - 7 year retention',
-    'HIST',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_12M", "age_months": 12, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300},
-        {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'HIST_YEARLY' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'HIST_YEARLY',
+        'Historical tables with yearly snapshots - 7 year retention',
+        'HIST',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_12M", "age_months": 12, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300},
+            {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
+        ]'
+    );
 
 -- Historical/Snapshot Tables - Compliance (permanent retention)
-INSERT INTO cmr.dwh_migration_ilm_templates VALUES (
-    'HIST_COMPLIANCE',
-    'Historical tables for compliance - permanent retention with compression',
-    'HIST',
-    '[
-        {"policy_name": "{TABLE}_COMPRESS_6M", "age_months": 6, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-        {"policy_name": "{TABLE}_TIER_COLD_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-        {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 300}
-    ]'
-);
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'HIST_COMPLIANCE' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'HIST_COMPLIANCE',
+        'Historical tables for compliance - permanent retention with compression',
+        'HIST',
+        '[
+            {"policy_name": "{TABLE}_COMPRESS_6M", "age_months": 6, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 300}
+        ]'
+    );
 
 COMMIT;
 
@@ -503,20 +603,36 @@ COMMENT ON VIEW cmr.dwh_v_date_column_analysis IS 'Comprehensive date column ana
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- Add migration configuration to ILM config
+-- Add migration configuration to ILM config (using MERGE for rerunnable script)
 -- -----------------------------------------------------------------------------
 
-INSERT INTO ilm_config (config_key, config_value, description)
-VALUES ('MIGRATION_BACKUP_ENABLED', 'Y', 'Create backup tables before migration');
+MERGE INTO ilm_config t
+USING (SELECT 'MIGRATION_BACKUP_ENABLED' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('MIGRATION_BACKUP_ENABLED', 'Y', 'Create backup tables before migration');
 
-INSERT INTO ilm_config (config_key, config_value, description)
-VALUES ('MIGRATION_VALIDATE_ENABLED', 'Y', 'Validate data after migration');
+MERGE INTO ilm_config t
+USING (SELECT 'MIGRATION_VALIDATE_ENABLED' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('MIGRATION_VALIDATE_ENABLED', 'Y', 'Validate data after migration');
 
-INSERT INTO ilm_config (config_key, config_value, description)
-VALUES ('MIGRATION_AUTO_ILM_ENABLED', 'Y', 'Automatically create ILM policies after migration');
+MERGE INTO ilm_config t
+USING (SELECT 'MIGRATION_AUTO_ILM_ENABLED' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('MIGRATION_AUTO_ILM_ENABLED', 'Y', 'Automatically create ILM policies after migration');
 
-INSERT INTO ilm_config (config_key, config_value, description)
-VALUES ('MIGRATION_PARALLEL_DEGREE', '4', 'Default parallel degree for migration operations');
+MERGE INTO ilm_config t
+USING (SELECT 'MIGRATION_PARALLEL_DEGREE' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('MIGRATION_PARALLEL_DEGREE', '4', 'Default parallel degree for migration operations');
 
 COMMIT;
 
