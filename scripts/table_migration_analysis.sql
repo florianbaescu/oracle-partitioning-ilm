@@ -309,6 +309,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         p_range_days := ROUND(p_max_date - p_min_date, 4);
                 END;
             ELSE
+                -- Dates are clean, no data quality issue
+                p_data_quality_issue := 'N';
                 p_range_days := ROUND(p_max_date - p_min_date, 4);
             END IF;
 
@@ -1291,6 +1293,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_parallel_degree NUMBER;
         v_compression_ratio NUMBER;
         v_space_savings_mb NUMBER;
+        v_num_indexes NUMBER;
+        v_num_constraints NUMBER;
+        v_num_triggers NUMBER;
+        v_has_lobs CHAR(1);
+        v_has_foreign_keys CHAR(1);
+        v_candidate_columns CLOB;
+        v_complexity_factors VARCHAR2(2000);
+        v_estimated_downtime NUMBER;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
@@ -1354,6 +1364,56 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Get parallel degree once for all date column analysis
         v_parallel_degree := get_parallel_degree(v_task.source_owner, v_task.source_table);
+
+        -- Collect table metadata statistics
+        BEGIN
+            -- Count indexes
+            SELECT COUNT(*)
+            INTO v_num_indexes
+            FROM dba_indexes
+            WHERE table_owner = v_task.source_owner
+            AND table_name = v_task.source_table;
+
+            -- Count constraints
+            SELECT COUNT(*)
+            INTO v_num_constraints
+            FROM dba_constraints
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table
+            AND constraint_type IN ('P', 'U', 'C', 'R');  -- Primary, Unique, Check, Foreign Key
+
+            -- Count triggers
+            SELECT COUNT(*)
+            INTO v_num_triggers
+            FROM dba_triggers
+            WHERE table_owner = v_task.source_owner
+            AND table_name = v_task.source_table;
+
+            -- Check for LOB columns
+            SELECT CASE WHEN COUNT(*) > 0 THEN 'Y' ELSE 'N' END
+            INTO v_has_lobs
+            FROM dba_tab_columns
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table
+            AND data_type IN ('CLOB', 'BLOB', 'NCLOB', 'BFILE');
+
+            -- Check for foreign keys
+            SELECT CASE WHEN COUNT(*) > 0 THEN 'Y' ELSE 'N' END
+            INTO v_has_foreign_keys
+            FROM dba_constraints
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table
+            AND constraint_type = 'R';  -- Referential (Foreign Key)
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- If any metadata query fails, set defaults
+                v_num_indexes := 0;
+                v_num_constraints := 0;
+                v_num_triggers := 0;
+                v_has_lobs := 'N';
+                v_has_foreign_keys := 'N';
+        END;
 
         -- Comprehensive date column analysis
         DECLARE
@@ -1552,7 +1612,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         -- 3. Widest range (secondary factor if usage scores are similar)
                         IF NOT v_date_found THEN
                             -- Selection logic: heavily prefer columns without data quality issues
-                            IF (
+                            IF v_date_column IS NULL THEN
+                                -- No column selected yet - select first column as baseline
+                                v_max_range := v_range_days;
+                                v_max_usage_score := v_usage_score;
+                                v_date_column := v_date_columns(i);
+                                v_date_type := 'DATE';
+                                v_date_format := 'STANDARD';
+                                v_conversion_expr := v_date_column;
+                                v_selected_null_pct := v_null_percentage;
+                                v_selected_has_time := v_has_time_component;
+                                v_selected_usage_score := v_usage_score;
+                                v_best_has_quality_issue := v_data_quality_issue;
+                            ELSIF (
                                 -- Case 1: Current has no issue, best has issue -> always select current
                                 (v_data_quality_issue = 'N' AND v_best_has_quality_issue = 'Y') OR
 
@@ -1657,6 +1729,66 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Calculate complexity
         v_complexity := calculate_complexity_score(v_task.source_owner, v_task.source_table);
 
+        -- Build complexity factors description
+        DECLARE
+            v_factors SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();
+        BEGIN
+            IF v_num_indexes > 5 THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Many indexes (' || v_num_indexes || ')'; END IF;
+            IF v_num_constraints > 5 THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Many constraints (' || v_num_constraints || ')'; END IF;
+            IF v_num_triggers > 0 THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Has triggers (' || v_num_triggers || ')'; END IF;
+            IF v_has_lobs = 'Y' THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Contains LOB columns'; END IF;
+            IF v_has_foreign_keys = 'Y' THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Has foreign keys'; END IF;
+            IF v_table_size > 100 THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Large table (' || ROUND(v_table_size, 2) || ' MB)'; END IF;
+            IF v_requires_conversion = 'Y' THEN v_factors.EXTEND; v_factors(v_factors.COUNT) := 'Requires date conversion'; END IF;
+
+            -- Convert array to comma-separated string
+            IF v_factors.COUNT > 0 THEN
+                v_complexity_factors := '';
+                FOR i IN 1..v_factors.COUNT LOOP
+                    v_complexity_factors := v_complexity_factors || v_factors(i);
+                    IF i < v_factors.COUNT THEN
+                        v_complexity_factors := v_complexity_factors || ', ';
+                    END IF;
+                END LOOP;
+            ELSE
+                v_complexity_factors := 'Simple table, low complexity';
+            END IF;
+        END;
+
+        -- Estimate downtime in minutes based on table size, method, and complexity
+        DECLARE
+            v_base_time NUMBER;
+            v_method_multiplier NUMBER;
+        BEGIN
+            -- Base time: ~1 minute per GB for ONLINE, ~30 seconds per GB for OFFLINE/CTAS
+            CASE v_task.migration_method
+                WHEN 'ONLINE' THEN v_method_multiplier := 1.0;   -- Slower but no downtime
+                WHEN 'OFFLINE' THEN v_method_multiplier := 0.5;  -- Faster but requires downtime
+                WHEN 'CTAS' THEN v_method_multiplier := 0.5;
+                WHEN 'EXCHANGE' THEN v_method_multiplier := 0.1; -- Very fast
+                ELSE v_method_multiplier := 1.0;
+            END CASE;
+
+            -- Base calculation: size_in_GB * minutes_per_GB * method_multiplier * complexity_factor
+            v_base_time := (v_table_size / 1024) * 60 * v_method_multiplier * (v_complexity / 5);
+
+            -- Add time for indexes rebuild (significant for many indexes)
+            IF v_num_indexes > 0 THEN
+                v_base_time := v_base_time + (v_num_indexes * (v_table_size / 1024) * 10);
+            END IF;
+
+            -- Add time for LOBs (LOBs are slower to migrate)
+            IF v_has_lobs = 'Y' THEN
+                v_base_time := v_base_time * 1.5;
+            END IF;
+
+            v_estimated_downtime := ROUND(v_base_time, 2);
+        END;
+
+        -- Build candidate_columns JSON from all_date_columns_analysis
+        -- Simply use the already-constructed all_date_columns_analysis
+        v_candidate_columns := v_all_date_analysis;
+
         -- Estimate partition count
         IF v_task.partition_key IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
             v_partition_count := estimate_partition_count(
@@ -1693,6 +1825,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             UPDATE SET
                 table_rows = v_num_rows,
                 table_size_mb = v_table_size,
+                num_indexes = v_num_indexes,
+                num_constraints = v_num_constraints,
+                num_triggers = v_num_triggers,
+                has_lobs = v_has_lobs,
+                has_foreign_keys = v_has_foreign_keys,
+                candidate_columns = v_candidate_columns,
                 recommended_strategy = v_recommended_strategy,
                 recommendation_reason = v_reason,
                 date_column_name = v_date_column,
@@ -1706,6 +1844,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 estimated_compression_ratio = v_compression_ratio,
                 estimated_space_savings_mb = v_space_savings_mb,
                 complexity_score = v_complexity,
+                complexity_factors = v_complexity_factors,
+                estimated_downtime_minutes = v_estimated_downtime,
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
                 warnings = v_warnings,
@@ -1715,6 +1855,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 task_id,
                 table_rows,
                 table_size_mb,
+                num_indexes,
+                num_constraints,
+                num_triggers,
+                has_lobs,
+                has_foreign_keys,
+                candidate_columns,
                 recommended_strategy,
                 recommendation_reason,
                 date_column_name,
@@ -1728,6 +1874,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 estimated_compression_ratio,
                 estimated_space_savings_mb,
                 complexity_score,
+                complexity_factors,
+                estimated_downtime_minutes,
                 dependent_objects,
                 blocking_issues,
                 warnings,
@@ -1736,6 +1884,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 p_task_id,
                 v_num_rows,
                 v_table_size,
+                v_num_indexes,
+                v_num_constraints,
+                v_num_triggers,
+                v_has_lobs,
+                v_has_foreign_keys,
+                v_candidate_columns,
                 v_recommended_strategy,
                 v_reason,
                 v_date_column,
@@ -1749,6 +1903,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_compression_ratio,
                 v_space_savings_mb,
                 v_complexity,
+                v_complexity_factors,
+                v_estimated_downtime,
                 v_dependent_objects,
                 v_blocking_issues,
                 v_warnings,
