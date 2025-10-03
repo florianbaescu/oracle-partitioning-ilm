@@ -1247,6 +1247,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_all_date_analysis CLOB;
         v_date_found BOOLEAN := FALSE;
         v_error_count NUMBER := 0;
+        v_parallel_degree NUMBER;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
@@ -1293,6 +1294,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_table_size := 0;
         END;
 
+        -- Get parallel degree once for all date column analysis
+        v_parallel_degree := get_parallel_degree(v_task.source_owner, v_task.source_table);
+
         -- Comprehensive date column analysis
         DECLARE
             v_scd2_type VARCHAR2(30);
@@ -1316,11 +1320,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_selected_usage_score NUMBER := 0;
             v_json_analysis VARCHAR2(32767);
             v_first_json BOOLEAN := TRUE;
-            v_parallel_degree NUMBER;
         BEGIN
-            -- Get parallel degree once for all date column analysis
-            v_parallel_degree := get_parallel_degree(v_task.source_owner, v_task.source_table);
-
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
                 v_date_type := 'DATE';
@@ -1638,18 +1638,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 WHEN MATCHED THEN
                     UPDATE SET
                         warnings = v_error_json,
-                        error_message = 'Analysis failed: ' || v_error_msg,
                         analysis_date = SYSTIMESTAMP
                 WHEN NOT MATCHED THEN
                     INSERT (
                         task_id,
                         warnings,
-                        error_message,
                         analysis_date
                     ) VALUES (
                         p_task_id,
                         v_error_json,
-                        'Analysis failed: ' || v_error_msg,
                         SYSTIMESTAMP
                     );
 
