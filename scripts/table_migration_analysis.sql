@@ -1267,6 +1267,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_idx_count NUMBER;
         v_cons_count NUMBER;
         v_fk_count NUMBER;
+        v_view_count NUMBER;
+        v_code_count NUMBER;
     BEGIN
         DBMS_LOB.CREATETEMPORARY(v_result, TRUE);
 
@@ -1337,12 +1339,35 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 AND cc.column_name = p_analyzed_columns(i)
                 AND c.constraint_type = 'R';  -- Foreign Key
 
+                -- Count views using this column (search view text for column reference)
+                BEGIN
+                    SELECT COUNT(DISTINCT view_name) INTO v_view_count
+                    FROM dba_views
+                    WHERE owner = p_owner
+                    AND UPPER(text_vc) LIKE '%' || UPPER(p_table_name) || '%' || UPPER(p_analyzed_columns(i)) || '%';
+                EXCEPTION
+                    WHEN OTHERS THEN v_view_count := 0;
+                END;
+
+                -- Count stored code using this column (packages, procedures, functions)
+                BEGIN
+                    SELECT COUNT(DISTINCT name || type) INTO v_code_count
+                    FROM dba_source
+                    WHERE owner = p_owner
+                    AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+                    AND UPPER(text) LIKE '%' || UPPER(p_table_name) || '%' || UPPER(p_analyzed_columns(i)) || '%';
+                EXCEPTION
+                    WHEN OTHERS THEN v_code_count := 0;
+                END;
+
                 IF i > 1 THEN DBMS_LOB.APPEND(v_result, ','); END IF;
                 DBMS_LOB.APPEND(v_result,
                     '"' || p_analyzed_columns(i) || '": {' ||
                     '"num_indexes": ' || v_idx_count || ',' ||
                     '"num_constraints": ' || v_cons_count || ',' ||
-                    '"num_foreign_keys": ' || v_fk_count ||
+                    '"num_foreign_keys": ' || v_fk_count || ',' ||
+                    '"num_views": ' || v_view_count || ',' ||
+                    '"num_stored_code": ' || v_code_count ||
                     '}');
             END LOOP;
         END IF;
