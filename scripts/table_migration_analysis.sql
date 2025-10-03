@@ -47,7 +47,8 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
     FUNCTION get_dependent_objects(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_column VARCHAR2 DEFAULT NULL
+        p_partition_column VARCHAR2 DEFAULT NULL,
+        p_analyzed_columns SYS.ODCIVARCHAR2LIST DEFAULT NULL
     ) RETURN CLOB;
 
     FUNCTION identify_blocking_issues(
@@ -1257,11 +1258,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     FUNCTION get_dependent_objects(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_column VARCHAR2 DEFAULT NULL
+        p_partition_column VARCHAR2 DEFAULT NULL,
+        p_analyzed_columns SYS.ODCIVARCHAR2LIST DEFAULT NULL
     ) RETURN CLOB
     AS
         v_result CLOB;
         v_count NUMBER;
+        v_idx_count NUMBER;
+        v_cons_count NUMBER;
+        v_fk_count NUMBER;
     BEGIN
         DBMS_LOB.CREATETEMPORARY(v_result, TRUE);
 
@@ -1272,25 +1277,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             DBMS_LOB.APPEND(v_result, '"partition_column": "' || p_partition_column || '",');
         END IF;
 
-        -- Indexes
+        -- Total Indexes
         SELECT COUNT(*) INTO v_count
         FROM dba_indexes
         WHERE table_owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"indexes": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '"total_indexes": ' || v_count || ',');
 
-        -- Constraints
+        -- Total Constraints
         SELECT COUNT(*) INTO v_count
         FROM dba_constraints
         WHERE owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"constraints": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '"total_constraints": ' || v_count || ',');
 
-        -- Triggers
+        -- Total Triggers
         SELECT COUNT(*) INTO v_count
         FROM dba_triggers
         WHERE table_owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"triggers": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '"total_triggers": ' || v_count || ',');
 
-        -- Foreign keys referencing this table
+        -- Total Foreign keys referencing this table
         SELECT COUNT(*) INTO v_count
         FROM dba_constraints
         WHERE r_owner = p_owner
@@ -1299,8 +1304,50 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE owner = p_owner AND table_name = p_table_name
             AND constraint_type = 'P'
         );
-        DBMS_LOB.APPEND(v_result, '"referenced_by": ' || v_count);
+        DBMS_LOB.APPEND(v_result, '"total_referenced_by": ' || v_count || ',');
 
+        -- Analyzed columns usage
+        DBMS_LOB.APPEND(v_result, '"analyzed_columns": {');
+
+        IF p_analyzed_columns IS NOT NULL AND p_analyzed_columns.COUNT > 0 THEN
+            FOR i IN 1..p_analyzed_columns.COUNT LOOP
+                -- Count indexes using this column
+                SELECT COUNT(DISTINCT i.index_name) INTO v_idx_count
+                FROM dba_ind_columns ic
+                JOIN dba_indexes i ON i.owner = ic.index_owner AND i.index_name = ic.index_name
+                WHERE ic.table_owner = p_owner
+                AND ic.table_name = p_table_name
+                AND ic.column_name = p_analyzed_columns(i);
+
+                -- Count constraints using this column
+                SELECT COUNT(DISTINCT c.constraint_name) INTO v_cons_count
+                FROM dba_cons_columns cc
+                JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
+                WHERE cc.owner = p_owner
+                AND cc.table_name = p_table_name
+                AND cc.column_name = p_analyzed_columns(i)
+                AND c.constraint_type IN ('P', 'U', 'C');  -- Primary, Unique, Check
+
+                -- Count foreign keys using this column
+                SELECT COUNT(DISTINCT c.constraint_name) INTO v_fk_count
+                FROM dba_cons_columns cc
+                JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
+                WHERE cc.owner = p_owner
+                AND cc.table_name = p_table_name
+                AND cc.column_name = p_analyzed_columns(i)
+                AND c.constraint_type = 'R';  -- Foreign Key
+
+                IF i > 1 THEN DBMS_LOB.APPEND(v_result, ','); END IF;
+                DBMS_LOB.APPEND(v_result,
+                    '"' || p_analyzed_columns(i) || '": {' ||
+                    '"num_indexes": ' || v_idx_count || ',' ||
+                    '"num_constraints": ' || v_cons_count || ',' ||
+                    '"num_foreign_keys": ' || v_fk_count ||
+                    '}');
+            END LOOP;
+        END IF;
+
+        DBMS_LOB.APPEND(v_result, '}');
         DBMS_LOB.APPEND(v_result, '}');
 
         RETURN v_result;
@@ -1932,8 +1979,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             );
         END IF;
 
-        -- Get dependencies (include partition column being analyzed)
-        v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column);
+        -- Get dependencies (include partition column and all analyzed columns)
+        v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column, v_date_columns);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
         -- Close warnings JSON array
