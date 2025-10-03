@@ -1370,6 +1370,59 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_null_count, v_non_null_count, v_null_percentage,
                         v_has_time_component, v_distinct_dates, v_usage_score
                     ) THEN
+                        -- Validate date ranges for data quality issues
+                        DECLARE
+                            v_min_year NUMBER;
+                            v_max_year NUMBER;
+                            v_data_quality_warning VARCHAR2(500) := '';
+                        BEGIN
+                            v_min_year := EXTRACT(YEAR FROM v_min_date);
+                            v_max_year := EXTRACT(YEAR FROM v_max_date);
+
+                            -- Check for suspicious years (likely data quality issues)
+                            IF v_min_year < 1900 THEN
+                                v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (< 1900) - possible data quality issue';
+                                DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
+
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
+                                    '","issue":"MIN date year ' || v_min_year || ' is before 1900","min_date":"' ||
+                                    TO_CHAR(v_min_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                v_error_count := v_error_count + 1;
+                            ELSIF v_min_year > 2100 THEN
+                                v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (> 2100) - possible data quality issue';
+                                DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
+
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
+                                    '","issue":"MIN date year ' || v_min_year || ' is after 2100","min_date":"' ||
+                                    TO_CHAR(v_min_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                v_error_count := v_error_count + 1;
+                            END IF;
+
+                            IF v_max_year < 1900 THEN
+                                v_data_quality_warning := v_data_quality_warning || CASE WHEN LENGTH(v_data_quality_warning) > 0 THEN '; ' ELSE '' END ||
+                                    'WARNING: MAX date has year ' || v_max_year || ' (< 1900)';
+                                DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' < 1900');
+
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
+                                    '","issue":"MAX date year ' || v_max_year || ' is before 1900","max_date":"' ||
+                                    TO_CHAR(v_max_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                v_error_count := v_error_count + 1;
+                            ELSIF v_max_year > 2100 THEN
+                                v_data_quality_warning := v_data_quality_warning || CASE WHEN LENGTH(v_data_quality_warning) > 0 THEN '; ' ELSE '' END ||
+                                    'WARNING: MAX date has year ' || v_max_year || ' (> 2100)';
+                                DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' > 2100');
+
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
+                                    '","issue":"MAX date year ' || v_max_year || ' is after 2100","max_date":"' ||
+                                    TO_CHAR(v_max_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                v_error_count := v_error_count + 1;
+                            END IF;
+                        END;
+
                         -- Build JSON entry for this date column
                         IF NOT v_first_json THEN
                             DBMS_LOB.APPEND(v_all_date_analysis, ',');
@@ -1381,6 +1434,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             '"data_type":"DATE",' ||
                             '"min_date":"' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' ||
                             '"max_date":"' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' ||
+                            '"min_year":' || EXTRACT(YEAR FROM v_min_date) || ',' ||
+                            '"max_year":' || EXTRACT(YEAR FROM v_max_date) || ',' ||
                             '"range_days":' || v_range_days || ',' ||
                             '"range_years":' || ROUND(v_range_days/365.25, 2) || ',' ||
                             '"null_count":' || v_null_count || ',' ||
@@ -1395,8 +1450,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         DBMS_LOB.APPEND(v_all_date_analysis, v_json_analysis);
 
                         DBMS_OUTPUT.PUT_LINE('  - ' || v_date_columns(i) || ': ' ||
-                            TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' ||
-                            TO_CHAR(v_max_date, 'YYYY-MM-DD') ||
+                            TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' (year ' || EXTRACT(YEAR FROM v_min_date) || ') to ' ||
+                            TO_CHAR(v_max_date, 'YYYY-MM-DD') || ' (year ' || EXTRACT(YEAR FROM v_max_date) || ')' ||
                             ' (' || v_range_days || ' days, ' || v_null_percentage || '% NULLs' ||
                             CASE WHEN v_has_time_component = 'Y' THEN ', has time component' ELSE '' END ||
                             ', usage score: ' || v_usage_score || ')');
