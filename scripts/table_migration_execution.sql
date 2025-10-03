@@ -626,17 +626,34 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         WHEN OTHERS THEN
             DECLARE
                 v_error_msg VARCHAR2(4000) := SQLERRM;
+                v_error_code NUMBER := SQLCODE;
+                v_end_time TIMESTAMP := SYSTIMESTAMP;
             BEGIN
+                -- Log error to execution log
+                log_step(
+                    p_task_id => p_task_id,
+                    p_step_number => 999,
+                    p_step_name => 'MIGRATION_FAILED',
+                    p_step_type => 'ERROR',
+                    p_sql => TO_CLOB('Migration failed with error'),
+                    p_status => 'FAILED',
+                    p_start_time => NVL(v_start_time, v_end_time),
+                    p_end_time => v_end_time,
+                    p_error_code => v_error_code,
+                    p_error_message => v_error_msg
+                );
+
+                -- Update task status
                 UPDATE cmr.dwh_migration_tasks
                 SET status = 'FAILED',
-                    execution_end = SYSTIMESTAMP,
+                    execution_end = v_end_time,
                     error_message = v_error_msg
                 WHERE task_id = p_task_id;
                 COMMIT;
 
-                DBMS_OUTPUT.PUT_LINE('ERROR: Migration failed - ' || v_error_msg);
+                -- Log error but don't raise exception
+                DBMS_OUTPUT.PUT_LINE('ERROR: Migration failed for task ' || p_task_id || ' - ' || v_error_msg);
             END;
-            RAISE;
     END execute_migration;
 
 

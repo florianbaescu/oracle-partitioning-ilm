@@ -497,14 +497,45 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
     EXCEPTION
         WHEN OTHERS THEN
-            ROLLBACK;
-            DBMS_OUTPUT.PUT_LINE('ERROR executing action: ' || SQLERRM);
+            DECLARE
+                v_error_msg_outer VARCHAR2(4000) := SQLERRM;
+                v_error_code NUMBER := SQLCODE;
+                v_end_time_outer TIMESTAMP := SYSTIMESTAMP;
+            BEGIN
+                ROLLBACK;
 
-            UPDATE cmr.dwh_ilm_evaluation_queue
-            SET execution_status = 'FAILED'
-            WHERE queue_id = p_queue_id;
+                -- Log critical error to execution log
+                BEGIN
+                    log_execution(
+                        p_execution_id => v_execution_id,
+                        p_policy_id => NVL(v_policy.policy_id, 0),
+                        p_policy_name => NVL(v_policy.policy_name, 'UNKNOWN'),
+                        p_table_owner => NVL(v_queue.table_owner, 'UNKNOWN'),
+                        p_table_name => NVL(v_queue.table_name, 'UNKNOWN'),
+                        p_partition_name => NVL(v_queue.partition_name, 'UNKNOWN'),
+                        p_action_type => 'ERROR',
+                        p_action_sql => TO_CLOB('Critical error during action execution'),
+                        p_status => 'FAILED',
+                        p_execution_start => NVL(v_start_time, v_end_time_outer),
+                        p_execution_end => v_end_time_outer,
+                        p_error_code => v_error_code,
+                        p_error_message => v_error_msg_outer
+                    );
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL; -- If logging fails, continue with status update
+                END;
 
-            COMMIT;
+                -- Update queue status
+                UPDATE cmr.dwh_ilm_evaluation_queue
+                SET execution_status = 'FAILED'
+                WHERE queue_id = p_queue_id;
+
+                COMMIT;
+
+                -- Log error but don't raise exception
+                DBMS_OUTPUT.PUT_LINE('ERROR: Action execution failed for queue_id ' || p_queue_id || ' - ' || v_error_msg_outer);
+            END;
     END execute_single_action;
 
 
@@ -524,9 +555,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             AND eligible = 'Y'
             ORDER BY evaluation_date
         ) LOOP
-            execute_single_action(queue_item.queue_id);
-
-            v_count := v_count + 1;
+            BEGIN
+                execute_single_action(queue_item.queue_id);
+                v_count := v_count + 1;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR executing queue_id ' || queue_item.queue_id || ': ' || SQLERRM);
+            END;
 
             EXIT WHEN p_max_operations IS NOT NULL AND v_count >= p_max_operations;
         END LOOP;
@@ -580,10 +615,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 AND eligible = 'Y'
                 ORDER BY evaluation_date
             ) LOOP
-                execute_single_action(queue_item.queue_id);
-
-                v_policy_count := v_policy_count + 1;
-                v_total_count := v_total_count + 1;
+                BEGIN
+                    execute_single_action(queue_item.queue_id);
+                    v_policy_count := v_policy_count + 1;
+                    v_total_count := v_total_count + 1;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  ERROR executing queue_id ' || queue_item.queue_id || ': ' || SQLERRM);
+                END;
 
                 EXIT WHEN p_max_operations IS NOT NULL AND v_total_count >= p_max_operations;
             END LOOP;

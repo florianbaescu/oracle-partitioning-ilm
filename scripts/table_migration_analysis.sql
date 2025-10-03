@@ -1622,14 +1622,48 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         WHEN OTHERS THEN
             DECLARE
                 v_error_msg VARCHAR2(4000) := SQLERRM;
+                v_error_code NUMBER := SQLCODE;
+                v_error_json CLOB;
             BEGIN
+                -- Build error details as JSON
+                DBMS_LOB.CREATETEMPORARY(v_error_json, TRUE);
+                DBMS_LOB.APPEND(v_error_json, '[{"type":"ERROR","issue":"Analysis failed with ' ||
+                    REPLACE(v_error_msg, '"', '\"') || '","code":' || v_error_code ||
+                    ',"action":"Review error details and table structure"}]');
+
+                -- Log to analysis table (MERGE to handle both new and rerun scenarios)
+                MERGE INTO cmr.dwh_migration_analysis a
+                USING (SELECT p_task_id AS task_id FROM dual) t
+                ON (a.task_id = t.task_id)
+                WHEN MATCHED THEN
+                    UPDATE SET
+                        warnings = v_error_json,
+                        error_message = 'Analysis failed: ' || v_error_msg,
+                        analysis_date = SYSTIMESTAMP
+                WHEN NOT MATCHED THEN
+                    INSERT (
+                        task_id,
+                        warnings,
+                        error_message,
+                        analysis_date
+                    ) VALUES (
+                        p_task_id,
+                        v_error_json,
+                        'Analysis failed: ' || v_error_msg,
+                        SYSTIMESTAMP
+                    );
+
+                -- Update task status
                 UPDATE cmr.dwh_migration_tasks
                 SET status = 'FAILED',
                     error_message = 'Analysis failed: ' || v_error_msg
                 WHERE task_id = p_task_id;
+
                 COMMIT;
+
+                -- Log error but don't raise exception
+                DBMS_OUTPUT.PUT_LINE('ERROR: Analysis failed for task ' || p_task_id || ': ' || v_error_msg);
             END;
-            RAISE;
     END analyze_table;
 
 
