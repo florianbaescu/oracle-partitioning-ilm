@@ -94,9 +94,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     ) RETURN NUMBER
     AS
         v_index_count NUMBER := 0;
+        v_view_count NUMBER := 0;
+        v_source_count NUMBER := 0;
+        v_usage_score NUMBER := 0;
     BEGIN
-        -- Check if column is indexed (most reliable and performant indicator)
-        -- Indexed columns are proven to be used in queries
+        -- Check if column is indexed (strongest indicator - proven query usage)
         BEGIN
             SELECT COUNT(*)
             INTO v_index_count
@@ -109,8 +111,48 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_index_count := 0;
         END;
 
-        -- Return index count as score
-        RETURN v_index_count;
+        -- Check usage in views (search TEXT_VC for table and column references)
+        BEGIN
+            SELECT COUNT(DISTINCT view_name)
+            INTO v_view_count
+            FROM dba_views
+            WHERE owner = p_owner
+            AND (
+                UPPER(text_vc) LIKE '%' || UPPER(p_table_name) || '%' ||
+                                          UPPER(p_column_name) || '%'
+                OR
+                UPPER(text_vc) LIKE '%' || UPPER(p_column_name) || '%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_view_count := 0;
+        END;
+
+        -- Check usage in stored code (search DBA_SOURCE.TEXT for table and column references)
+        BEGIN
+            SELECT COUNT(DISTINCT name || type)
+            INTO v_source_count
+            FROM dba_source
+            WHERE owner = p_owner
+            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
+            AND (
+                UPPER(text) LIKE '%' || UPPER(p_table_name) || '%' ||
+                                        UPPER(p_column_name) || '%'
+                OR
+                UPPER(text) LIKE '%' || UPPER(p_column_name) || '%'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            v_source_count := 0;
+        END;
+
+        -- Calculate weighted score
+        -- Indexes: weight 10 (strongest - proven query usage)
+        -- Views: weight 3 (likely filtering/joining)
+        -- Stored code: weight 2 (programmatic access)
+        v_usage_score := (v_index_count * 10) +
+                        (v_view_count * 3) +
+                        (v_source_count * 2);
+
+        RETURN v_usage_score;
     EXCEPTION
         WHEN OTHERS THEN
             RETURN 0;
