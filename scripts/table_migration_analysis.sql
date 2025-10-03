@@ -791,6 +791,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_min_date DATE;
         v_max_date DATE;
         v_range_days NUMBER;
+        v_null_count NUMBER;
+        v_non_null_count NUMBER;
+        v_null_percentage NUMBER;
+        v_has_time_component VARCHAR2(1);
+        v_distinct_dates NUMBER;
+        v_usage_score NUMBER;
         v_num_rows NUMBER;
         v_best_column VARCHAR2(128);
         v_max_range NUMBER := 0;
@@ -860,7 +866,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             FOR i IN 1..v_date_columns.COUNT LOOP
                 IF analyze_date_column(
                     p_owner, p_table_name, v_date_columns(i),
-                    v_min_date, v_max_date, v_range_days
+                    v_min_date, v_max_date, v_range_days,
+                    v_null_count, v_non_null_count, v_null_percentage,
+                    v_has_time_component, v_distinct_dates, v_usage_score
                 ) THEN
                     IF v_range_days > v_max_range THEN
                         v_max_range := v_range_days;
