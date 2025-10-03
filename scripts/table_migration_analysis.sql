@@ -60,6 +60,10 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_table_name VARCHAR2
     ) RETURN NUMBER;
 
+    FUNCTION get_compression_ratio(
+        p_compression_type VARCHAR2
+    ) RETURN NUMBER;
+
 END pck_dwh_table_migration_analyzer;
 /
 
