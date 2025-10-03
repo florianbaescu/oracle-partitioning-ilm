@@ -111,35 +111,27 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_index_count := 0;
         END;
 
-        -- Check usage in views (search TEXT_VC for table and column references)
+        -- Check usage in views (search TEXT_VC for table and column references together)
         BEGIN
             SELECT COUNT(DISTINCT view_name)
             INTO v_view_count
             FROM dba_views
             WHERE owner = p_owner
-            AND (
-                UPPER(text_vc) LIKE '%' || UPPER(p_table_name) || '%' ||
-                                          UPPER(p_column_name) || '%'
-                OR
-                UPPER(text_vc) LIKE '%' || UPPER(p_column_name) || '%'
-            );
+            AND UPPER(text_vc) LIKE '%' || UPPER(p_table_name) || '%' ||
+                                          UPPER(p_column_name) || '%';
         EXCEPTION WHEN OTHERS THEN
             v_view_count := 0;
         END;
 
-        -- Check usage in stored code (search DBA_SOURCE.TEXT for table and column references)
+        -- Check usage in stored code (search DBA_SOURCE.TEXT for table and column references together)
         BEGIN
             SELECT COUNT(DISTINCT name || type)
             INTO v_source_count
             FROM dba_source
             WHERE owner = p_owner
             AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
-            AND (
-                UPPER(text) LIKE '%' || UPPER(p_table_name) || '%' ||
-                                        UPPER(p_column_name) || '%'
-                OR
-                UPPER(text) LIKE '%' || UPPER(p_column_name) || '%'
-            );
+            AND UPPER(text) LIKE '%' || UPPER(p_table_name) || '%' ||
+                                        UPPER(p_column_name) || '%';
         EXCEPTION WHEN OTHERS THEN
             v_source_count := 0;
         END;
