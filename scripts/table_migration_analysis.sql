@@ -87,6 +87,51 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END get_date_columns;
 
 
+    FUNCTION get_parallel_degree(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2
+    ) RETURN NUMBER
+    AS
+        v_num_rows NUMBER;
+        v_parallel_degree NUMBER;
+    BEGIN
+        -- Get table row count from statistics
+        BEGIN
+            SELECT NVL(num_rows, 0)
+            INTO v_num_rows
+            FROM dba_tables
+            WHERE owner = p_owner
+            AND table_name = p_table_name;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_num_rows := 0;
+        END;
+
+        -- Calculate parallel degree based on table size
+        -- Small tables (<100K rows): No parallelism (degree 1)
+        -- Medium tables (100K-1M rows): Degree 2
+        -- Large tables (1M-10M rows): Degree 4
+        -- Very large tables (10M-100M rows): Degree 8
+        -- Huge tables (>100M rows): Degree 16
+        IF v_num_rows < 100000 THEN
+            v_parallel_degree := 1;
+        ELSIF v_num_rows < 1000000 THEN
+            v_parallel_degree := 2;
+        ELSIF v_num_rows < 10000000 THEN
+            v_parallel_degree := 4;
+        ELSIF v_num_rows < 100000000 THEN
+            v_parallel_degree := 8;
+        ELSE
+            v_parallel_degree := 16;
+        END IF;
+
+        RETURN v_parallel_degree;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 1; -- Default to no parallelism on error
+    END get_parallel_degree;
+
+
     FUNCTION get_column_usage_score(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
@@ -173,9 +218,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_min_time VARCHAR2(8);
         v_max_time VARCHAR2(8);
         v_time_sample NUMBER;
+        v_parallel_degree NUMBER;
     BEGIN
-        -- Get date range and NULL statistics in a single query
-        v_sql := 'SELECT ' ||
+        -- Get dynamic parallel degree based on table size
+        v_parallel_degree := get_parallel_degree(p_owner, p_table_name);
+
+        -- Get date range and NULL statistics in a single query with parallel hint
+        v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ ' ||
                 '  MIN(' || p_column_name || '), ' ||
                 '  MAX(' || p_column_name || '), ' ||
                 '  COUNT(*), ' ||
@@ -201,7 +250,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             -- Check if column has time component (not all midnight)
             -- Sample: check if any non-midnight times exist
             v_sql := 'SELECT COUNT(*) FROM (' ||
-                    '  SELECT ' || p_column_name ||
+                    '  SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ ' || p_column_name ||
                     '  FROM ' || p_owner || '.' || p_table_name ||
                     '  WHERE ' || p_column_name || ' IS NOT NULL' ||
                     '    AND ' || p_column_name || ' != TRUNC(' || p_column_name || ')' ||
@@ -213,8 +262,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             IF v_time_sample > 0 OR v_min_time != '00:00:00' OR v_max_time != '00:00:00' THEN
                 p_has_time_component := 'Y';
 
-                -- Get distinct date count (without time)
-                v_sql := 'SELECT COUNT(DISTINCT TRUNC(' || p_column_name || ')) ' ||
+                -- Get distinct date count (without time) with parallel hint
+                v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(DISTINCT TRUNC(' || p_column_name || ')) ' ||
                         'FROM ' || p_owner || '.' || p_table_name ||
                         ' WHERE ' || p_column_name || ' IS NOT NULL';
                 EXECUTE IMMEDIATE v_sql INTO p_distinct_dates;
@@ -750,18 +799,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     ) AS
         v_sql VARCHAR2(4000);
         v_total_rows NUMBER;
+        v_parallel_degree NUMBER;
     BEGIN
-        -- Get total rows
-        v_sql := 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name;
+        -- Get dynamic parallel degree based on table size
+        v_parallel_degree := get_parallel_degree(p_owner, p_table_name);
+
+        -- Get total rows with parallel hint
+        v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                p_owner || '.' || p_table_name;
         EXECUTE IMMEDIATE v_sql INTO v_total_rows;
 
-        -- Get distinct values
-        v_sql := 'SELECT COUNT(DISTINCT ' || p_column_name || ') FROM ' ||
+        -- Get distinct values with parallel hint
+        v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(DISTINCT ' || p_column_name || ') FROM ' ||
                 p_owner || '.' || p_table_name;
         EXECUTE IMMEDIATE v_sql INTO p_distinct_values;
 
-        -- Get null percentage
-        v_sql := 'SELECT ROUND(COUNT(*) * 100.0 / ' || v_total_rows || ', 2) FROM ' ||
+        -- Get null percentage with parallel hint
+        v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ ROUND(COUNT(*) * 100.0 / ' || v_total_rows || ', 2) FROM ' ||
                 p_owner || '.' || p_table_name ||
                 ' WHERE ' || p_column_name || ' IS NULL';
         EXECUTE IMMEDIATE v_sql INTO p_null_percentage;
