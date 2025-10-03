@@ -93,36 +93,63 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     ) RETURN NUMBER
     AS
         v_num_rows NUMBER;
+        v_bytes NUMBER;
+        v_size_mb NUMBER;
         v_parallel_degree NUMBER;
     BEGIN
-        -- Get table row count from statistics
+        -- Get table row count and size from statistics
         BEGIN
-            SELECT NVL(num_rows, 0)
-            INTO v_num_rows
-            FROM dba_tables
-            WHERE owner = p_owner
-            AND table_name = p_table_name;
+            SELECT NVL(num_rows, 0), NVL(bytes, 0)
+            INTO v_num_rows, v_bytes
+            FROM dba_tables t
+            LEFT JOIN dba_segments s ON s.owner = t.owner AND s.segment_name = t.table_name
+            WHERE t.owner = p_owner
+            AND t.table_name = p_table_name;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 v_num_rows := 0;
+                v_bytes := 0;
         END;
 
-        -- Calculate parallel degree based on table size
-        -- Small tables (<100K rows): No parallelism (degree 1)
-        -- Medium tables (100K-1M rows): Degree 2
-        -- Large tables (1M-10M rows): Degree 4
-        -- Very large tables (10M-100M rows): Degree 8
-        -- Huge tables (>100M rows): Degree 16
-        IF v_num_rows < 100000 THEN
-            v_parallel_degree := 1;
-        ELSIF v_num_rows < 1000000 THEN
-            v_parallel_degree := 2;
-        ELSIF v_num_rows < 10000000 THEN
-            v_parallel_degree := 4;
-        ELSIF v_num_rows < 100000000 THEN
-            v_parallel_degree := 8;
+        -- If num_rows is 0 (no statistics), use table size in MB as fallback
+        IF v_num_rows = 0 AND v_bytes > 0 THEN
+            v_size_mb := v_bytes / 1024 / 1024;
+
+            -- Estimate parallelism based on size
+            -- <10 MB: degree 1
+            -- 10-100 MB: degree 2
+            -- 100-1000 MB: degree 4
+            -- 1-10 GB: degree 8
+            -- >10 GB: degree 16
+            IF v_size_mb < 10 THEN
+                v_parallel_degree := 1;
+            ELSIF v_size_mb < 100 THEN
+                v_parallel_degree := 2;
+            ELSIF v_size_mb < 1000 THEN
+                v_parallel_degree := 4;
+            ELSIF v_size_mb < 10000 THEN
+                v_parallel_degree := 8;
+            ELSE
+                v_parallel_degree := 16;
+            END IF;
         ELSE
-            v_parallel_degree := 16;
+            -- Use row count based parallelism
+            -- Small tables (<100K rows): No parallelism (degree 1)
+            -- Medium tables (100K-1M rows): Degree 2
+            -- Large tables (1M-10M rows): Degree 4
+            -- Very large tables (10M-100M rows): Degree 8
+            -- Huge tables (>100M rows): Degree 16
+            IF v_num_rows < 100000 THEN
+                v_parallel_degree := 1;
+            ELSIF v_num_rows < 1000000 THEN
+                v_parallel_degree := 2;
+            ELSIF v_num_rows < 10000000 THEN
+                v_parallel_degree := 4;
+            ELSIF v_num_rows < 100000000 THEN
+                v_parallel_degree := 8;
+            ELSE
+                v_parallel_degree := 16;
+            END IF;
         END IF;
 
         RETURN v_parallel_degree;
@@ -457,7 +484,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_sql VARCHAR2(4000);
         v_min_val NUMBER;
         v_max_val NUMBER;
+        v_parallel_degree NUMBER;
     BEGIN
+        -- Get dynamic parallel degree based on table size
+        v_parallel_degree := get_parallel_degree(p_owner, p_table_name);
+
         -- Look for columns with date-like names that are NUMBER type
         FOR rec IN (
             SELECT column_name, data_type, data_length, data_precision
@@ -476,8 +507,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         ) LOOP
             -- Sample the column to detect format
             BEGIN
-                v_sql := 'SELECT MIN(' || rec.column_name || '), MAX(' || rec.column_name || '), ' ||
-                         'COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ ' ||
+                         'MIN(' || rec.column_name || '), MAX(' || rec.column_name || '), COUNT(*) ' ||
+                         'FROM ' || p_owner || '.' || p_table_name ||
                          ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 1000';
 
                 EXECUTE IMMEDIATE v_sql INTO v_min_val, v_max_val, v_count;
@@ -529,7 +561,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_count NUMBER;
         v_sample_value VARCHAR2(100);
         v_sql VARCHAR2(4000);
+        v_parallel_degree NUMBER;
     BEGIN
+        -- Get dynamic parallel degree based on table size
+        v_parallel_degree := get_parallel_degree(p_owner, p_table_name);
+
         -- Look for columns with date-like names that are VARCHAR/CHAR type
         FOR rec IN (
             SELECT column_name, data_type, data_length
@@ -548,7 +584,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         ) LOOP
             -- Sample the column to detect format
             BEGIN
-                v_sql := 'SELECT ' || rec.column_name || ' FROM ' || p_owner || '.' || p_table_name ||
+                v_sql := 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ ' || rec.column_name ||
+                         ' FROM ' || p_owner || '.' || p_table_name ||
                          ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM = 1';
 
                 EXECUTE IMMEDIATE v_sql INTO v_sample_value;
@@ -557,7 +594,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Try various date format conversions
                     -- YYYY-MM-DD
                     BEGIN
-                        EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
                                         ' WHERE TO_DATE(' || rec.column_name || ', ''YYYY-MM-DD'') IS NOT NULL AND ROWNUM <= 100'
                                         INTO v_count;
                         IF v_count > 0 THEN
@@ -570,7 +608,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                     -- DD/MM/YYYY
                     BEGIN
-                        EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
                                         ' WHERE TO_DATE(' || rec.column_name || ', ''DD/MM/YYYY'') IS NOT NULL AND ROWNUM <= 100'
                                         INTO v_count;
                         IF v_count > 0 THEN
@@ -583,7 +622,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                     -- MM/DD/YYYY
                     BEGIN
-                        EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
                                         ' WHERE TO_DATE(' || rec.column_name || ', ''MM/DD/YYYY'') IS NOT NULL AND ROWNUM <= 100'
                                         INTO v_count;
                         IF v_count > 0 THEN
@@ -596,7 +636,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                     -- YYYYMMDD
                     BEGIN
-                        EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
                                         ' WHERE TO_DATE(' || rec.column_name || ', ''YYYYMMDD'') IS NOT NULL AND ROWNUM <= 100'
                                         INTO v_count;
                         IF v_count > 0 THEN
@@ -609,7 +650,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                     -- YYYY-MM-DD HH24:MI:SS
                     BEGIN
-                        EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || p_owner || '.' || p_table_name ||
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || v_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
                                         ' WHERE TO_DATE(' || rec.column_name || ', ''YYYY-MM-DD HH24:MI:SS'') IS NOT NULL AND ROWNUM <= 100'
                                         INTO v_count;
                         IF v_count > 0 THEN
