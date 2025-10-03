@@ -951,44 +951,100 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Check for SCD2 pattern first
         IF detect_scd2_pattern(p_owner, p_table_name, v_scd2_type, v_scd2_column) THEN
-            IF v_scd2_type = 'EFFECTIVE_DATE' THEN
-                v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
-                p_reason := 'SCD2 table with effective_date pattern detected - yearly partitioning for historical tracking';
-            ELSIF v_scd2_type = 'VALID_FROM_TO' THEN
-                v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
-                p_reason := 'SCD2 table with valid_from_dttm/valid_to_dttm pattern detected - yearly partitioning for historical tracking';
-            END IF;
-            RETURN v_strategy;
+            -- Validate data quality of detected column
+            DECLARE
+                v_temp_min DATE; v_temp_max DATE; v_temp_range NUMBER;
+                v_temp_null_cnt NUMBER; v_temp_non_null NUMBER; v_temp_null_pct NUMBER;
+                v_temp_time VARCHAR2(1); v_temp_distinct NUMBER; v_temp_score NUMBER;
+                v_temp_quality VARCHAR2(1);
+            BEGIN
+                IF analyze_date_column(p_owner, p_table_name, v_scd2_column, v_parallel_degree,
+                    v_temp_min, v_temp_max, v_temp_range, v_temp_null_cnt, v_temp_non_null,
+                    v_temp_null_pct, v_temp_time, v_temp_distinct, v_temp_score, v_temp_quality)
+                AND v_temp_quality = 'N' THEN
+                    -- Data quality OK, use stereotype recommendation
+                    IF v_scd2_type = 'EFFECTIVE_DATE' THEN
+                        v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
+                        p_reason := 'SCD2 table with effective_date pattern detected - yearly partitioning for historical tracking';
+                    ELSIF v_scd2_type = 'VALID_FROM_TO' THEN
+                        v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
+                        p_reason := 'SCD2 table with valid_from_dttm/valid_to_dttm pattern detected - yearly partitioning for historical tracking';
+                    END IF;
+                    RETURN v_strategy;
+                END IF;
+                -- If quality issue, fall through to general analysis
+            END;
         END IF;
 
         -- Check for EVENTS table pattern
         IF detect_events_table(p_owner, p_table_name, v_event_column) THEN
-            IF UPPER(p_table_name) LIKE '%AUDIT%' OR UPPER(p_table_name) LIKE '%COMPLIANCE%' THEN
-                v_strategy := 'RANGE(' || v_event_column || ') INTERVAL MONTHLY';
-                p_reason := 'Audit/compliance events table detected - monthly partitioning for long-term retention';
-            ELSE
-                v_strategy := 'RANGE(' || v_event_column || ') INTERVAL DAILY';
-                p_reason := 'Events table detected - daily partitioning for high-volume event data';
-            END IF;
-            RETURN v_strategy;
+            -- Validate data quality of detected column
+            DECLARE
+                v_temp_min DATE; v_temp_max DATE; v_temp_range NUMBER;
+                v_temp_null_cnt NUMBER; v_temp_non_null NUMBER; v_temp_null_pct NUMBER;
+                v_temp_time VARCHAR2(1); v_temp_distinct NUMBER; v_temp_score NUMBER;
+                v_temp_quality VARCHAR2(1);
+            BEGIN
+                IF analyze_date_column(p_owner, p_table_name, v_event_column, v_parallel_degree,
+                    v_temp_min, v_temp_max, v_temp_range, v_temp_null_cnt, v_temp_non_null,
+                    v_temp_null_pct, v_temp_time, v_temp_distinct, v_temp_score, v_temp_quality)
+                AND v_temp_quality = 'N' THEN
+                    -- Data quality OK, use stereotype recommendation
+                    IF UPPER(p_table_name) LIKE '%AUDIT%' OR UPPER(p_table_name) LIKE '%COMPLIANCE%' THEN
+                        v_strategy := 'RANGE(' || v_event_column || ') INTERVAL MONTHLY';
+                        p_reason := 'Audit/compliance events table detected - monthly partitioning for long-term retention';
+                    ELSE
+                        v_strategy := 'RANGE(' || v_event_column || ') INTERVAL DAILY';
+                        p_reason := 'Events table detected - daily partitioning for high-volume event data';
+                    END IF;
+                    RETURN v_strategy;
+                END IF;
+                -- If quality issue, fall through to general analysis
+            END;
         END IF;
 
         -- Check for STAGING table pattern
         IF detect_staging_table(p_owner, p_table_name, v_staging_column) THEN
-            v_strategy := 'RANGE(' || v_staging_column || ') INTERVAL DAILY';
-            p_reason := 'Staging table detected - daily partitioning for easy partition exchange and purging';
-            RETURN v_strategy;
+            -- Validate data quality of detected column
+            DECLARE
+                v_temp_min DATE; v_temp_max DATE; v_temp_range NUMBER;
+                v_temp_null_cnt NUMBER; v_temp_non_null NUMBER; v_temp_null_pct NUMBER;
+                v_temp_time VARCHAR2(1); v_temp_distinct NUMBER; v_temp_score NUMBER;
+                v_temp_quality VARCHAR2(1);
+            BEGIN
+                IF analyze_date_column(p_owner, p_table_name, v_staging_column, v_parallel_degree,
+                    v_temp_min, v_temp_max, v_temp_range, v_temp_null_cnt, v_temp_non_null,
+                    v_temp_null_pct, v_temp_time, v_temp_distinct, v_temp_score, v_temp_quality)
+                AND v_temp_quality = 'N' THEN
+                    -- Data quality OK, use stereotype recommendation
+                    v_strategy := 'RANGE(' || v_staging_column || ') INTERVAL DAILY';
+                    p_reason := 'Staging table detected - daily partitioning for easy partition exchange and purging';
+                    RETURN v_strategy;
+                END IF;
+                -- If quality issue, fall through to general analysis
+            END;
         END IF;
 
         -- Check for HIST table pattern
         DECLARE
             v_hist_column VARCHAR2(128);
+            v_temp_min DATE; v_temp_max DATE; v_temp_range NUMBER;
+            v_temp_null_cnt NUMBER; v_temp_non_null NUMBER; v_temp_null_pct NUMBER;
+            v_temp_time VARCHAR2(1); v_temp_distinct NUMBER; v_temp_score NUMBER;
+            v_temp_quality VARCHAR2(1);
         BEGIN
             IF detect_hist_table(p_owner, p_table_name, v_hist_column) THEN
-                -- HIST tables typically have monthly or yearly snapshots
-                v_strategy := 'RANGE(' || v_hist_column || ') INTERVAL MONTHLY';
-                p_reason := 'Historical table detected - monthly partitioning for snapshot data retention';
-                RETURN v_strategy;
+                -- Validate data quality of detected column
+                IF analyze_date_column(p_owner, p_table_name, v_hist_column, v_parallel_degree,
+                    v_temp_min, v_temp_max, v_temp_range, v_temp_null_cnt, v_temp_non_null,
+                    v_temp_null_pct, v_temp_time, v_temp_distinct, v_temp_score, v_temp_quality)
+                AND v_temp_quality = 'N' THEN
+                    -- Data quality OK, use stereotype recommendation
+                    v_strategy := 'RANGE(' || v_hist_column || ') INTERVAL MONTHLY';
+                    p_reason := 'Historical table detected - monthly partitioning for snapshot data retention';
+                    RETURN v_strategy;
+                END IF;
+                -- If quality issue, fall through to general analysis
             END IF;
         END;
 
@@ -998,44 +1054,66 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Get date columns for general analysis
         v_date_columns := get_date_columns(p_owner, p_table_name);
 
-        -- Analyze each date column
-        IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
-            FOR i IN 1..v_date_columns.COUNT LOOP
-                IF analyze_date_column(
-                    p_owner, p_table_name, v_date_columns(i), v_parallel_degree,
-                    v_min_date, v_max_date, v_range_days,
-                    v_null_count, v_non_null_count, v_null_percentage,
-                    v_has_time_component, v_distinct_dates, v_usage_score,
-                    v_data_quality_issue
-                ) THEN
-                    IF v_range_days > v_max_range THEN
-                        v_max_range := v_range_days;
-                        v_best_column := v_date_columns(i);
+        -- Analyze each date column with quality-first selection
+        DECLARE
+            v_best_quality VARCHAR2(1) := 'Y';  -- Start pessimistic, prefer 'N' (clean)
+            v_max_usage_score NUMBER := 0;
+        BEGIN
+            IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
+                FOR i IN 1..v_date_columns.COUNT LOOP
+                    IF analyze_date_column(
+                        p_owner, p_table_name, v_date_columns(i), v_parallel_degree,
+                        v_min_date, v_max_date, v_range_days,
+                        v_null_count, v_non_null_count, v_null_percentage,
+                        v_has_time_component, v_distinct_dates, v_usage_score,
+                        v_data_quality_issue
+                    ) THEN
+                        -- Quality-first selection: clean columns always beat dirty columns
+                        IF v_best_column IS NULL THEN
+                            -- First column - select as baseline
+                            v_best_column := v_date_columns(i);
+                            v_best_quality := v_data_quality_issue;
+                            v_max_range := v_range_days;
+                            v_max_usage_score := v_usage_score;
+                        ELSIF (
+                            -- Case 1: Current clean, best dirty -> always replace
+                            (v_data_quality_issue = 'N' AND v_best_quality = 'Y') OR
+                            -- Case 2: Same quality -> use score then range
+                            (v_data_quality_issue = v_best_quality AND (
+                                v_usage_score > v_max_usage_score OR
+                                (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range)
+                            ))
+                        ) THEN
+                            v_best_column := v_date_columns(i);
+                            v_best_quality := v_data_quality_issue;
+                            v_max_range := v_range_days;
+                            v_max_usage_score := v_usage_score;
+                        END IF;
                     END IF;
-                END IF;
-            END LOOP;
-
-            -- Recommend strategy based on date range
-            IF v_best_column IS NOT NULL THEN
-                IF v_max_range > 365 * 3 THEN
-                    v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
-                    p_reason := 'Date range spans ' || ROUND(v_max_range/365, 4) ||
-                               ' years - monthly interval partitioning recommended';
-                ELSIF v_max_range > 365 THEN
-                    v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
-                    p_reason := 'Date range spans ' || ROUND(v_max_range/30, 4) ||
-                               ' months - monthly partitioning recommended';
-                ELSIF v_max_range > 90 THEN
-                    v_strategy := 'RANGE(' || v_best_column || ')';
-                    p_reason := 'Date range spans ' || v_max_range ||
-                               ' days - range partitioning recommended';
-                ELSE
-                    v_strategy := NULL;
-                    p_reason := 'Date range too small for effective partitioning';
-                END IF;
-
-                RETURN v_strategy;
+                END LOOP;
             END IF;
+        END;
+
+        -- Recommend strategy based on date range
+        IF v_best_column IS NOT NULL THEN
+            IF v_max_range > 365 * 3 THEN
+                v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
+                p_reason := 'Date range spans ' || ROUND(v_max_range/365, 4) ||
+                           ' years - monthly interval partitioning recommended';
+            ELSIF v_max_range > 365 THEN
+                v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
+                p_reason := 'Date range spans ' || ROUND(v_max_range/30, 4) ||
+                           ' months - monthly partitioning recommended';
+            ELSIF v_max_range > 90 THEN
+                v_strategy := 'RANGE(' || v_best_column || ')';
+                p_reason := 'Date range spans ' || v_max_range ||
+                           ' days - range partitioning recommended';
+            ELSE
+                v_strategy := NULL;
+                p_reason := 'Date range too small for effective partitioning';
+            END IF;
+
+            RETURN v_strategy;
         END IF;
 
         -- No suitable date column, recommend hash partitioning for large tables
