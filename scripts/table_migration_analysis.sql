@@ -1318,18 +1318,22 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             AND table_name = v_task.source_table;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
+                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                     '    "type": "ERROR",' || CHR(10) ||
                     '    "issue": "Table not found in DBA_TABLES",' || CHR(10) ||
                     '    "action": "Verify table exists and gather statistics"' || CHR(10) ||
                     '  }');
+                v_error_count := v_error_count + 1;
                 v_num_rows := NULL;
             WHEN OTHERS THEN
+                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                     '    "type": "ERROR",' || CHR(10) ||
                     '    "issue": "Cannot access table metadata: ' || REPLACE(SQLERRM, '"', '\"') || '",' || CHR(10) ||
                     '    "action": "Check privileges"' || CHR(10) ||
                     '  }');
+                v_error_count := v_error_count + 1;
                 v_num_rows := NULL;
         END;
 
@@ -1373,6 +1377,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_json_analysis VARCHAR2(32767);
             v_first_json BOOLEAN := TRUE;
             v_data_quality_issue VARCHAR2(1);
+            v_best_has_quality_issue VARCHAR2(1) := 'N';
         BEGIN
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
@@ -1424,9 +1429,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_has_time_component, v_distinct_dates, v_usage_score,
                         v_data_quality_issue
                     ) THEN
-                        -- Penalize usage score for data quality issues
+                        -- Penalize usage score for data quality issues (heavy penalty)
                         IF v_data_quality_issue = 'Y' THEN
-                            v_usage_score := GREATEST(0, v_usage_score - 20);  -- Reduce score by 20 points
+                            v_usage_score := GREATEST(0, v_usage_score - 50);  -- Reduce score by 50 points (heavy penalty)
+                            DBMS_OUTPUT.PUT_LINE('  *** PENALIZED: Score reduced by 50 points due to data quality issue');
                         END IF;
                         -- Validate date ranges for data quality issues
                         DECLARE
@@ -1518,6 +1524,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             '    "has_time_component": "' || v_has_time_component || '",' || CHR(10) ||
                             '    "distinct_dates": ' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' || CHR(10) ||
                             '    "usage_score": ' || v_usage_score || ',' || CHR(10) ||
+                            '    "data_quality_issue": "' || v_data_quality_issue || '",' || CHR(10) ||
                             '    "is_primary": ' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END || CHR(10) ||
                         '  }';
 
@@ -1538,12 +1545,22 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         END IF;
 
                         -- If no stereotype found, pick column with best combination of:
-                        -- 1. Highest usage score (primary factor)
-                        -- 2. Widest range (secondary factor if usage scores are similar)
+                        -- 1. Data quality (prefer columns without data quality issues)
+                        -- 2. Highest usage score (primary factor)
+                        -- 3. Widest range (secondary factor if usage scores are similar)
                         IF NOT v_date_found THEN
-                            -- Prefer column with higher usage score, or if similar usage, prefer wider range
-                            IF v_usage_score > v_max_usage_score OR
-                               (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range) THEN
+                            -- Selection logic: heavily prefer columns without data quality issues
+                            IF (
+                                -- Case 1: Current has no issue, best has issue -> always select current
+                                (v_data_quality_issue = 'N' AND v_best_has_quality_issue = 'Y') OR
+
+                                -- Case 2: Both have same data quality status -> use score/range
+                                (v_data_quality_issue = v_best_has_quality_issue AND (
+                                    v_usage_score > v_max_usage_score OR
+                                    (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range)
+                                ))
+                                -- Case 3: Current has issue, best has no issue -> don't select (implicit)
+                            ) THEN
                                 v_max_range := v_range_days;
                                 v_max_usage_score := v_usage_score;
                                 v_date_column := v_date_columns(i);
@@ -1553,6 +1570,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_selected_null_pct := v_null_percentage;
                                 v_selected_has_time := v_has_time_component;
                                 v_selected_usage_score := v_usage_score;
+                                v_best_has_quality_issue := v_data_quality_issue;
                             END IF;
                         END IF;
                     END IF;
