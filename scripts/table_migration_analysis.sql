@@ -1289,6 +1289,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_date_found BOOLEAN := FALSE;
         v_error_count NUMBER := 0;
         v_parallel_degree NUMBER;
+        v_compression_ratio NUMBER;
+        v_space_savings_mb NUMBER;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
@@ -1672,6 +1674,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Close warnings JSON array
         DBMS_LOB.APPEND(v_warnings, CHR(10) || ']');
 
+        -- Calculate compression ratio and space savings based on compression type
+        IF v_task.use_compression = 'Y' THEN
+            v_compression_ratio := get_compression_ratio(v_task.compression_type);
+            -- Space savings = original_size * (1 - 1/ratio)
+            -- Example: ratio 4 -> savings = size * (1 - 0.25) = size * 0.75
+            v_space_savings_mb := ROUND(v_table_size * (1 - 1/v_compression_ratio), 4);
+        ELSE
+            v_compression_ratio := 1;
+            v_space_savings_mb := 0;
+        END IF;
+
         -- Store or update analysis results (supports rerun)
         MERGE INTO cmr.dwh_migration_analysis a
         USING (SELECT p_task_id AS task_id FROM DUAL) src
@@ -1690,8 +1703,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 all_date_columns_analysis = v_all_date_analysis,
                 estimated_partitions = v_partition_count,
                 avg_partition_size_mb = CASE WHEN v_partition_count > 0 THEN ROUND(v_table_size / v_partition_count, 4) ELSE 0 END,
-                estimated_compression_ratio = CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
-                estimated_space_savings_mb = CASE WHEN v_task.use_compression = 'Y' THEN ROUND(v_table_size * 0.75, 4) ELSE 0 END,
+                estimated_compression_ratio = v_compression_ratio,
+                estimated_space_savings_mb = v_space_savings_mb,
                 complexity_score = v_complexity,
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
@@ -1733,8 +1746,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_all_date_analysis,
                 v_partition_count,
                 CASE WHEN v_partition_count > 0 THEN ROUND(v_table_size / v_partition_count, 4) ELSE 0 END,
-                CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
-                CASE WHEN v_task.use_compression = 'Y' THEN ROUND(v_table_size * 0.75, 4) ELSE 0 END,
+                v_compression_ratio,
+                v_space_savings_mb,
                 v_complexity,
                 v_dependent_objects,
                 v_blocking_issues,
@@ -1861,6 +1874,36 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         WHEN OTHERS THEN
             RETURN 0;
     END get_table_size_mb;
+
+
+    FUNCTION get_compression_ratio(
+        p_compression_type VARCHAR2
+    ) RETURN NUMBER
+    AS
+        v_ratio NUMBER;
+    BEGIN
+        -- Return compression ratio based on Oracle compression type
+        -- Ratios based on typical Oracle compression performance
+        CASE UPPER(p_compression_type)
+            WHEN 'BASIC' THEN
+                v_ratio := 2;
+            WHEN 'OLTP' THEN
+                v_ratio := 2.5;
+            WHEN 'QUERY LOW' THEN
+                v_ratio := 3;
+            WHEN 'QUERY HIGH' THEN
+                v_ratio := 4;
+            WHEN 'ARCHIVE LOW' THEN
+                v_ratio := 5;
+            WHEN 'ARCHIVE HIGH' THEN
+                v_ratio := 10;
+            ELSE
+                -- Default to QUERY HIGH if unknown type
+                v_ratio := 4;
+        END CASE;
+
+        RETURN v_ratio;
+    END get_compression_ratio;
 
 END pck_dwh_table_migration_analyzer;
 /
