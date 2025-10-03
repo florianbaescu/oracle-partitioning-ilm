@@ -1478,6 +1478,38 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE('Detected HIST date column: ' || v_date_column);
             END IF;
 
+            -- Validate stereotype-detected column for data quality issues
+            IF v_date_found THEN
+                DECLARE
+                    v_temp_min_date DATE;
+                    v_temp_max_date DATE;
+                    v_temp_range NUMBER;
+                    v_temp_null_count NUMBER;
+                    v_temp_non_null NUMBER;
+                    v_temp_null_pct NUMBER;
+                    v_temp_has_time VARCHAR2(1);
+                    v_temp_distinct NUMBER;
+                    v_temp_score NUMBER;
+                    v_temp_quality VARCHAR2(1);
+                    v_stereotype_column VARCHAR2(128) := v_date_column;
+                BEGIN
+                    IF analyze_date_column(
+                        v_task.source_owner, v_task.source_table, v_date_column, v_parallel_degree,
+                        v_temp_min_date, v_temp_max_date, v_temp_range,
+                        v_temp_null_count, v_temp_non_null, v_temp_null_pct,
+                        v_temp_has_time, v_temp_distinct, v_temp_score, v_temp_quality
+                    ) THEN
+                        IF v_temp_quality = 'Y' THEN
+                            DBMS_OUTPUT.PUT_LINE('WARNING: Stereotype-detected column ' || v_stereotype_column ||
+                                ' has data quality issues (years outside 1900-2100)');
+                            DBMS_OUTPUT.PUT_LINE('  Will evaluate all date columns for better alternatives...');
+                            v_date_found := FALSE;  -- Allow quality-based selection to override
+                            v_date_column := NULL;  -- Reset to allow fresh selection
+                        END IF;
+                    END IF;
+                END;
+            END IF;
+
             -- Analyze ALL date columns for comprehensive analysis
             DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE);
             DBMS_LOB.APPEND(v_all_date_analysis, '[');
