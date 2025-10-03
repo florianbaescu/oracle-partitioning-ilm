@@ -1269,33 +1269,43 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_fk_count NUMBER;
         v_view_count NUMBER;
         v_code_count NUMBER;
+        v_temp_clob CLOB;
+        v_first_item BOOLEAN;
+
+        TYPE t_object_rec IS RECORD (
+            obj_name VARCHAR2(128),
+            obj_owner VARCHAR2(128),
+            obj_type VARCHAR2(30)
+        );
+        TYPE t_object_list IS TABLE OF t_object_rec;
+        v_objects t_object_list;
     BEGIN
         DBMS_LOB.CREATETEMPORARY(v_result, TRUE);
 
-        DBMS_LOB.APPEND(v_result, '{');
+        DBMS_LOB.APPEND(v_result, '{' || CHR(10));
 
         -- Partition column being used
         IF p_partition_column IS NOT NULL THEN
-            DBMS_LOB.APPEND(v_result, '"partition_column": "' || p_partition_column || '",');
+            DBMS_LOB.APPEND(v_result, '  "partition_column": "' || p_partition_column || '",' || CHR(10));
         END IF;
 
         -- Total Indexes
         SELECT COUNT(*) INTO v_count
         FROM dba_indexes
         WHERE table_owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"total_indexes": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '  "total_indexes": ' || v_count || ',' || CHR(10));
 
         -- Total Constraints
         SELECT COUNT(*) INTO v_count
         FROM dba_constraints
         WHERE owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"total_constraints": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '  "total_constraints": ' || v_count || ',' || CHR(10));
 
         -- Total Triggers
         SELECT COUNT(*) INTO v_count
         FROM dba_triggers
         WHERE table_owner = p_owner AND table_name = p_table_name;
-        DBMS_LOB.APPEND(v_result, '"total_triggers": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '  "total_triggers": ' || v_count || ',' || CHR(10));
 
         -- Total Foreign keys referencing this table
         SELECT COUNT(*) INTO v_count
@@ -1306,73 +1316,126 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE owner = p_owner AND table_name = p_table_name
             AND constraint_type = 'P'
         );
-        DBMS_LOB.APPEND(v_result, '"total_referenced_by": ' || v_count || ',');
+        DBMS_LOB.APPEND(v_result, '  "total_referenced_by": ' || v_count || ',' || CHR(10));
 
         -- Analyzed columns usage
-        DBMS_LOB.APPEND(v_result, '"analyzed_columns": {');
+        DBMS_LOB.APPEND(v_result, '  "analyzed_columns": {' || CHR(10));
 
         IF p_analyzed_columns IS NOT NULL AND p_analyzed_columns.COUNT > 0 THEN
             FOR i IN 1..p_analyzed_columns.COUNT LOOP
-                -- Count indexes using this column
-                SELECT COUNT(DISTINCT i.index_name) INTO v_idx_count
-                FROM dba_ind_columns ic
-                JOIN dba_indexes i ON i.owner = ic.index_owner AND i.index_name = ic.index_name
-                WHERE ic.table_owner = p_owner
-                AND ic.table_name = p_table_name
-                AND ic.column_name = p_analyzed_columns(i);
+                IF i > 1 THEN DBMS_LOB.APPEND(v_result, ',' || CHR(10)); END IF;
+                DBMS_LOB.APPEND(v_result, '    "' || p_analyzed_columns(i) || '": {' || CHR(10));
 
-                -- Count constraints using this column
-                SELECT COUNT(DISTINCT c.constraint_name) INTO v_cons_count
-                FROM dba_cons_columns cc
-                JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
-                WHERE cc.owner = p_owner
-                AND cc.table_name = p_table_name
-                AND cc.column_name = p_analyzed_columns(i)
-                AND c.constraint_type IN ('P', 'U', 'C');  -- Primary, Unique, Check
-
-                -- Count foreign keys using this column
-                SELECT COUNT(DISTINCT c.constraint_name) INTO v_fk_count
-                FROM dba_cons_columns cc
-                JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
-                WHERE cc.owner = p_owner
-                AND cc.table_name = p_table_name
-                AND cc.column_name = p_analyzed_columns(i)
-                AND c.constraint_type = 'R';  -- Foreign Key
-
-                -- Count views using this column (search view text for column reference)
+                -- Get indexes using this column
+                DBMS_LOB.APPEND(v_result, '      "indexes": [');
+                v_first_item := TRUE;
                 BEGIN
-                    SELECT COUNT(DISTINCT view_name) INTO v_view_count
+                    SELECT i.index_name, i.owner, i.index_type BULK COLLECT INTO v_objects
+                    FROM (SELECT DISTINCT i.index_name, i.owner, i.index_type
+                          FROM dba_ind_columns ic
+                          JOIN dba_indexes i ON i.owner = ic.index_owner AND i.index_name = ic.index_name
+                          WHERE ic.table_owner = p_owner
+                          AND ic.table_name = p_table_name
+                          AND ic.column_name = p_analyzed_columns(i)) i;
+
+                    FOR j IN 1..v_objects.COUNT LOOP
+                        IF NOT v_first_item THEN DBMS_LOB.APPEND(v_result, ', '); END IF;
+                        DBMS_LOB.APPEND(v_result, '{"name": "' || v_objects(j).obj_name ||
+                                                  '", "schema": "' || v_objects(j).obj_owner ||
+                                                  '", "type": "' || v_objects(j).obj_type || '"}');
+                        v_first_item := FALSE;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+                DBMS_LOB.APPEND(v_result, '],' || CHR(10));
+
+                -- Get constraints using this column
+                DBMS_LOB.APPEND(v_result, '      "constraints": [');
+                v_first_item := TRUE;
+                BEGIN
+                    SELECT c.constraint_name, c.owner, c.constraint_type BULK COLLECT INTO v_objects
+                    FROM (SELECT DISTINCT c.constraint_name, c.owner, c.constraint_type
+                          FROM dba_cons_columns cc
+                          JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
+                          WHERE cc.owner = p_owner
+                          AND cc.table_name = p_table_name
+                          AND cc.column_name = p_analyzed_columns(i)
+                          AND c.constraint_type IN ('P', 'U', 'C')) c;
+
+                    FOR j IN 1..v_objects.COUNT LOOP
+                        IF NOT v_first_item THEN DBMS_LOB.APPEND(v_result, ', '); END IF;
+                        DBMS_LOB.APPEND(v_result, '{"name": "' || v_objects(j).obj_name ||
+                                                  '", "schema": "' || v_objects(j).obj_owner ||
+                                                  '", "type": "' || v_objects(j).obj_type || '"}');
+                        v_first_item := FALSE;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+                DBMS_LOB.APPEND(v_result, '],' || CHR(10));
+
+                -- Get foreign keys using this column
+                DBMS_LOB.APPEND(v_result, '      "foreign_keys": [');
+                v_first_item := TRUE;
+                BEGIN
+                    SELECT c.constraint_name, c.owner, 'R' BULK COLLECT INTO v_objects
+                    FROM (SELECT DISTINCT c.constraint_name, c.owner
+                          FROM dba_cons_columns cc
+                          JOIN dba_constraints c ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
+                          WHERE cc.owner = p_owner
+                          AND cc.table_name = p_table_name
+                          AND cc.column_name = p_analyzed_columns(i)
+                          AND c.constraint_type = 'R') c;
+
+                    FOR j IN 1..v_objects.COUNT LOOP
+                        IF NOT v_first_item THEN DBMS_LOB.APPEND(v_result, ', '); END IF;
+                        DBMS_LOB.APPEND(v_result, '{"name": "' || v_objects(j).obj_name ||
+                                                  '", "schema": "' || v_objects(j).obj_owner || '"}');
+                        v_first_item := FALSE;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+                DBMS_LOB.APPEND(v_result, '],' || CHR(10));
+
+                -- Get views using this column
+                DBMS_LOB.APPEND(v_result, '      "views": [');
+                v_first_item := TRUE;
+                BEGIN
+                    SELECT view_name, owner, 'VIEW' BULK COLLECT INTO v_objects
                     FROM dba_views
                     WHERE owner = p_owner
                     AND UPPER(text_vc) LIKE '%' || UPPER(p_table_name) || '%' || UPPER(p_analyzed_columns(i)) || '%';
-                EXCEPTION
-                    WHEN OTHERS THEN v_view_count := 0;
-                END;
 
-                -- Count stored code using this column (packages, procedures, functions)
+                    FOR j IN 1..v_objects.COUNT LOOP
+                        IF NOT v_first_item THEN DBMS_LOB.APPEND(v_result, ', '); END IF;
+                        DBMS_LOB.APPEND(v_result, '{"name": "' || v_objects(j).obj_name ||
+                                                  '", "schema": "' || v_objects(j).obj_owner || '"}');
+                        v_first_item := FALSE;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+                DBMS_LOB.APPEND(v_result, '],' || CHR(10));
+
+                -- Get stored code using this column
+                DBMS_LOB.APPEND(v_result, '      "stored_code": [');
+                v_first_item := TRUE;
                 BEGIN
-                    SELECT COUNT(DISTINCT name || type) INTO v_code_count
+                    SELECT DISTINCT name, owner, type BULK COLLECT INTO v_objects
                     FROM dba_source
                     WHERE owner = p_owner
                     AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION')
                     AND UPPER(text) LIKE '%' || UPPER(p_table_name) || '%' || UPPER(p_analyzed_columns(i)) || '%';
-                EXCEPTION
-                    WHEN OTHERS THEN v_code_count := 0;
-                END;
 
-                IF i > 1 THEN DBMS_LOB.APPEND(v_result, ','); END IF;
-                DBMS_LOB.APPEND(v_result,
-                    '"' || p_analyzed_columns(i) || '": {' ||
-                    '"num_indexes": ' || v_idx_count || ',' ||
-                    '"num_constraints": ' || v_cons_count || ',' ||
-                    '"num_foreign_keys": ' || v_fk_count || ',' ||
-                    '"num_views": ' || v_view_count || ',' ||
-                    '"num_stored_code": ' || v_code_count ||
-                    '}');
+                    FOR j IN 1..v_objects.COUNT LOOP
+                        IF NOT v_first_item THEN DBMS_LOB.APPEND(v_result, ', '); END IF;
+                        DBMS_LOB.APPEND(v_result, '{"name": "' || v_objects(j).obj_name ||
+                                                  '", "schema": "' || v_objects(j).obj_owner ||
+                                                  '", "type": "' || v_objects(j).obj_type || '"}');
+                        v_first_item := FALSE;
+                    END LOOP;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+                DBMS_LOB.APPEND(v_result, ']' || CHR(10));
+
+                DBMS_LOB.APPEND(v_result, '    }');
             END LOOP;
         END IF;
 
-        DBMS_LOB.APPEND(v_result, '}');
+        DBMS_LOB.APPEND(v_result, CHR(10) || '  }' || CHR(10));
         DBMS_LOB.APPEND(v_result, '}');
 
         RETURN v_result;
@@ -1601,9 +1664,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_first_json BOOLEAN := TRUE;
             v_data_quality_issue VARCHAR2(1);
             v_best_has_quality_issue VARCHAR2(1) := 'N';
+            v_stereotype_column VARCHAR2(128);  -- Track which column was detected via stereotype
+            v_stereotype_type VARCHAR2(30);     -- Track the stereotype type
         BEGIN
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
+                v_stereotype_column := v_date_column;
+                v_stereotype_type := 'SCD2';
                 v_date_type := 'DATE';
                 v_date_format := v_scd2_type;
                 v_conversion_expr := v_date_column;
@@ -1611,6 +1678,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE('Detected SCD2 date column: ' || v_date_column || ' (Type: ' || v_scd2_type || ')');
             -- Try Events pattern
             ELSIF detect_events_table(v_task.source_owner, v_task.source_table, v_event_column) THEN
+                v_stereotype_column := v_event_column;
+                v_stereotype_type := 'EVENTS';
                 v_date_column := v_event_column;
                 v_date_type := 'DATE';
                 v_date_format := 'EVENTS';
@@ -1619,6 +1688,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE('Detected Events date column: ' || v_date_column);
             -- Try Staging pattern
             ELSIF detect_staging_table(v_task.source_owner, v_task.source_table, v_staging_column) THEN
+                v_stereotype_column := v_staging_column;
+                v_stereotype_type := 'STAGING';
                 v_date_column := v_staging_column;
                 v_date_type := 'DATE';
                 v_date_format := 'STAGING';
@@ -1627,6 +1698,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE('Detected Staging date column: ' || v_date_column);
             -- Try HIST pattern
             ELSIF detect_hist_table(v_task.source_owner, v_task.source_table, v_hist_column) THEN
+                v_stereotype_column := v_hist_column;
+                v_stereotype_type := 'HIST';
                 v_date_column := v_hist_column;
                 v_date_type := 'DATE';
                 v_date_format := 'HIST';
@@ -1648,7 +1721,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     v_temp_distinct NUMBER;
                     v_temp_score NUMBER;
                     v_temp_quality VARCHAR2(1);
-                    v_stereotype_column VARCHAR2(128) := v_date_column;
                 BEGIN
                     IF analyze_date_column(
                         v_task.source_owner, v_task.source_table, v_date_column, v_parallel_degree,
@@ -1780,6 +1852,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             '    "distinct_dates": ' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' || CHR(10) ||
                             '    "usage_score": ' || v_usage_score || ',' || CHR(10) ||
                             '    "data_quality_issue": "' || v_data_quality_issue || '",' || CHR(10) ||
+                            '    "stereotype_detected": "' || CASE WHEN v_date_columns(i) = v_stereotype_column THEN 'Y' ELSE 'N' END || '",' || CHR(10) ||
+                            '    "stereotype_type": "' || CASE WHEN v_date_columns(i) = v_stereotype_column THEN NVL(v_stereotype_type, 'NONE') ELSE 'NONE' END || '",' || CHR(10) ||
                             '    "is_primary": ' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END || CHR(10) ||
                         '  }';
 
