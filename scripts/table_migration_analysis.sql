@@ -264,7 +264,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Calculate NULL percentage
         IF v_total_count > 0 THEN
-            p_null_percentage := ROUND((p_null_count / v_total_count) * 100, 2);
+            p_null_percentage := ROUND((p_null_count / v_total_count) * 100, 4);
         ELSE
             p_null_percentage := 0;
         END IF;
@@ -848,7 +848,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         EXECUTE IMMEDIATE v_sql INTO p_distinct_values;
 
         -- Get null percentage with parallel hint
-        v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ROUND(COUNT(*) * 100.0 / ' || v_total_rows || ', 2) FROM ' ||
+        v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ROUND(COUNT(*) * 100.0 / ' || v_total_rows || ', 4) FROM ' ||
                 p_owner || '.' || p_table_name ||
                 ' WHERE ' || p_column_name || ' IS NULL';
         EXECUTE IMMEDIATE v_sql INTO p_null_percentage;
@@ -972,11 +972,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             IF v_best_column IS NOT NULL THEN
                 IF v_max_range > 365 * 3 THEN
                     v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
-                    p_reason := 'Date range spans ' || ROUND(v_max_range/365, 1) ||
+                    p_reason := 'Date range spans ' || ROUND(v_max_range/365, 4) ||
                                ' years - monthly interval partitioning recommended';
                 ELSIF v_max_range > 365 THEN
                     v_strategy := 'RANGE(' || v_best_column || ') INTERVAL MONTHLY';
-                    p_reason := 'Date range spans ' || ROUND(v_max_range/30, 0) ||
+                    p_reason := 'Date range spans ' || ROUND(v_max_range/30, 4) ||
                                ' months - monthly partitioning recommended';
                 ELSIF v_max_range > 90 THEN
                     v_strategy := 'RANGE(' || v_best_column || ')';
@@ -1267,7 +1267,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Initialize warnings tracking
         DBMS_LOB.CREATETEMPORARY(v_warnings, TRUE);
-        DBMS_LOB.APPEND(v_warnings, '[');
+        DBMS_LOB.APPEND(v_warnings, '[' || CHR(10));
 
         -- Get table statistics
         BEGIN
@@ -1277,10 +1277,18 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             AND table_name = v_task.source_table;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
-                DBMS_LOB.APPEND(v_warnings, '{"type":"ERROR","issue":"Table not found in DBA_TABLES","action":"Verify table exists and gather statistics"}');
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "ERROR",' || CHR(10) ||
+                    '    "issue": "Table not found in DBA_TABLES",' || CHR(10) ||
+                    '    "action": "Verify table exists and gather statistics"' || CHR(10) ||
+                    '  }');
                 v_num_rows := NULL;
             WHEN OTHERS THEN
-                DBMS_LOB.APPEND(v_warnings, '{"type":"ERROR","issue":"Cannot access table metadata: ' || REPLACE(SQLERRM, '"', '\"') || '","action":"Check privileges"}');
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "ERROR",' || CHR(10) ||
+                    '    "issue": "Cannot access table metadata: ' || REPLACE(SQLERRM, '"', '\"') || '",' || CHR(10) ||
+                    '    "action": "Check privileges"' || CHR(10) ||
+                    '  }');
                 v_num_rows := NULL;
         END;
 
@@ -1288,8 +1296,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_table_size := get_table_size_mb(v_task.source_owner, v_task.source_table);
         EXCEPTION
             WHEN OTHERS THEN
-                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                DBMS_LOB.APPEND(v_warnings, '{"type":"WARNING","issue":"Cannot calculate table size: ' || REPLACE(SQLERRM, '"', '\"') || '"}');
+                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "WARNING",' || CHR(10) ||
+                    '    "issue": "Cannot calculate table size: ' || REPLACE(SQLERRM, '"', '\"') || '"' || CHR(10) ||
+                    '  }');
                 v_error_count := v_error_count + 1;
                 v_table_size := 0;
         END;
@@ -1384,19 +1395,27 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (< 1900) - possible data quality issue';
                                 DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
 
-                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
-                                    '","issue":"MIN date year ' || v_min_year || ' is before 1900","min_date":"' ||
-                                    TO_CHAR(v_min_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                                    '    "type": "DATA_QUALITY",' || CHR(10) ||
+                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "issue": "MIN date year ' || v_min_year || ' is before 1900",' || CHR(10) ||
+                                    '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                                    '    "action": "Review and clean data before migration"' || CHR(10) ||
+                                    '  }');
                                 v_error_count := v_error_count + 1;
                             ELSIF v_min_year > 2100 THEN
                                 v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (> 2100) - possible data quality issue';
                                 DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
 
-                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
-                                    '","issue":"MIN date year ' || v_min_year || ' is after 2100","min_date":"' ||
-                                    TO_CHAR(v_min_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                                    '    "type": "DATA_QUALITY",' || CHR(10) ||
+                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "issue": "MIN date year ' || v_min_year || ' is after 2100",' || CHR(10) ||
+                                    '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                                    '    "action": "Review and clean data before migration"' || CHR(10) ||
+                                    '  }');
                                 v_error_count := v_error_count + 1;
                             END IF;
 
@@ -1405,20 +1424,28 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                     'WARNING: MAX date has year ' || v_max_year || ' (< 1900)';
                                 DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' < 1900');
 
-                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
-                                    '","issue":"MAX date year ' || v_max_year || ' is before 1900","max_date":"' ||
-                                    TO_CHAR(v_max_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                                    '    "type": "DATA_QUALITY",' || CHR(10) ||
+                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "issue": "MAX date year ' || v_max_year || ' is before 1900",' || CHR(10) ||
+                                    '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                                    '    "action": "Review and clean data before migration"' || CHR(10) ||
+                                    '  }');
                                 v_error_count := v_error_count + 1;
                             ELSIF v_max_year > 2100 THEN
                                 v_data_quality_warning := v_data_quality_warning || CASE WHEN LENGTH(v_data_quality_warning) > 0 THEN '; ' ELSE '' END ||
                                     'WARNING: MAX date has year ' || v_max_year || ' (> 2100)';
                                 DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' > 2100');
 
-                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                                DBMS_LOB.APPEND(v_warnings, '{"type":"DATA_QUALITY","column":"' || v_date_columns(i) ||
-                                    '","issue":"MAX date year ' || v_max_year || ' is after 2100","max_date":"' ||
-                                    TO_CHAR(v_max_date, 'YYYY-MM-DD') || '","action":"Review and clean data before migration"}');
+                                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                                    '    "type": "DATA_QUALITY",' || CHR(10) ||
+                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "issue": "MAX date year ' || v_max_year || ' is after 2100",' || CHR(10) ||
+                                    '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                                    '    "action": "Review and clean data before migration"' || CHR(10) ||
+                                    '  }');
                                 v_error_count := v_error_count + 1;
                             END IF;
                         END;
@@ -1429,23 +1456,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         END IF;
                         v_first_json := FALSE;
 
-                        v_json_analysis := '{' ||
-                            '"column_name":"' || v_date_columns(i) || '",' ||
-                            '"data_type":"DATE",' ||
-                            '"min_date":"' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' ||
-                            '"max_date":"' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' ||
-                            '"min_year":' || EXTRACT(YEAR FROM v_min_date) || ',' ||
-                            '"max_year":' || EXTRACT(YEAR FROM v_max_date) || ',' ||
-                            '"range_days":' || v_range_days || ',' ||
-                            '"range_years":' || ROUND(v_range_days/365.25, 2) || ',' ||
-                            '"null_count":' || v_null_count || ',' ||
-                            '"non_null_count":' || v_non_null_count || ',' ||
-                            '"null_percentage":' || v_null_percentage || ',' ||
-                            '"has_time_component":"' || v_has_time_component || '",' ||
-                            '"distinct_dates":' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' ||
-                            '"usage_score":' || v_usage_score || ',' ||
-                            '"is_primary":' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END ||
-                        '}';
+                        v_json_analysis := '{' || CHR(10) ||
+                            '    "column_name": "' || v_date_columns(i) || '",' || CHR(10) ||
+                            '    "data_type": "DATE",' || CHR(10) ||
+                            '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                            '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
+                            '    "min_year": ' || EXTRACT(YEAR FROM v_min_date) || ',' || CHR(10) ||
+                            '    "max_year": ' || EXTRACT(YEAR FROM v_max_date) || ',' || CHR(10) ||
+                            '    "range_days": ' || v_range_days || ',' || CHR(10) ||
+                            '    "range_years": ' || ROUND(v_range_days/365.25, 4) || ',' || CHR(10) ||
+                            '    "null_count": ' || v_null_count || ',' || CHR(10) ||
+                            '    "non_null_count": ' || v_non_null_count || ',' || CHR(10) ||
+                            '    "null_percentage": ' || ROUND(v_null_percentage, 4) || ',' || CHR(10) ||
+                            '    "has_time_component": "' || v_has_time_component || '",' || CHR(10) ||
+                            '    "distinct_dates": ' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' || CHR(10) ||
+                            '    "usage_score": ' || v_usage_score || ',' || CHR(10) ||
+                            '    "is_primary": ' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END || CHR(10) ||
+                        '  }';
 
                         DBMS_LOB.APPEND(v_all_date_analysis, v_json_analysis);
 
@@ -1578,7 +1605,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
         -- Close warnings JSON array
-        DBMS_LOB.APPEND(v_warnings, ']');
+        DBMS_LOB.APPEND(v_warnings, CHR(10) || ']');
 
         -- Store or update analysis results (supports rerun)
         MERGE INTO cmr.dwh_migration_analysis a
@@ -1597,9 +1624,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 requires_conversion = v_requires_conversion,
                 all_date_columns_analysis = v_all_date_analysis,
                 estimated_partitions = v_partition_count,
-                avg_partition_size_mb = CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
+                avg_partition_size_mb = CASE WHEN v_partition_count > 0 THEN ROUND(v_table_size / v_partition_count, 4) ELSE 0 END,
                 estimated_compression_ratio = CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
-                estimated_space_savings_mb = CASE WHEN v_task.use_compression = 'Y' THEN v_table_size * 0.75 ELSE 0 END,
+                estimated_space_savings_mb = CASE WHEN v_task.use_compression = 'Y' THEN ROUND(v_table_size * 0.75, 4) ELSE 0 END,
                 complexity_score = v_complexity,
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
@@ -1640,9 +1667,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_requires_conversion,
                 v_all_date_analysis,
                 v_partition_count,
-                CASE WHEN v_partition_count > 0 THEN v_table_size / v_partition_count ELSE 0 END,
+                CASE WHEN v_partition_count > 0 THEN ROUND(v_table_size / v_partition_count, 4) ELSE 0 END,
                 CASE WHEN v_task.use_compression = 'Y' THEN 4 ELSE 1 END,
-                CASE WHEN v_task.use_compression = 'Y' THEN v_table_size * 0.75 ELSE 0 END,
+                CASE WHEN v_task.use_compression = 'Y' THEN ROUND(v_table_size * 0.75, 4) ELSE 0 END,
                 v_complexity,
                 v_dependent_objects,
                 v_blocking_issues,
@@ -1755,7 +1782,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     AS
         v_size_mb NUMBER;
     BEGIN
-        SELECT ROUND(SUM(bytes)/1024/1024, 2)
+        SELECT ROUND(SUM(bytes)/1024/1024, 4)
         INTO v_size_mb
         FROM dba_segments
         WHERE owner = p_owner
