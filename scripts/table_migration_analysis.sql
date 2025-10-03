@@ -46,7 +46,8 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
     -- Dependency analysis
     FUNCTION get_dependent_objects(
         p_owner VARCHAR2,
-        p_table_name VARCHAR2
+        p_table_name VARCHAR2,
+        p_partition_column VARCHAR2 DEFAULT NULL
     ) RETURN CLOB;
 
     FUNCTION identify_blocking_issues(
@@ -1255,7 +1256,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
     FUNCTION get_dependent_objects(
         p_owner VARCHAR2,
-        p_table_name VARCHAR2
+        p_table_name VARCHAR2,
+        p_partition_column VARCHAR2 DEFAULT NULL
     ) RETURN CLOB
     AS
         v_result CLOB;
@@ -1264,6 +1266,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         DBMS_LOB.CREATETEMPORARY(v_result, TRUE);
 
         DBMS_LOB.APPEND(v_result, '{');
+
+        -- Partition column being used
+        IF p_partition_column IS NOT NULL THEN
+            DBMS_LOB.APPEND(v_result, '"partition_column": "' || p_partition_column || '",');
+        END IF;
 
         -- Indexes
         SELECT COUNT(*) INTO v_count
@@ -1383,6 +1390,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_candidate_columns CLOB;
         v_complexity_factors VARCHAR2(2000);
         v_estimated_downtime NUMBER;
+        v_date_columns SYS.ODCIVARCHAR2LIST;
     BEGIN
         -- Get task details
         SELECT * INTO v_task
@@ -1503,7 +1511,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_event_column VARCHAR2(128);
             v_staging_column VARCHAR2(128);
             v_hist_column VARCHAR2(128);
-            v_date_columns SYS.ODCIVARCHAR2LIST;
             v_min_date DATE;
             v_max_date DATE;
             v_range_days NUMBER;
@@ -1899,9 +1906,21 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_estimated_downtime := ROUND(v_base_time, 2);
         END;
 
-        -- Build candidate_columns JSON from all_date_columns_analysis
-        -- Simply use the already-constructed all_date_columns_analysis
-        v_candidate_columns := v_all_date_analysis;
+        -- Build candidate_columns as comma-separated list of column names
+        DECLARE
+            v_temp_columns VARCHAR2(4000) := '';
+        BEGIN
+            IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
+                FOR i IN 1..v_date_columns.COUNT LOOP
+                    v_temp_columns := v_temp_columns || v_date_columns(i);
+                    IF i < v_date_columns.COUNT THEN
+                        v_temp_columns := v_temp_columns || ', ';
+                    END IF;
+                END LOOP;
+            END IF;
+            DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE);
+            DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
+        END;
 
         -- Estimate partition count
         IF v_task.partition_key IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
@@ -1913,8 +1932,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             );
         END IF;
 
-        -- Get dependencies
-        v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table);
+        -- Get dependencies (include partition column being analyzed)
+        v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
         -- Close warnings JSON array
