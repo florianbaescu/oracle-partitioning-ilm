@@ -237,7 +237,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_null_percentage OUT NUMBER,
         p_has_time_component OUT VARCHAR2,
         p_distinct_dates OUT NUMBER,
-        p_usage_score OUT NUMBER
+        p_usage_score OUT NUMBER,
+        p_data_quality_issue OUT VARCHAR2
     ) RETURN BOOLEAN
     AS
         v_sql VARCHAR2(4000);
@@ -247,7 +248,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_min_time VARCHAR2(8);
         v_max_time VARCHAR2(8);
         v_time_sample NUMBER;
+        v_min_year NUMBER;
+        v_max_year NUMBER;
+        v_filtered_min_date DATE;
+        v_filtered_max_date DATE;
     BEGIN
+        -- Initialize data quality flag
+        p_data_quality_issue := 'N';
 
         -- Get date range and NULL statistics in a single query with parallel hint
         v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' ||
@@ -271,7 +278,39 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- If MIN/MAX are NULL, column has no non-NULL data
         IF p_min_date IS NOT NULL AND p_max_date IS NOT NULL THEN
-            p_range_days := p_max_date - p_min_date;
+            -- Check for suspicious years and recalculate range excluding them
+            v_min_year := EXTRACT(YEAR FROM p_min_date);
+            v_max_year := EXTRACT(YEAR FROM p_max_date);
+
+            IF v_min_year < 1900 OR v_min_year > 2100 OR v_max_year < 1900 OR v_max_year > 2100 THEN
+                p_data_quality_issue := 'Y';
+
+                -- Recalculate MIN/MAX filtering out suspicious dates
+                v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' ||
+                        '  MIN(' || p_column_name || '), ' ||
+                        '  MAX(' || p_column_name || ') ' ||
+                        ' FROM ' || p_owner || '.' || p_table_name ||
+                        ' WHERE ' || p_column_name || ' IS NOT NULL' ||
+                        '   AND EXTRACT(YEAR FROM ' || p_column_name || ') >= 1900' ||
+                        '   AND EXTRACT(YEAR FROM ' || p_column_name || ') <= 2100';
+
+                BEGIN
+                    EXECUTE IMMEDIATE v_sql INTO v_filtered_min_date, v_filtered_max_date;
+
+                    -- Use filtered dates for range calculation if valid
+                    IF v_filtered_min_date IS NOT NULL AND v_filtered_max_date IS NOT NULL THEN
+                        p_range_days := ROUND(v_filtered_max_date - v_filtered_min_date, 4);
+                    ELSE
+                        p_range_days := ROUND(p_max_date - p_min_date, 4);
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- If filtering fails, use original range
+                        p_range_days := ROUND(p_max_date - p_min_date, 4);
+                END;
+            ELSE
+                p_range_days := ROUND(p_max_date - p_min_date, 4);
+            END IF;
 
             -- Check if column has time component (not all midnight)
             -- Sample: check if any non-midnight times exist
@@ -893,6 +932,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_event_column VARCHAR2(128);
         v_staging_column VARCHAR2(128);
         v_parallel_degree NUMBER;
+        v_data_quality_issue VARCHAR2(1);
     BEGIN
         -- Get parallel degree once for all operations
         v_parallel_degree := get_parallel_degree(p_owner, p_table_name);
@@ -959,7 +999,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     p_owner, p_table_name, v_date_columns(i), v_parallel_degree,
                     v_min_date, v_max_date, v_range_days,
                     v_null_count, v_non_null_count, v_null_percentage,
-                    v_has_time_component, v_distinct_dates, v_usage_score
+                    v_has_time_component, v_distinct_dates, v_usage_score,
+                    v_data_quality_issue
                 ) THEN
                     IF v_range_days > v_max_range THEN
                         v_max_range := v_range_days;
@@ -1331,6 +1372,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_selected_usage_score NUMBER := 0;
             v_json_analysis VARCHAR2(32767);
             v_first_json BOOLEAN := TRUE;
+            v_data_quality_issue VARCHAR2(1);
         BEGIN
             -- Try SCD2 pattern first
             IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
@@ -1379,8 +1421,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_task.source_owner, v_task.source_table, v_date_columns(i), v_parallel_degree,
                         v_min_date, v_max_date, v_range_days,
                         v_null_count, v_non_null_count, v_null_percentage,
-                        v_has_time_component, v_distinct_dates, v_usage_score
+                        v_has_time_component, v_distinct_dates, v_usage_score,
+                        v_data_quality_issue
                     ) THEN
+                        -- Penalize usage score for data quality issues
+                        IF v_data_quality_issue = 'Y' THEN
+                            v_usage_score := GREATEST(0, v_usage_score - 20);  -- Reduce score by 20 points
+                        END IF;
                         -- Validate date ranges for data quality issues
                         DECLARE
                             v_min_year NUMBER;
