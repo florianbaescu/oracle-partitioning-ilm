@@ -2249,11 +2249,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         END IF;
 
         -- Get dependencies (include partition column and all analyzed columns)
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Getting dependent objects...');
         v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column, v_date_columns);
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Got dependent objects, getting blocking issues...');
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Got blocking issues, closing warnings JSON...');
 
         -- Close warnings JSON array
         DBMS_LOB.APPEND(v_warnings, CHR(10) || ']');
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Closed warnings JSON');
 
         -- Calculate compression ratio and space savings based on compression type
         IF v_task.use_compression = 'Y' THEN
@@ -2267,6 +2271,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         END IF;
 
         -- Store or update analysis results (supports rerun)
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Starting MERGE operation...');
         MERGE INTO cmr.dwh_migration_analysis a
         USING (SELECT p_task_id AS task_id FROM DUAL) src
         ON (a.task_id = src.task_id)
