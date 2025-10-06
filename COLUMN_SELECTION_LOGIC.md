@@ -104,16 +104,29 @@ v_best_has_quality_issue := v_data_quality_issue;
 ```
 → Clean data always wins over dirty data
 
-**Case 2:** Both have same data quality → Use score and range
+**Case 2:** Both have same data quality → Apply additional criteria in priority order
 ```plsql
 (v_data_quality_issue = v_best_has_quality_issue AND (
-    v_usage_score > v_max_usage_score OR
-    (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range)
+    -- Priority 1: Significantly fewer NULLs (>10% difference)
+    (v_null_percentage < v_selected_null_pct - 10) OR
+
+    -- Priority 2: No time component (when NULL% similar)
+    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+     v_has_time_component = 'N' AND v_selected_has_time = 'Y') OR
+
+    -- Priority 3: Higher usage score (when NULL% and time same)
+    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+     v_has_time_component = v_selected_has_time AND
+     v_usage_score > v_max_usage_score) OR
+
+    -- Priority 4: Wider range (final tiebreaker)
+    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+     v_has_time_component = v_selected_has_time AND
+     v_usage_score >= v_max_usage_score * 0.8 AND
+     v_range_days > v_max_range)
 ))
 ```
-→ Replace if:
-- New score is higher, OR
-- New score is ≥ 80% of best score AND has wider range
+→ Replace if any condition matches in priority order
 
 **Case 3:** Current column is dirty, best column is clean → **NEVER replace** (implicit)
 ```plsql
@@ -129,123 +142,84 @@ The selection logic enforces this strict priority:
 1. **Data Quality** (highest priority)
    - Clean columns (years 1900-2100) always preferred over dirty columns
 
-2. **Usage Score** (medium priority)
+2. **NULL Percentage** (high priority)
+   - Columns with significantly fewer NULLs (>10% difference) are strongly preferred
+   - Fewer NULLs means better partition distribution and fewer DEFAULT partition rows
+
+3. **Time Component** (medium-high priority)
+   - Columns without time component (pure DATE) preferred over TIMESTAMP-like columns
+   - Avoids need for TRUNC() in partition key expressions
+
+4. **Usage Score** (medium priority)
    - Higher score indicates column is used more in queries/indexes
    - Calculated from: primary key membership, foreign key membership, index membership
 
-3. **Date Range** (lowest priority - tiebreaker only)
-   - Wider range preferred when scores are similar (within 20%)
+5. **Date Range** (lowest priority - tiebreaker only)
+   - Wider range preferred when all other factors are similar (within 20%)
 
 ---
 
-## Example Scenario: Your Case
+## Example Scenario: Columns with Different NULL Percentages
 
 **Given your table has these columns (in discovery order):**
 
-| Column | Min Year | Max Year | Range (days) | Score | Quality |
-|--------|----------|----------|--------------|-------|---------|
-| DATA_DECONTARII | 2020 | 2025 | 2099 | 23 | N (clean) |
-| DATA_TRANZACTIEI | 21 | 2025 | 2638 | 0 | Y (dirty) |
-| UPLOAD_DATE | 2020 | 2025 | 2101 | 0 | N (clean) |
+| Column | Min Year | Max Year | Range (days) | NULL % | Time? | Score | Quality |
+|--------|----------|----------|--------------|--------|-------|-------|---------|
+| FIRST_DT | 2023 | 2025 | 912 | 0.0062% | No | 0 | N (clean) |
+| SECOND_DT | 2023 | 2025 | 912.9444 | 60.7849% | Yes | 0 | N (clean) |
 
-**Expected Execution Flow:**
+**Expected Execution Flow (with corrected logic):**
 
 ### Phase 1: Stereotype Detection
-- `detect_events_table()` scans for event patterns
-- Finds `DATA_TRANZACTIEI` (hardcoded in line 474)
-- **Sets:** `v_date_column = 'DATA_TRANZACTIEI'`, `v_date_found = TRUE`
-- **Prints:** `"Detected Events date column: DATA_TRANZACTIEI"`
+- No stereotype patterns detected (assumes FIRST_DT and SECOND_DT don't match standard patterns)
+- **Result:** `v_date_found = FALSE` → Proceeds to quality-based selection
 
-### Phase 2: Validate Stereotype
-- Analyzes DATA_TRANZACTIEI
-- Finds: min_year = 21 (< 1900)
-- **Sets:** `v_temp_quality = 'Y'`
-- **Resets:** `v_date_found = FALSE`, `v_date_column = NULL`
-- **Prints:**
-  ```
-  WARNING: Stereotype-detected column DATA_TRANZACTIEI has data quality issues (years outside 1900-2100)
-  Will evaluate all date columns for better alternatives...
-  ```
+### Phase 2: Loop Through All Columns
 
-### Phase 3: Loop Through All Columns
-
-**Iteration 1: DATA_DECONTARII**
-- Analyze: quality='N', score=23, range=2099
+**Iteration 1: FIRST_DT**
+- Analyze: quality='N', null%=0.0062%, time='N', score=0, range=912
 - Score penalty: None (clean data)
-- Warnings: None (years 2020-2025 are valid)
-- **Prints:** `"  - DATA_DECONTARII: 2020-01-03 (year 2020) to 2025-10-02 (year 2025) (2099 days, 0% NULLs, usage score: 23)"`
+- Warnings: None (years 2023-2025 are valid)
+- **Prints:** `"  - FIRST_DT: 2023-04-06 (year 2023) to 2025-10-04 (year 2025) (912 days, 0.0062% NULLs, usage score: 0)"`
 - **Selection:** `v_date_column IS NULL` → Select as baseline
-  - `v_date_column = 'DATA_DECONTARII'`
+  - `v_date_column = 'FIRST_DT'`
+  - `v_selected_null_pct = 0.0062`
+  - `v_selected_has_time = 'N'`
+  - `v_max_usage_score = 0`
   - `v_best_has_quality_issue = 'N'`
-  - `v_max_usage_score = 23`
 
-**Iteration 2: DATA_TRANZACTIEI**
-- Analyze: quality='Y', score=0 (before penalty), range=2638
-- Score penalty: `0 - 50 = 0` (already at minimum)
-- **Prints:**
-  ```
-  *** PENALIZED: Score reduced by 50 points due to data quality issue
-  *** WARNING: MIN date has year 21 (< 1900) - possible data quality issue
-  - DATA_TRANZACTIEI: 0021-06-07 (year 21) to 2025-10-02 (year 2025) (2638 days, 0% NULLs, usage score: 0)
-  ```
-- **Selection Check:**
-  - Case 1: `'Y' AND 'N'` → FALSE (dirty can't replace clean)
-  - Case 2: `'Y' != 'N'` → FALSE
-  - **No replacement** - DATA_DECONTARII stays selected
-
-**Iteration 3: UPLOAD_DATE**
-- Analyze: quality='N', score=0, range=2101
+**Iteration 2: SECOND_DT**
+- Analyze: quality='N', null%=60.7849%, time='Y', score=0, range=912.9444
 - Score penalty: None (clean data)
-- Warnings: None (years 2020-2025 are valid)
-- **Prints:** `"  - UPLOAD_DATE: 2020-01-01 (year 2020) to 2025-10-02 (year 2025) (2101.4487 days, .001% NULLs, has time component, usage score: 0)"`
-- **Selection Check:**
-  - Case 1: `'N' AND 'N'` → FALSE (both clean)
-  - Case 2: `'N' = 'N' AND (0 > 23 OR ...)` → FALSE (score too low)
-  - **No replacement** - DATA_DECONTARII stays selected
+- **Prints:** `"  - SECOND_DT: 2023-04-06 (year 2023) to 2025-10-04 (year 2025) (912.9444 days, 60.7849% NULLs, has time component, usage score: 0)"`
+- **Selection Check (NEW LOGIC):**
+  - Case 1: Both clean (`'N' = 'N'`) → FALSE
+  - Case 2a: Fewer NULLs? `60.7849 < 0.0062 - 10` → FALSE (has MORE NULLs!)
+  - Case 2b: No time component? `'Y' = 'N' AND 'N' = 'Y'` → FALSE (has time!)
+  - Case 2c: Higher score? `0 > 0` → FALSE
+  - Case 2d: Wider range? `0 >= 0 * 0.8 AND 912.9444 > 912` → FALSE (NULL% diff >10%, earlier condition blocks)
+  - **No replacement** - FIRST_DT stays selected ✅
 
-**Final Selection:** (line 1690-1692)
-- `v_date_found = FALSE` and `v_date_column = 'DATA_DECONTARII'`
-- **Prints:** `"Selected date column: DATA_DECONTARII (usage score: 23, range: 2099 days)"`
-
----
-
-## Expected Result
-
-**DATA_DECONTARII should be selected** because:
-1. It has clean data (years 2020-2025)
-2. It has the highest usage score (23 vs 0)
-3. It was selected in Phase 3 using quality-first logic
-
-**DATA_TRANZACTIEI should NOT be selected** because:
-1. Although it matches Events stereotype pattern
-2. It was rejected in Phase 2 due to data quality issues (year 21)
-3. In Phase 3 loop, it has dirty data and cannot replace a clean column
+**Final Selection:**
+- `v_date_found = FALSE` and `v_date_column = 'FIRST_DT'`
+- **Prints:** `"Selected date column: FIRST_DT (usage score: 0, range: 912 days)"`
 
 ---
 
-## Diagnostic Questions
+## Expected Result (CORRECTED)
 
-When you run the analysis, please check these outputs:
+**FIRST_DT is correctly selected** because:
+1. Both columns have clean data (years 2023-2025)
+2. FIRST_DT has **significantly fewer NULLs** (0.0062% vs 60.78%)
+3. FIRST_DT has **no time component** (pure DATE vs TIMESTAMP-like)
+4. The NULL percentage difference (60.78%) far exceeds the 10% threshold
+5. Even though SECOND_DT has slightly wider range, it's blocked by NULL% priority
 
-1. **Phase 1 Output** - Is there a line saying:
-   ```
-   Detected Events date column: DATA_TRANZACTIEI
-   ```
-
-2. **Phase 2 Output** - Is there a warning saying:
-   ```
-   WARNING: Stereotype-detected column DATA_TRANZACTIEI has data quality issues (years outside 1900-2100)
-   Will evaluate all date columns for better alternatives...
-   ```
-
-3. **Phase 3 Output** - What is printed at the end:
-   ```
-   Selected date column: ??? (usage score: ???, range: ??? days)
-   ```
-
-4. **Final Result** - What column appears in the `DATE_COLUMN_NAME` field of `dwh_migration_analysis` table?
-
-Please share all of these outputs so we can identify where the logic is breaking down.
+**SECOND_DT is NOT selected** because:
+1. It has 60.78% NULL values (extremely high)
+2. It has a time component requiring TRUNC() in partition key
+3. The new logic prioritizes NULL percentage and time component before range
+4. Range is only used as a tiebreaker when other factors are similar
 
 ---
 

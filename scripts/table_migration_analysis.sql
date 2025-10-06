@@ -1640,6 +1640,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_has_foreign_keys := 'N';
         END;
 
+        -- Initialize LOB for date column analysis (must be created in main scope, not in DECLARE block)
+        DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE);
+        DBMS_LOB.APPEND(v_all_date_analysis, '[');
+
         -- Comprehensive date column analysis
         DECLARE
             v_scd2_type VARCHAR2(30);
@@ -1740,9 +1744,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             END IF;
 
             -- Analyze ALL date columns for comprehensive analysis
-            DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE);
-            DBMS_LOB.APPEND(v_all_date_analysis, '[');
-
             v_date_columns := get_date_columns(v_task.source_owner, v_task.source_table);
 
             IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
@@ -1878,7 +1879,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         -- 2. Highest usage score (primary factor)
                         -- 3. Widest range (secondary factor if usage scores are similar)
                         IF NOT v_date_found THEN
-                            -- Selection logic: heavily prefer columns without data quality issues
+                            -- Selection logic priority:
+                            -- 1. Data quality (years 1900-2100)
+                            -- 2. NULL percentage (lower is better)
+                            -- 3. Time component (prefer DATE without time)
+                            -- 4. Usage score (higher is better)
+                            -- 5. Date range (wider is better - tiebreaker)
                             IF v_date_column IS NULL THEN
                                 -- No column selected yet - select first column as baseline
                                 v_max_range := v_range_days;
@@ -1892,13 +1898,28 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_selected_usage_score := v_usage_score;
                                 v_best_has_quality_issue := v_data_quality_issue;
                             ELSIF (
-                                -- Case 1: Current has no issue, best has issue -> always select current
+                                -- Case 1: Current has no data quality issue, best has issue -> always select current
                                 (v_data_quality_issue = 'N' AND v_best_has_quality_issue = 'Y') OR
 
-                                -- Case 2: Both have same data quality status -> use score/range
+                                -- Case 2: Both have same data quality status -> apply additional criteria
                                 (v_data_quality_issue = v_best_has_quality_issue AND (
-                                    v_usage_score > v_max_usage_score OR
-                                    (v_usage_score >= v_max_usage_score * 0.8 AND v_range_days > v_max_range)
+                                    -- Prefer column with significantly fewer NULLs (>10% difference)
+                                    (v_null_percentage < v_selected_null_pct - 10) OR
+
+                                    -- If NULL percentages similar, prefer column without time component
+                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                     v_has_time_component = 'N' AND v_selected_has_time = 'Y') OR
+
+                                    -- If NULL% and time component same, use usage score
+                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                     v_has_time_component = v_selected_has_time AND
+                                     v_usage_score > v_max_usage_score) OR
+
+                                    -- If all similar, use wider range as tiebreaker
+                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                     v_has_time_component = v_selected_has_time AND
+                                     v_usage_score >= v_max_usage_score * 0.8 AND
+                                     v_range_days > v_max_range)
                                 ))
                                 -- Case 3: Current has issue, best has no issue -> don't select (implicit)
                             ) THEN
@@ -2208,6 +2229,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         COMMIT;
 
+        -- Clean up temporary LOBs
+        IF DBMS_LOB.ISTEMPORARY(v_all_date_analysis) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_all_date_analysis);
+        END IF;
+
         DBMS_OUTPUT.PUT_LINE('Analysis complete:');
         DBMS_OUTPUT.PUT_LINE('  Recommended strategy: ' || NVL(v_recommended_strategy, 'NONE'));
         DBMS_OUTPUT.PUT_LINE('  Complexity score: ' || v_complexity || '/10');
@@ -2220,6 +2246,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_error_code NUMBER := SQLCODE;
                 v_error_json CLOB;
             BEGIN
+                -- Clean up temporary LOBs before handling error
+                BEGIN
+                    IF DBMS_LOB.ISTEMPORARY(v_all_date_analysis) = 1 THEN
+                        DBMS_LOB.FREETEMPORARY(v_all_date_analysis);
+                    END IF;
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+
                 -- Build error details as JSON
                 DBMS_LOB.CREATETEMPORARY(v_error_json, TRUE);
                 DBMS_LOB.APPEND(v_error_json, '[{"type":"ERROR","issue":"Analysis failed with ' ||
