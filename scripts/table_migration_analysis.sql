@@ -94,6 +94,73 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END get_date_columns;
 
 
+    -- Get ALL potential date columns (DATE, NUMBER, VARCHAR) with their data types
+    FUNCTION get_all_potential_date_columns(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_column_names OUT SYS.ODCIVARCHAR2LIST,
+        p_data_types OUT SYS.ODCIVARCHAR2LIST
+    ) RETURN NUMBER
+    AS
+        TYPE t_column_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30));
+        TYPE t_column_list IS TABLE OF t_column_rec;
+        v_all_columns t_column_list;
+        v_count NUMBER := 0;
+    BEGIN
+        p_column_names := SYS.ODCIVARCHAR2LIST();
+        p_data_types := SYS.ODCIVARCHAR2LIST();
+
+        -- Get DATE/TIMESTAMP columns AND NUMBER/VARCHAR columns with date-like names
+        SELECT column_name, data_type
+        BULK COLLECT INTO v_all_columns
+        FROM dba_tab_columns
+        WHERE owner = p_owner
+        AND table_name = p_table_name
+        AND (
+            -- Standard date types
+            data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            OR
+            -- NUMBER columns with date-like names
+            (data_type = 'NUMBER' AND (
+                UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
+                UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
+                UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
+                UPPER(column_name) LIKE '%YM'
+            ))
+            OR
+            -- VARCHAR columns with date-like names
+            (data_type IN ('VARCHAR2', 'CHAR') AND (
+                UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
+                UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
+                UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
+                UPPER(column_name) LIKE '%YM'
+            ))
+        )
+        ORDER BY
+            CASE data_type
+                WHEN 'DATE' THEN 1
+                WHEN 'TIMESTAMP' THEN 2
+                WHEN 'TIMESTAMP(6)' THEN 3
+                WHEN 'NUMBER' THEN 4
+                ELSE 5
+            END,
+            column_id;
+
+        -- Convert to separate lists
+        IF v_all_columns IS NOT NULL AND v_all_columns.COUNT > 0 THEN
+            FOR i IN 1..v_all_columns.COUNT LOOP
+                p_column_names.EXTEND;
+                p_data_types.EXTEND;
+                p_column_names(p_column_names.COUNT) := v_all_columns(i).column_name;
+                p_data_types(p_data_types.COUNT) := v_all_columns(i).data_type;
+                v_count := v_count + 1;
+            END LOOP;
+        END IF;
+
+        RETURN v_count;
+    END get_all_potential_date_columns;
+
+
     FUNCTION get_parallel_degree(
         p_owner VARCHAR2,
         p_table_name VARCHAR2
