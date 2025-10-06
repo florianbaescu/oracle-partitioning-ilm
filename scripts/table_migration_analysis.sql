@@ -1766,7 +1766,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             END IF;
 
             -- Analyze ALL date columns for comprehensive analysis
+            DBMS_OUTPUT.PUT_LINE('DEBUG: Getting date columns...');
             v_date_columns := get_date_columns(v_task.source_owner, v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('DEBUG: Got date columns, count=' || NVL(TO_CHAR(v_date_columns.COUNT), 'NULL'));
 
             IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
                 DBMS_OUTPUT.PUT_LINE('Analyzing ' || v_date_columns.COUNT || ' date column(s)...');
@@ -2069,6 +2071,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             DBMS_LOB.APPEND(v_all_date_analysis, ']');
         END;
 
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Finished date column analysis DECLARE block');
+
         -- If no standard DATE column found, check for non-standard formats (NUMBER or VARCHAR-based dates)
         IF v_date_column IS NULL THEN
             DBMS_OUTPUT.PUT_LINE('No standard DATE column found, checking for NUMBER/VARCHAR date columns...');
@@ -2168,6 +2172,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_estimated_downtime := ROUND(v_base_time, 2);
         END;
 
+        DBMS_OUTPUT.PUT_LINE('DEBUG: About to build candidate_columns...');
+
         -- Build candidate_columns: ALL potential date columns (DATE/TIMESTAMP/NUMBER/VARCHAR with date-like names)
         DECLARE
             v_temp_columns VARCHAR2(4000) := '';
@@ -2237,6 +2243,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 -- If candidate search fails, use fallback
                 DBMS_LOB.APPEND(v_candidate_columns, 'Error collecting candidates: ' || SQLERRM);
         END;
+
+        DBMS_OUTPUT.PUT_LINE('DEBUG: Finished building candidate_columns');
 
         -- Estimate partition count
         IF v_task.partition_key IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
