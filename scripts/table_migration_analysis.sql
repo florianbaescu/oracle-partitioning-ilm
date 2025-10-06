@@ -1663,6 +1663,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         DBMS_LOB.APPEND(v_all_date_analysis, '[');
 
         DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
+        -- Initialize with empty content to ensure LOB is not treated as NULL
+        DBMS_LOB.APPEND(v_candidate_columns, '');
 
         -- Comprehensive date column analysis
         DECLARE
@@ -2110,10 +2112,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_temp_columns := v_temp_columns || ', ';
                     END IF;
                 END LOOP;
-            END IF;
-            -- Append to LOB (already created at line 1648)
-            IF v_temp_columns IS NOT NULL AND LENGTH(v_temp_columns) > 0 THEN
+                -- Append to LOB (already created at line 1648)
                 DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
+            ELSE
+                -- No date columns found - store explicit marker
+                DBMS_LOB.APPEND(v_candidate_columns, 'No date columns found');
             END IF;
         END;
 
