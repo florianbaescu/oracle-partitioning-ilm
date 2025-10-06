@@ -2056,11 +2056,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                     DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has time component - use TRUNC() in partition key');
                 END IF;
-            ELSE
-                DBMS_OUTPUT.PUT_LINE('No DATE/TIMESTAMP columns found');
+            END IF;
 
-                -- Analyze NUMBER/VARCHAR columns as alternatives
-                DECLARE
+            -- ALWAYS analyze NUMBER/VARCHAR columns as alternatives (even if DATE columns exist)
+            DBMS_OUTPUT.PUT_LINE('Analyzing NUMBER/VARCHAR date candidates as alternatives...');
+            DECLARE
                     TYPE t_candidate_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30));
                     TYPE t_candidate_list IS TABLE OF t_candidate_rec;
                     v_number_varchar_candidates t_candidate_list;
@@ -2076,12 +2076,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     AND (
                         (data_type = 'NUMBER' AND (
                             UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
-                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT'
+                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
+                            UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
+                            UPPER(column_name) LIKE '%YM'
                         ))
                         OR
                         (data_type IN ('VARCHAR2', 'CHAR') AND (
                             UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
-                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT'
+                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
+                            UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
+                            UPPER(column_name) LIKE '%YM'
                         ))
                     )
                     ORDER BY data_type, column_name;
@@ -2125,31 +2129,59 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     WHEN OTHERS THEN
                         DBMS_OUTPUT.PUT_LINE('Error analyzing NUMBER/VARCHAR candidates: ' || SQLERRM);
                 END;
-            END IF;
 
             DBMS_LOB.APPEND(v_all_date_analysis, ']');
         END;
 
-        -- If no standard DATE column found, check for non-standard formats (NUMBER or VARCHAR-based dates)
-        IF v_date_column IS NULL THEN
-            DBMS_OUTPUT.PUT_LINE('No standard DATE column found, checking for NUMBER/VARCHAR date columns...');
+        -- ALWAYS check for non-standard formats (NUMBER or VARCHAR-based dates) as alternatives
+        -- This allows comparison between DATE columns and NUMBER/VARCHAR alternatives
+        DECLARE
+            v_alt_date_column VARCHAR2(128);
+            v_alt_date_format VARCHAR2(50);
+            v_alt_date_type VARCHAR2(30);
+            v_alt_conversion_expr VARCHAR2(500);
+        BEGIN
+            DBMS_OUTPUT.PUT_LINE('Checking for NUMBER/VARCHAR date columns as alternatives...');
 
-            IF detect_numeric_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_date_column, v_date_format) THEN
-                v_requires_conversion := 'Y';
-                v_date_type := 'NUMBER';
-                v_conversion_expr := get_date_conversion_expr(v_date_column, 'NUMBER', v_date_format);
-                DBMS_OUTPUT.PUT_LINE('Detected NUMBER-based date column: ' || v_date_column || ' (Format: ' || v_date_format || ')');
-            ELSIF detect_varchar_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_date_column, v_date_format) THEN
-                v_requires_conversion := 'Y';
-                v_date_type := 'VARCHAR2';
-                v_conversion_expr := get_date_conversion_expr(v_date_column, 'VARCHAR2', v_date_format);
-                DBMS_OUTPUT.PUT_LINE('Detected VARCHAR-based date column: ' || v_date_column || ' (Format: ' || v_date_format || ')');
+            -- Try NUMBER-based dates first
+            IF detect_numeric_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format) THEN
+                v_alt_date_type := 'NUMBER';
+                v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, 'NUMBER', v_alt_date_format);
+                DBMS_OUTPUT.PUT_LINE('Detected NUMBER-based date column: ' || v_alt_date_column || ' (Format: ' || v_alt_date_format || ')');
+
+                -- If no DATE column was found, use this as primary
+                IF v_date_column IS NULL THEN
+                    v_date_column := v_alt_date_column;
+                    v_date_type := v_alt_date_type;
+                    v_date_format := v_alt_date_format;
+                    v_conversion_expr := v_alt_conversion_expr;
+                    v_requires_conversion := 'Y';
+                    DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (no DATE columns found)');
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
+                END IF;
+
+            -- Try VARCHAR-based dates if NUMBER not found
+            ELSIF detect_varchar_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format) THEN
+                v_alt_date_type := 'VARCHAR2';
+                v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, 'VARCHAR2', v_alt_date_format);
+                DBMS_OUTPUT.PUT_LINE('Detected VARCHAR-based date column: ' || v_alt_date_column || ' (Format: ' || v_alt_date_format || ')');
+
+                -- If no DATE column was found, use this as primary
+                IF v_date_column IS NULL THEN
+                    v_date_column := v_alt_date_column;
+                    v_date_type := v_alt_date_type;
+                    v_date_format := v_alt_date_format;
+                    v_conversion_expr := v_alt_conversion_expr;
+                    v_requires_conversion := 'Y';
+                    DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (no DATE columns found)');
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
+                END IF;
             ELSE
-                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns found either.');
+                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns detected');
             END IF;
-        ELSE
-            DBMS_OUTPUT.PUT_LINE('Standard DATE column already found: ' || v_date_column);
-        END IF;
+        END;
 
         -- Recommend partitioning strategy if not specified
         IF v_task.partition_type IS NULL THEN
