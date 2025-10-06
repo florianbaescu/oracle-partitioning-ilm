@@ -1544,7 +1544,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         COMMIT;
 
         -- Initialize warnings tracking
-        DBMS_LOB.CREATETEMPORARY(v_warnings, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_warnings, TRUE, DBMS_LOB.SESSION);
         DBMS_LOB.APPEND(v_warnings, '[' || CHR(10));
 
         -- Get table statistics
@@ -1641,7 +1641,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         END;
 
         -- Initialize LOB for date column analysis (must be created in main scope, not in DECLARE block)
-        DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE);
+        -- Use DBMS_LOB.SESSION duration to survive across DECLARE blocks and until procedure ends
+        DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE, DBMS_LOB.SESSION);
         DBMS_LOB.APPEND(v_all_date_analysis, '[');
 
         -- Comprehensive date column analysis
@@ -2085,7 +2086,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     END IF;
                 END LOOP;
             END IF;
-            DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE);
+            DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
             DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
         END;
 
@@ -2254,7 +2255,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 EXCEPTION WHEN OTHERS THEN NULL; END;
 
                 -- Build error details as JSON
-                DBMS_LOB.CREATETEMPORARY(v_error_json, TRUE);
+                DBMS_LOB.CREATETEMPORARY(v_error_json, TRUE, DBMS_LOB.SESSION);
                 DBMS_LOB.APPEND(v_error_json, '[{"type":"ERROR","issue":"Analysis failed with ' ||
                     REPLACE(v_error_msg, '"', '\"') || '","code":' || v_error_code ||
                     ',"action":"Review error details and table structure"}]');
