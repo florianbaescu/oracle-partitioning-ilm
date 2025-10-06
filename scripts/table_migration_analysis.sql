@@ -1660,11 +1660,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Initialize all LOBs in main scope (must be created before DECLARE blocks)
         -- Use DBMS_LOB.SESSION duration to survive across DECLARE blocks and until procedure ends
         DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE, DBMS_LOB.SESSION);
+
+        -- Verify LOB was created successfully
+        IF DBMS_LOB.ISTEMPORARY(v_all_date_analysis) != 1 THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Failed to create temporary LOB for v_all_date_analysis');
+        END IF;
+
         DBMS_LOB.APPEND(v_all_date_analysis, '[');
 
         DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
-        -- Initialize with empty content to ensure LOB is not treated as NULL
-        DBMS_LOB.APPEND(v_candidate_columns, '');
+
+        -- Verify LOB was created successfully
+        IF DBMS_LOB.ISTEMPORARY(v_candidate_columns) != 1 THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Failed to create temporary LOB for v_candidate_columns');
+        END IF;
 
         -- Comprehensive date column analysis
         DECLARE
