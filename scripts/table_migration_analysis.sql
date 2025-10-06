@@ -558,11 +558,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 EXECUTE IMMEDIATE v_sql INTO v_min_val, v_max_val, v_count;
 
                 IF v_count > 0 THEN
-                    -- Check for YYYYMMDD format (8 digits, values between 19000101 and 21000101)
+                    -- Check for YYYYMMDD format (8 digits, values between 19000101 and 21001231)
                     IF v_min_val >= 19000101 AND v_max_val <= 21001231
                        AND LENGTH(TRUNC(v_min_val)) = 8 THEN
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMMDD';
+                        RETURN TRUE;
+
+                    -- Check for YYYYMM format (6 digits, values between 190001 and 210012)
+                    ELSIF v_min_val >= 190001 AND v_max_val <= 210012
+                          AND LENGTH(TRUNC(v_min_val)) = 6
+                          AND MOD(v_min_val, 100) BETWEEN 1 AND 12  -- Month part must be 01-12
+                          AND MOD(v_max_val, 100) BETWEEN 1 AND 12 THEN
+                        p_date_column := rec.column_name;
+                        p_date_format := 'YYYYMM';
                         RETURN TRUE;
 
                     -- Check for Unix timestamp (10 digits, reasonable range)
@@ -572,9 +581,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         p_date_format := 'UNIX_TIMESTAMP';
                         RETURN TRUE;
 
-                    -- Check for YYMMDD format (6 digits)
+                    -- Check for YYMMDD format (6 digits, day-level dates)
                     ELSIF v_min_val >= 000101 AND v_max_val <= 991231
-                          AND LENGTH(TRUNC(v_min_val)) = 6 THEN
+                          AND LENGTH(TRUNC(v_min_val)) = 6
+                          AND MOD(v_min_val, 100) BETWEEN 1 AND 31  -- Day part must be 01-31
+                          AND MOD(v_max_val, 100) BETWEEN 1 AND 31 THEN
                         p_date_column := rec.column_name;
                         p_date_format := 'YYMMDD';
                         RETURN TRUE;
@@ -675,6 +686,34 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     EXCEPTION WHEN OTHERS THEN NULL;
                     END;
 
+                    -- YYYY-MM (year-month only)
+                    BEGIN
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
+                                        ' WHERE TO_DATE(' || rec.column_name || ' || ''-01'', ''YYYY-MM-DD'') IS NOT NULL AND ROWNUM <= 100'
+                                        INTO v_count;
+                        IF v_count > 0 THEN
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM';
+                            RETURN TRUE;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN NULL;
+                    END;
+
+                    -- YYYYMM (year-month without separator)
+                    BEGIN
+                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
+                                        p_owner || '.' || p_table_name ||
+                                        ' WHERE TO_DATE(' || rec.column_name || ' || ''01'', ''YYYYMMDD'') IS NOT NULL AND ROWNUM <= 100'
+                                        INTO v_count;
+                        IF v_count > 0 THEN
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            RETURN TRUE;
+                        END IF;
+                    EXCEPTION WHEN OTHERS THEN NULL;
+                    END;
+
                     -- YYYYMMDD
                     BEGIN
                         EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
@@ -728,6 +767,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         IF p_data_type = 'NUMBER' THEN
             IF p_date_format = 'YYYYMMDD' THEN
                 RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYYYMMDD'')';
+            ELSIF p_date_format = 'YYYYMM' THEN
+                -- Convert YYYYMM to date by appending '01' for first day of month
+                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || ') || ''01'', ''YYYYMMDD'')';
             ELSIF p_date_format = 'YYMMDD' THEN
                 RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYMMDD'')';
             ELSIF p_date_format = 'UNIX_TIMESTAMP' THEN
@@ -736,7 +778,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Handle VARCHAR/CHAR-based dates
         ELSIF p_data_type IN ('VARCHAR2', 'CHAR') THEN
-            RETURN 'TO_DATE(' || p_column_name || ', ''' || p_date_format || ''')';
+            IF p_date_format = 'YYYY-MM' THEN
+                -- Convert YYYY-MM to date by appending '-01' for first day of month
+                RETURN 'TO_DATE(' || p_column_name || ' || ''-01'', ''YYYY-MM-DD'')';
+            ELSIF p_date_format = 'YYYYMM' THEN
+                -- Convert YYYYMM (VARCHAR) to date by appending '01'
+                RETURN 'TO_DATE(' || p_column_name || ' || ''01'', ''YYYYMMDD'')';
+            ELSE
+                RETURN 'TO_DATE(' || p_column_name || ', ''' || p_date_format || ''')';
+            END IF;
         END IF;
 
         -- Default: return column as-is
