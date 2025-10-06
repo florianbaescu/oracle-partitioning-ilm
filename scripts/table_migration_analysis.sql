@@ -1640,10 +1640,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_has_foreign_keys := 'N';
         END;
 
-        -- Initialize LOB for date column analysis (must be created in main scope, not in DECLARE block)
+        -- Initialize all LOBs in main scope (must be created before DECLARE blocks)
         -- Use DBMS_LOB.SESSION duration to survive across DECLARE blocks and until procedure ends
         DBMS_LOB.CREATETEMPORARY(v_all_date_analysis, TRUE, DBMS_LOB.SESSION);
         DBMS_LOB.APPEND(v_all_date_analysis, '[');
+
+        DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
 
         -- Comprehensive date column analysis
         DECLARE
@@ -2086,8 +2088,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     END IF;
                 END LOOP;
             END IF;
-            DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
-            DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
+            -- Append to LOB (already created at line 1648)
+            IF v_temp_columns IS NOT NULL AND LENGTH(v_temp_columns) > 0 THEN
+                DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
+            END IF;
         END;
 
         -- Estimate partition count
@@ -2234,6 +2238,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         IF DBMS_LOB.ISTEMPORARY(v_all_date_analysis) = 1 THEN
             DBMS_LOB.FREETEMPORARY(v_all_date_analysis);
         END IF;
+        IF DBMS_LOB.ISTEMPORARY(v_candidate_columns) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_candidate_columns);
+        END IF;
 
         DBMS_OUTPUT.PUT_LINE('Analysis complete:');
         DBMS_OUTPUT.PUT_LINE('  Recommended strategy: ' || NVL(v_recommended_strategy, 'NONE'));
@@ -2251,6 +2258,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 BEGIN
                     IF DBMS_LOB.ISTEMPORARY(v_all_date_analysis) = 1 THEN
                         DBMS_LOB.FREETEMPORARY(v_all_date_analysis);
+                    END IF;
+                    IF DBMS_LOB.ISTEMPORARY(v_candidate_columns) = 1 THEN
+                        DBMS_LOB.FREETEMPORARY(v_candidate_columns);
                     END IF;
                 EXCEPTION WHEN OTHERS THEN NULL; END;
 
