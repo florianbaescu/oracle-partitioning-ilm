@@ -1547,6 +1547,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         DBMS_LOB.CREATETEMPORARY(v_warnings, TRUE, DBMS_LOB.SESSION);
         DBMS_LOB.APPEND(v_warnings, '[' || CHR(10));
 
+        -- Verify table access early
+        BEGIN
+            EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || v_task.source_owner || '.' || v_task.source_table || ' WHERE ROWNUM = 1' INTO v_error_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_error_count := v_error_count + 1;
+                IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "ERROR",' || CHR(10) ||
+                    '    "issue": "Cannot access table ' || v_task.source_owner || '.' || v_task.source_table || ': ' || SQLERRM || '",' || CHR(10) ||
+                    '    "action": "Grant SELECT privilege on the table or verify table exists"' || CHR(10) ||
+                    '  }');
+                DBMS_OUTPUT.PUT_LINE('ERROR: Cannot access table ' || v_task.source_owner || '.' || v_task.source_table);
+                DBMS_OUTPUT.PUT_LINE('  ' || SQLERRM);
+                RAISE;  -- Re-raise to stop analysis
+        END;
+
         -- Get table statistics
         BEGIN
             SELECT num_rows INTO v_num_rows
