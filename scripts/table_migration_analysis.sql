@@ -545,6 +545,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%DTTM%'
                 OR UPPER(column_name) LIKE '%TIMESTAMP%'
                 OR UPPER(column_name) LIKE '%DT'
+                OR UPPER(column_name) LIKE '%MONTH%'
+                OR UPPER(column_name) LIKE '%PERIOD%'
+                OR UPPER(column_name) LIKE '%YM'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
         ) LOOP
@@ -553,9 +556,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' ||
                          'MIN(' || rec.column_name || '), MAX(' || rec.column_name || '), COUNT(*) ' ||
                          'FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 1000';
+                         ' WHERE ' || rec.column_name || ' IS NOT NULL';
 
                 EXECUTE IMMEDIATE v_sql INTO v_min_val, v_max_val, v_count;
+
+                DBMS_OUTPUT.PUT_LINE('  Checking NUMBER column: ' || rec.column_name ||
+                                     ' MIN=' || v_min_val || ' MAX=' || v_max_val ||
+                                     ' LENGTH=' || LENGTH(TRUNC(v_min_val)));
 
                 IF v_count > 0 THEN
                     -- Check for YYYYMMDD format (8 digits, values between 19000101 and 21001231)
@@ -631,6 +638,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%DTTM%'
                 OR UPPER(column_name) LIKE '%TIMESTAMP%'
                 OR UPPER(column_name) LIKE '%DT'
+                OR UPPER(column_name) LIKE '%MONTH%'
+                OR UPPER(column_name) LIKE '%PERIOD%'
+                OR UPPER(column_name) LIKE '%YM'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
         ) LOOP
@@ -641,6 +651,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                          ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM = 1';
 
                 EXECUTE IMMEDIATE v_sql INTO v_sample_value;
+
+                DBMS_OUTPUT.PUT_LINE('  Checking VARCHAR column: ' || rec.column_name ||
+                                     ' SAMPLE=' || v_sample_value || ' LENGTH=' || LENGTH(v_sample_value));
 
                 IF v_sample_value IS NOT NULL THEN
                     -- Try various date format conversions
