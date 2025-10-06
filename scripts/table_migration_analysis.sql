@@ -1985,6 +1985,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- If no standard DATE column found, check for non-standard formats (NUMBER or VARCHAR-based dates)
         IF v_date_column IS NULL THEN
+            DBMS_OUTPUT.PUT_LINE('No standard DATE column found, checking for NUMBER/VARCHAR date columns...');
+
             IF detect_numeric_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_date_column, v_date_format) THEN
                 v_requires_conversion := 'Y';
                 v_date_type := 'NUMBER';
@@ -1995,7 +1997,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_date_type := 'VARCHAR2';
                 v_conversion_expr := get_date_conversion_expr(v_date_column, 'VARCHAR2', v_date_format);
                 DBMS_OUTPUT.PUT_LINE('Detected VARCHAR-based date column: ' || v_date_column || ' (Format: ' || v_date_format || ')');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns found either.');
             END IF;
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Standard DATE column already found: ' || v_date_column);
         END IF;
 
         -- Recommend partitioning strategy if not specified
