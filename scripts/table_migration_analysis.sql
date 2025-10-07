@@ -792,68 +792,87 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             )
             ORDER BY column_id
         ) LOOP
-            -- Sample 10 non-null values to validate format
+            -- Sample 10 rows to validate format (no NOT NULL filter - fast, no full scan)
             BEGIN
                 v_sql := 'SELECT ' || rec.column_name ||
                          ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                         ' WHERE ROWNUM <= 10';
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
                 DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column: ' || rec.column_name || ' (' || v_samples.COUNT || ' samples)');
 
                 IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    -- Filter out NULLs and check if we have enough valid samples
                     v_valid_count := 0;
-
-                    -- Check YYYYMMDD format (8 digits, 19000101-21001231)
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF v_sample_val >= 19000101 AND v_sample_val <= 21001231
-                           AND LENGTH(TRUNC(v_sample_val)) = 8 THEN
+                        IF v_samples(i) IS NOT NULL THEN
                             v_valid_count := v_valid_count + 1;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
-                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
-                        p_date_column := rec.column_name;
-                        p_date_format := 'YYYYMMDD';
-                        RETURN TRUE;
-                    END IF;
 
-                    -- Check YYYYMM format (6 digits, 190001-210012, month 01-12)
-                    v_valid_count := 0;
-                    FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF v_sample_val >= 190001 AND v_sample_val <= 210012
-                           AND LENGTH(TRUNC(v_sample_val)) = 6
-                           AND MOD(v_sample_val, 100) BETWEEN 1 AND 12 THEN
-                            v_valid_count := v_valid_count + 1;
+                    -- Need at least 5 non-null samples to validate
+                    IF v_valid_count >= 5 THEN
+                        v_valid_count := 0;
+
+                        -- Check YYYYMMDD format (8 digits, 19000101-21001231)
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF v_samples(i) IS NOT NULL THEN
+                                v_sample_val := v_samples(i);
+                                IF v_sample_val >= 19000101 AND v_sample_val <= 21001231
+                                   AND LENGTH(TRUNC(v_sample_val)) = 8 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (' || v_valid_count || ' valid samples)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMMDD';
+                            RETURN TRUE;
                         END IF;
-                    END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
-                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
-                        p_date_column := rec.column_name;
-                        p_date_format := 'YYYYMM';
-                        RETURN TRUE;
-                    END IF;
 
-                    -- Check Unix timestamp (10+ digits, 946684800-2147483647)
-                    v_valid_count := 0;
-                    FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF v_sample_val >= 946684800 AND v_sample_val <= 2147483647
-                           AND LENGTH(TRUNC(v_sample_val)) >= 10 THEN
-                            v_valid_count := v_valid_count + 1;
+                        -- Check YYYYMM format (6 digits, 190001-210012, month 01-12)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF v_samples(i) IS NOT NULL THEN
+                                v_sample_val := v_samples(i);
+                                IF v_sample_val >= 190001 AND v_sample_val <= 210012
+                                   AND LENGTH(TRUNC(v_sample_val)) = 6
+                                   AND MOD(v_sample_val, 100) BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (' || v_valid_count || ' valid samples)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            RETURN TRUE;
                         END IF;
-                    END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
-                        DBMS_OUTPUT.PUT_LINE('    -> Detected UNIX_TIMESTAMP format (all ' || v_valid_count || ' samples valid)');
-                        p_date_column := rec.column_name;
-                        p_date_format := 'UNIX_TIMESTAMP';
-                        RETURN TRUE;
-                    END IF;
 
-                    DBMS_OUTPUT.PUT_LINE('    -> No valid date format detected');
+                        -- Check Unix timestamp (10+ digits, 946684800-2147483647)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF v_samples(i) IS NOT NULL THEN
+                                v_sample_val := v_samples(i);
+                                IF v_sample_val >= 946684800 AND v_sample_val <= 2147483647
+                                   AND LENGTH(TRUNC(v_sample_val)) >= 10 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected UNIX_TIMESTAMP format (' || v_valid_count || ' valid samples)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'UNIX_TIMESTAMP';
+                            RETURN TRUE;
+                        END IF;
+
+                        DBMS_OUTPUT.PUT_LINE('    -> No valid date format detected');
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_valid_count || '/10)');
+                    END IF;
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
@@ -911,27 +930,46 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             )
             ORDER BY column_id
         ) LOOP
-            -- Sample 10 non-null values to validate format
+            -- Sample 10 values to validate format (Stage 1: no IS NOT NULL filter)
             BEGIN
                 v_sql := 'SELECT ' || rec.column_name ||
                          ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                         ' WHERE ROWNUM <= 10';
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
                 DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column: ' || rec.column_name || ' (' || v_samples.COUNT || ' samples)');
 
                 IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    -- Filter out NULLs and check if we have enough valid samples
+                    DECLARE
+                        v_non_null_count NUMBER := 0;
+                    BEGIN
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF v_samples(i) IS NOT NULL THEN
+                                v_non_null_count := v_non_null_count + 1;
+                            END IF;
+                        END LOOP;
+
+                        -- Need at least 5 non-null samples to validate
+                        IF v_non_null_count < 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                            GOTO next_varchar_column;
+                        END IF;
+                    END;
+
                     v_valid_count := 0;
 
                     -- Check YYYY-MM-DD format
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}-\d{2}$') THEN
-                            v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}-\d{2}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYY-MM-DD';
@@ -941,12 +979,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Check DD/MM/YYYY format
                     v_valid_count := 0;
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
-                            v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected DD/MM/YYYY format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'DD/MM/YYYY';
@@ -956,12 +996,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Check MM/DD/YYYY format
                     v_valid_count := 0;
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
-                            v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected MM/DD/YYYY format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'MM/DD/YYYY';
@@ -971,15 +1013,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Check YYYY-MM format (year-month with hyphen)
                     v_valid_count := 0;
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}$') THEN
-                            v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 6, 2));
-                            IF v_month_part BETWEEN 1 AND 12 THEN
-                                v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 6, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYY-MM';
@@ -989,15 +1033,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Check YYYYMM format (6 digits, no separator)
                     v_valid_count := 0;
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{6}$') THEN
-                            v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 5, 2));
-                            IF v_month_part BETWEEN 1 AND 12 THEN
-                                v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{6}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 5, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMM';
@@ -1007,12 +1053,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Check YYYYMMDD format (8 digits)
                     v_valid_count := 0;
                     FOR i IN 1..v_samples.COUNT LOOP
-                        v_sample_val := v_samples(i);
-                        IF REGEXP_LIKE(v_sample_val, '^\d{8}$') THEN
-                            v_valid_count := v_valid_count + 1;
+                        IF v_samples(i) IS NOT NULL THEN
+                            v_sample_val := v_samples(i);
+                            IF REGEXP_LIKE(v_sample_val, '^\d{8}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count = v_samples.COUNT THEN
+                    IF v_valid_count >= 5 THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMMDD';
@@ -1026,6 +1074,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('    -> Error sampling: ' || SQLERRM);
                     NULL; -- Continue to next column
             END;
+            <<next_varchar_column>>
+            NULL; -- Label for GOTO
         END LOOP;
 
         RETURN FALSE;
@@ -1083,25 +1133,44 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 BEGIN
                     DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column (no name pattern): ' || rec.column_name);
 
-                    -- Sample 10 non-null values
+                    -- Sample 10 values (Stage 1: no IS NOT NULL filter)
                     v_sql := 'SELECT ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                             ' WHERE ROWNUM <= 10';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_number_samples;
 
                     IF v_number_samples IS NOT NULL AND v_number_samples.COUNT > 0 THEN
+                        -- Filter out NULLs and check if we have enough valid samples
+                        DECLARE
+                            v_non_null_count NUMBER := 0;
+                        BEGIN
+                            FOR i IN 1..v_number_samples.COUNT LOOP
+                                IF v_number_samples(i) IS NOT NULL THEN
+                                    v_non_null_count := v_non_null_count + 1;
+                                END IF;
+                            END LOOP;
+
+                            -- Need at least 5 non-null samples to validate
+                            IF v_non_null_count < 5 THEN
+                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                                GOTO next_number_column;
+                            END IF;
+                        END;
+
                         v_valid_count := 0;
 
-                        -- Check YYYYMMDD format (all samples must match)
+                        -- Check YYYYMMDD format (need at least 5 valid)
                         FOR i IN 1..v_number_samples.COUNT LOOP
-                            v_sample_num := v_number_samples(i);
-                            IF v_sample_num >= 19000101 AND v_sample_num <= 21001231
-                               AND LENGTH(TRUNC(v_sample_num)) = 8 THEN
-                                v_valid_count := v_valid_count + 1;
+                            IF v_number_samples(i) IS NOT NULL THEN
+                                v_sample_num := v_number_samples(i);
+                                IF v_sample_num >= 19000101 AND v_sample_num <= 21001231
+                                   AND LENGTH(TRUNC(v_sample_num)) = 8 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_number_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -1109,17 +1178,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             RETURN TRUE;
                         END IF;
 
-                        -- Check YYYYMM format (all samples must match)
+                        -- Check YYYYMM format (need at least 5 valid)
                         v_valid_count := 0;
                         FOR i IN 1..v_number_samples.COUNT LOOP
-                            v_sample_num := v_number_samples(i);
-                            IF v_sample_num >= 190001 AND v_sample_num <= 210012
-                               AND LENGTH(TRUNC(v_sample_num)) = 6
-                               AND MOD(v_sample_num, 100) BETWEEN 1 AND 12 THEN
-                                v_valid_count := v_valid_count + 1;
+                            IF v_number_samples(i) IS NOT NULL THEN
+                                v_sample_num := v_number_samples(i);
+                                IF v_sample_num >= 190001 AND v_sample_num <= 210012
+                                   AND LENGTH(TRUNC(v_sample_num)) = 6
+                                   AND MOD(v_sample_num, 100) BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_number_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1134,6 +1205,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
                         NULL; -- Skip columns with errors
                 END;
+                <<next_number_column>>
+                NULL; -- Label for GOTO
             END IF;
         END LOOP;
 
@@ -1161,23 +1234,42 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 BEGIN
                     DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column (no name pattern): ' || rec.column_name);
 
-                    -- Sample 10 non-null values
+                    -- Sample 10 values (Stage 1: no IS NOT NULL filter)
                     v_sql := 'SELECT ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                             ' WHERE ROWNUM <= 10';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_varchar_samples;
 
                     IF v_varchar_samples IS NOT NULL AND v_varchar_samples.COUNT > 0 THEN
+                        -- Filter out NULLs and check if we have enough valid samples
+                        DECLARE
+                            v_non_null_count NUMBER := 0;
+                        BEGIN
+                            FOR i IN 1..v_varchar_samples.COUNT LOOP
+                                IF v_varchar_samples(i) IS NOT NULL THEN
+                                    v_non_null_count := v_non_null_count + 1;
+                                END IF;
+                            END LOOP;
+
+                            -- Need at least 5 non-null samples to validate
+                            IF v_non_null_count < 5 THEN
+                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                                GOTO next_varchar_fallback_column;
+                            END IF;
+                        END;
+
                         v_valid_count := 0;
 
-                        -- Check YYYY-MM-DD format (all samples must match)
+                        -- Check YYYY-MM-DD format (need at least 5 valid)
                         FOR i IN 1..v_varchar_samples.COUNT LOOP
-                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}-\d{2}$') THEN
-                                v_valid_count := v_valid_count + 1;
+                            IF v_varchar_samples(i) IS NOT NULL THEN
+                                IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}-\d{2}$') THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM-DD';
@@ -1185,17 +1277,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             RETURN TRUE;
                         END IF;
 
-                        -- Check YYYY-MM format (all samples must match with month validation)
+                        -- Check YYYY-MM format (need at least 5 valid with month validation)
                         v_valid_count := 0;
                         FOR i IN 1..v_varchar_samples.COUNT LOOP
-                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}$') THEN
-                                v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 6, 2));
-                                IF v_month_part BETWEEN 1 AND 12 THEN
-                                    v_valid_count := v_valid_count + 1;
+                            IF v_varchar_samples(i) IS NOT NULL THEN
+                                IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}$') THEN
+                                    v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 6, 2));
+                                    IF v_month_part BETWEEN 1 AND 12 THEN
+                                        v_valid_count := v_valid_count + 1;
+                                    END IF;
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM';
@@ -1203,17 +1297,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             RETURN TRUE;
                         END IF;
 
-                        -- Check YYYYMM format (all samples must match with month validation)
+                        -- Check YYYYMM format (need at least 5 valid with month validation)
                         v_valid_count := 0;
                         FOR i IN 1..v_varchar_samples.COUNT LOOP
-                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{6}$') THEN
-                                v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 5, 2));
-                                IF v_month_part BETWEEN 1 AND 12 THEN
-                                    v_valid_count := v_valid_count + 1;
+                            IF v_varchar_samples(i) IS NOT NULL THEN
+                                IF REGEXP_LIKE(v_varchar_samples(i), '^\d{6}$') THEN
+                                    v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 5, 2));
+                                    IF v_month_part BETWEEN 1 AND 12 THEN
+                                        v_valid_count := v_valid_count + 1;
+                                    END IF;
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1221,14 +1317,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             RETURN TRUE;
                         END IF;
 
-                        -- Check YYYYMMDD format (all samples must match)
+                        -- Check YYYYMMDD format (need at least 5 valid)
                         v_valid_count := 0;
                         FOR i IN 1..v_varchar_samples.COUNT LOOP
-                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{8}$') THEN
-                                v_valid_count := v_valid_count + 1;
+                            IF v_varchar_samples(i) IS NOT NULL THEN
+                                IF REGEXP_LIKE(v_varchar_samples(i), '^\d{8}$') THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                        IF v_valid_count >= 5 THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -1243,6 +1341,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
                         NULL; -- Skip columns with errors
                 END;
+                <<next_varchar_fallback_column>>
+                NULL; -- Label for GOTO
             END IF;
         END LOOP;
 
