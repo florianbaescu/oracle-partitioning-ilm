@@ -212,6 +212,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     END build_partition_ddl;
 
 
+    -- -------------------------------------------------------------------------
+    -- Recreate Indexes Using DBMS_METADATA
+    -- -------------------------------------------------------------------------
+    -- DESCRIPTION:
+    --   Recreates all indexes from source table on target table using Oracle's
+    --   DBMS_METADATA.GET_DEPENDENT_DDL for accurate DDL extraction.
+    --
+    -- BENEFITS:
+    --   - Captures ALL index features: function-based, bitmap, descending, compression
+    --   - Preserves index expressions, invisibility, unusable status
+    --   - Handles composite indexes, domain indexes, etc.
+    --   - More maintainable than manual DDL construction
+    --
+    -- PROCESS:
+    --   1. Get index DDL using DBMS_METADATA
+    --   2. Parse DDL and replace table references
+    --   3. Make indexes LOCAL for partitioned table
+    --   4. Execute modified DDL
+    -- -------------------------------------------------------------------------
     PROCEDURE recreate_indexes(
         p_task_id NUMBER,
         p_source_owner VARCHAR2,
@@ -219,12 +238,22 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         p_target_table VARCHAR2,
         p_step_offset NUMBER
     ) AS
-        v_sql VARCHAR2(4000);
+        v_sql CLOB;
+        v_index_ddl CLOB;
         v_start TIMESTAMP;
         v_step NUMBER := p_step_offset;
+        v_ddl_handle NUMBER;
+        v_transform_handle NUMBER;
     BEGIN
+        -- Configure DBMS_METADATA to get clean DDL
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'TABLESPACE', TRUE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
+
+        -- Get all indexes (excluding PK indexes)
         FOR idx IN (
-            SELECT index_name, uniqueness, index_type, tablespace_name
+            SELECT index_name
             FROM dba_indexes
             WHERE table_owner = p_source_owner
             AND table_name = p_source_table
@@ -239,42 +268,77 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             v_step := v_step + 1;
             v_start := SYSTIMESTAMP;
 
-            -- Get index columns
-            DECLARE
-                v_columns VARCHAR2(4000);
             BEGIN
-                SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
-                INTO v_columns
-                FROM dba_ind_columns
-                WHERE index_owner = p_source_owner
-                AND index_name = idx.index_name;
+                -- Get index DDL from DBMS_METADATA
+                v_index_ddl := DBMS_METADATA.GET_DDL('INDEX', idx.index_name, p_source_owner);
 
-                v_sql := 'CREATE ';
-                IF idx.uniqueness = 'UNIQUE' THEN
-                    v_sql := v_sql || 'UNIQUE ';
+                -- Replace source table name with target table name
+                v_sql := REPLACE(v_index_ddl,
+                                '"' || p_source_table || '"',
+                                '"' || p_target_table || '"');
+                v_sql := REPLACE(v_sql,
+                                ' ' || p_source_table || ' ',
+                                ' ' || p_target_table || ' ');
+
+                -- Make index LOCAL for partitioned table (if not already LOCAL)
+                -- Insert LOCAL keyword before TABLESPACE or before final semicolon
+                IF INSTR(UPPER(v_sql), ' LOCAL ') = 0 THEN
+                    IF INSTR(UPPER(v_sql), ' TABLESPACE ') > 0 THEN
+                        v_sql := REPLACE(v_sql, ' TABLESPACE ', ' LOCAL TABLESPACE ');
+                    ELSIF INSTR(UPPER(v_sql), ' PARALLEL ') > 0 THEN
+                        v_sql := REPLACE(v_sql, ' PARALLEL ', ' LOCAL PARALLEL ');
+                    ELSE
+                        -- Add LOCAL before semicolon
+                        v_sql := REPLACE(v_sql, ';', ' LOCAL;');
+                    END IF;
                 END IF;
 
-                v_sql := v_sql || 'INDEX ' || p_source_owner || '.' || idx.index_name ||
-                        ' ON ' || p_source_owner || '.' || p_target_table ||
-                        '(' || v_columns || ') LOCAL PARALLEL ' ||
-                        get_ilm_config('MIGRATION_PARALLEL_DEGREE');
+                -- Add PARALLEL if not present
+                IF INSTR(UPPER(v_sql), ' PARALLEL ') = 0 THEN
+                    v_sql := REPLACE(v_sql, ';',
+                            ' PARALLEL ' || get_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                END IF;
 
                 EXECUTE IMMEDIATE v_sql;
 
                 log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name,
-                        'INDEX', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                        'INDEX', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
                 DBMS_OUTPUT.PUT_LINE('  Recreated index: ' || idx.index_name);
             EXCEPTION
                 WHEN OTHERS THEN
                     log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name,
-                            'INDEX', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                            'INDEX', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
                             SQLCODE, SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to recreate index ' || idx.index_name || ': ' || SQLERRM);
             END;
         END LOOP;
     END recreate_indexes;
 
 
+    -- -------------------------------------------------------------------------
+    -- Recreate Constraints Using DBMS_METADATA
+    -- -------------------------------------------------------------------------
+    -- DESCRIPTION:
+    --   Recreates all constraints (CHECK, UNIQUE, FK) from source table on target
+    --   table using Oracle's DBMS_METADATA.GET_DEPENDENT_DDL for accurate extraction.
+    --
+    -- BENEFITS:
+    --   - Captures ALL constraint features: deferred, ENABLE/DISABLE, RELY/NORELY
+    --   - Preserves constraint states, validation options
+    --   - Handles all constraint types including complex CHECK conditions
+    --   - More maintainable than manual DDL construction
+    --
+    -- PROCESS:
+    --   1. Get constraint DDL using DBMS_METADATA
+    --   2. Parse and extract individual constraint statements
+    --   3. Replace table references
+    --   4. Execute modified DDL
+    --
+    -- NOTE:
+    --   - PRIMARY KEY constraints are handled separately (not recreated here)
+    --   - Foreign key constraints may need to be recreated after all tables migrated
+    -- -------------------------------------------------------------------------
     PROCEDURE recreate_constraints(
         p_task_id NUMBER,
         p_source_owner VARCHAR2,
@@ -282,71 +346,102 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         p_target_table VARCHAR2,
         p_step_offset NUMBER
     ) AS
-        v_sql VARCHAR2(4000);
+        v_sql CLOB;
+        v_constraint_ddl CLOB;
         v_start TIMESTAMP;
         v_step NUMBER := p_step_offset;
     BEGIN
+        -- Configure DBMS_METADATA to get clean DDL
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'TABLESPACE', FALSE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'REF_CONSTRAINTS', FALSE);
+
+        -- Get CHECK and UNIQUE constraints first (no dependencies)
         FOR con IN (
-            SELECT constraint_name, constraint_type, search_condition, r_constraint_name
+            SELECT constraint_name, constraint_type
             FROM dba_constraints
             WHERE owner = p_source_owner
             AND table_name = p_source_table
-            AND constraint_type IN ('C', 'U', 'R')
+            AND constraint_type IN ('C', 'U')
+            AND constraint_name NOT LIKE 'SYS_%'  -- Skip system-generated constraints
             ORDER BY constraint_type, constraint_name
         ) LOOP
             v_step := v_step + 1;
             v_start := SYSTIMESTAMP;
 
             BEGIN
-                v_sql := 'ALTER TABLE ' || p_source_owner || '.' || p_target_table ||
-                        ' ADD CONSTRAINT ' || con.constraint_name;
+                -- Get constraint DDL from DBMS_METADATA
+                v_constraint_ddl := DBMS_METADATA.GET_DDL('CONSTRAINT', con.constraint_name, p_source_owner);
 
-                IF con.constraint_type = 'C' THEN
-                    v_sql := v_sql || ' CHECK (' || con.search_condition || ')';
-                ELSIF con.constraint_type = 'U' THEN
-                    DECLARE
-                        v_columns VARCHAR2(4000);
-                    BEGIN
-                        SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY position)
-                        INTO v_columns
-                        FROM dba_cons_columns
-                        WHERE owner = p_source_owner
-                        AND constraint_name = con.constraint_name;
-
-                        v_sql := v_sql || ' UNIQUE (' || v_columns || ')';
-                    END;
-                ELSIF con.constraint_type = 'R' THEN
-                    DECLARE
-                        v_columns VARCHAR2(4000);
-                        v_r_owner VARCHAR2(30);
-                        v_r_table VARCHAR2(128);
-                    BEGIN
-                        SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY position)
-                        INTO v_columns
-                        FROM dba_cons_columns
-                        WHERE owner = p_source_owner
-                        AND constraint_name = con.constraint_name;
-
-                        SELECT owner, table_name
-                        INTO v_r_owner, v_r_table
-                        FROM dba_constraints
-                        WHERE constraint_name = con.r_constraint_name;
-
-                        v_sql := v_sql || ' FOREIGN KEY (' || v_columns || ')' ||
-                                ' REFERENCES ' || v_r_owner || '.' || v_r_table;
-                    END;
-                END IF;
+                -- Replace source table name with target table name
+                v_sql := REPLACE(v_constraint_ddl,
+                                '"' || p_source_table || '"',
+                                '"' || p_target_table || '"');
+                v_sql := REPLACE(v_sql,
+                                ' ' || p_source_table || ' ',
+                                ' ' || p_target_table || ' ');
 
                 EXECUTE IMMEDIATE v_sql;
 
                 log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
-                        'CONSTRAINT', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
+                DBMS_OUTPUT.PUT_LINE('  Recreated constraint: ' || con.constraint_name ||
+                                    ' (' || con.constraint_type || ')');
             EXCEPTION
                 WHEN OTHERS THEN
                     log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
-                            'CONSTRAINT', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                            'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
                             SQLCODE, SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to recreate constraint ' ||
+                                        con.constraint_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        -- Now get FOREIGN KEY constraints (must be last, after all other constraints)
+        DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'REF_CONSTRAINTS', TRUE);
+
+        FOR con IN (
+            SELECT constraint_name
+            FROM dba_constraints
+            WHERE owner = p_source_owner
+            AND table_name = p_source_table
+            AND constraint_type = 'R'
+            ORDER BY constraint_name
+        ) LOOP
+            v_step := v_step + 1;
+            v_start := SYSTIMESTAMP;
+
+            BEGIN
+                -- Get FK constraint DDL from DBMS_METADATA
+                v_constraint_ddl := DBMS_METADATA.GET_DDL('REF_CONSTRAINT', con.constraint_name, p_source_owner);
+
+                -- Replace source table name with target table name
+                v_sql := REPLACE(v_constraint_ddl,
+                                '"' || p_source_table || '"',
+                                '"' || p_target_table || '"');
+                v_sql := REPLACE(v_sql,
+                                ' ' || p_source_table || ' ',
+                                ' ' || p_target_table || ' ');
+
+                EXECUTE IMMEDIATE v_sql;
+
+                log_step(p_task_id, v_step, 'Recreate FK constraint: ' || con.constraint_name,
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
+
+                DBMS_OUTPUT.PUT_LINE('  Recreated FK constraint: ' || con.constraint_name);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- FK constraints may fail if referenced table doesn't exist yet
+                    log_step(p_task_id, v_step, 'Recreate FK constraint: ' || con.constraint_name,
+                            'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
+                            SQLCODE, SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to recreate FK constraint ' ||
+                                        con.constraint_name || ': ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('           (FK constraints may need manual recreation if ' ||
+                                        'referenced table not yet migrated)');
             END;
         END LOOP;
     END recreate_constraints;
