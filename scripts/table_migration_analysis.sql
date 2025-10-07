@@ -2606,11 +2606,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_partition_key_is_date CHAR(1) := 'N';
         BEGIN
             -- Check if table is partitioned
-            SELECT partitioned, partitioning_type
-            INTO v_is_partitioned, v_partitioning_type
+            SELECT partitioned
+            INTO v_is_partitioned
             FROM dba_tables
             WHERE owner = v_task.source_owner
             AND table_name = v_task.source_table;
+
+            -- Get partitioning type if partitioned
+            IF v_is_partitioned = 'YES' THEN
+                SELECT partitioning_type
+                INTO v_partitioning_type
+                FROM dba_part_tables
+                WHERE owner = v_task.source_owner
+                AND table_name = v_task.source_table;
+            END IF;
 
             IF v_is_partitioned = 'YES' THEN
                 -- Get partition key columns
