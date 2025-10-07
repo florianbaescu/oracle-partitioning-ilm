@@ -760,15 +760,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_date_format OUT VARCHAR2
     ) RETURN BOOLEAN
     AS
-        v_count NUMBER;
-        v_sample_value NUMBER;
+        TYPE t_number_list IS TABLE OF NUMBER;
+        v_samples t_number_list;
         v_sql VARCHAR2(4000);
-        v_min_val NUMBER;
-        v_max_val NUMBER;
+        v_valid_count NUMBER;
+        v_sample_val NUMBER;
     BEGIN
         -- Look for columns with date-like names that are NUMBER type
         FOR rec IN (
-            SELECT column_name, data_type, data_length, data_precision
+            SELECT column_name
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
@@ -790,56 +790,74 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%REPORT%'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
+            ORDER BY column_id
         ) LOOP
-            -- Sample the column to detect format
+            -- Sample 10 non-null values to validate format
             BEGIN
-                v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' ||
-                         'MIN(' || rec.column_name || '), MAX(' || rec.column_name || '), COUNT(*) ' ||
-                         'FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL';
+                v_sql := 'SELECT ' || rec.column_name ||
+                         ' FROM ' || p_owner || '.' || p_table_name ||
+                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
 
-                EXECUTE IMMEDIATE v_sql INTO v_min_val, v_max_val, v_count;
+                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
-                DBMS_OUTPUT.PUT_LINE('  Checking NUMBER column: ' || rec.column_name ||
-                                     ' MIN=' || v_min_val || ' MAX=' || v_max_val ||
-                                     ' LENGTH=' || LENGTH(TRUNC(v_min_val)));
+                DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column: ' || rec.column_name || ' (' || v_samples.COUNT || ' samples)');
 
-                IF v_count > 0 THEN
-                    -- Check for YYYYMMDD format (8 digits, values between 19000101 and 21001231)
-                    IF v_min_val >= 19000101 AND v_max_val <= 21001231
-                       AND LENGTH(TRUNC(v_min_val)) = 8 THEN
+                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    v_valid_count := 0;
+
+                    -- Check YYYYMMDD format (8 digits, 19000101-21001231)
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF v_sample_val >= 19000101 AND v_sample_val <= 21001231
+                           AND LENGTH(TRUNC(v_sample_val)) = 8 THEN
+                            v_valid_count := v_valid_count + 1;
+                        END IF;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMMDD';
                         RETURN TRUE;
+                    END IF;
 
-                    -- Check for YYYYMM format (6 digits, values between 190001 and 210012)
-                    ELSIF v_min_val >= 190001 AND v_max_val <= 210012
-                          AND LENGTH(TRUNC(v_min_val)) = 6
-                          AND MOD(v_min_val, 100) BETWEEN 1 AND 12  -- Month part must be 01-12
-                          AND MOD(v_max_val, 100) BETWEEN 1 AND 12 THEN
+                    -- Check YYYYMM format (6 digits, 190001-210012, month 01-12)
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF v_sample_val >= 190001 AND v_sample_val <= 210012
+                           AND LENGTH(TRUNC(v_sample_val)) = 6
+                           AND MOD(v_sample_val, 100) BETWEEN 1 AND 12 THEN
+                            v_valid_count := v_valid_count + 1;
+                        END IF;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMM';
                         RETURN TRUE;
+                    END IF;
 
-                    -- Check for Unix timestamp (10 digits, reasonable range)
-                    ELSIF v_min_val >= 946684800 AND v_max_val <= 2147483647  -- 2000-01-01 to 2038-01-19
-                          AND LENGTH(TRUNC(v_min_val)) >= 10 THEN
+                    -- Check Unix timestamp (10+ digits, 946684800-2147483647)
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF v_sample_val >= 946684800 AND v_sample_val <= 2147483647
+                           AND LENGTH(TRUNC(v_sample_val)) >= 10 THEN
+                            v_valid_count := v_valid_count + 1;
+                        END IF;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected UNIX_TIMESTAMP format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'UNIX_TIMESTAMP';
                         RETURN TRUE;
-
-                    -- Check for YYMMDD format (6 digits, day-level dates)
-                    ELSIF v_min_val >= 000101 AND v_max_val <= 991231
-                          AND LENGTH(TRUNC(v_min_val)) = 6
-                          AND MOD(v_min_val, 100) BETWEEN 1 AND 31  -- Day part must be 01-31
-                          AND MOD(v_max_val, 100) BETWEEN 1 AND 31 THEN
-                        p_date_column := rec.column_name;
-                        p_date_format := 'YYMMDD';
-                        RETURN TRUE;
                     END IF;
+
+                    DBMS_OUTPUT.PUT_LINE('    -> No valid date format detected');
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('    -> Error sampling: ' || SQLERRM);
                     NULL; -- Continue to next column
             END;
         END LOOP;
@@ -860,14 +878,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_date_format OUT VARCHAR2
     ) RETURN BOOLEAN
     AS
-        v_count NUMBER;
-        v_sample_value VARCHAR2(100);
+        TYPE t_varchar_list IS TABLE OF VARCHAR2(4000);
+        v_samples t_varchar_list;
         v_sql VARCHAR2(4000);
+        v_valid_count NUMBER;
+        v_sample_val VARCHAR2(4000);
+        v_month_part NUMBER;
     BEGIN
-
         -- Look for columns with date-like names that are VARCHAR/CHAR type
         FOR rec IN (
-            SELECT column_name, data_type, data_length
+            SELECT column_name
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
@@ -889,120 +909,121 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%REPORT%'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
+            ORDER BY column_id
         ) LOOP
-            -- Sample the column to detect format
+            -- Sample 10 non-null values to validate format
             BEGIN
-                v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
+                v_sql := 'SELECT ' || rec.column_name ||
                          ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM = 1';
+                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
 
-                EXECUTE IMMEDIATE v_sql INTO v_sample_value;
+                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
-                DBMS_OUTPUT.PUT_LINE('  Checking VARCHAR column: ' || rec.column_name ||
-                                     ' SAMPLE=' || v_sample_value || ' LENGTH=' || LENGTH(v_sample_value));
+                DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column: ' || rec.column_name || ' (' || v_samples.COUNT || ' samples)');
 
-                IF v_sample_value IS NOT NULL THEN
-                    -- Try various date format conversions
-                    -- YYYY-MM-DD
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ', ''YYYY-MM-DD'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYY-MM-DD';
-                            RETURN TRUE;
+                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    v_valid_count := 0;
+
+                    -- Check YYYY-MM-DD format
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}-\d{2}$') THEN
+                            v_valid_count := v_valid_count + 1;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'YYYY-MM-DD';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- DD/MM/YYYY
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ', ''DD/MM/YYYY'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'DD/MM/YYYY';
-                            RETURN TRUE;
+                    -- Check DD/MM/YYYY format
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
+                            v_valid_count := v_valid_count + 1;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected DD/MM/YYYY format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'DD/MM/YYYY';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- MM/DD/YYYY
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ', ''MM/DD/YYYY'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'MM/DD/YYYY';
-                            RETURN TRUE;
+                    -- Check MM/DD/YYYY format
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{2}/\d{2}/\d{4}$') THEN
+                            v_valid_count := v_valid_count + 1;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected MM/DD/YYYY format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'MM/DD/YYYY';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- YYYY-MM (year-month only)
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ' || ''-01'', ''YYYY-MM-DD'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYY-MM';
-                            RETURN TRUE;
+                    -- Check YYYY-MM format (year-month with hyphen)
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{4}-\d{2}$') THEN
+                            v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 6, 2));
+                            IF v_month_part BETWEEN 1 AND 12 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'YYYY-MM';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- YYYYMM (year-month without separator)
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ' || ''01'', ''YYYYMMDD'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYYMM';
-                            RETURN TRUE;
+                    -- Check YYYYMM format (6 digits, no separator)
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{6}$') THEN
+                            v_month_part := TO_NUMBER(SUBSTR(v_sample_val, 5, 2));
+                            IF v_month_part BETWEEN 1 AND 12 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'YYYYMM';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- YYYYMMDD
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ', ''YYYYMMDD'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYYMMDD';
-                            RETURN TRUE;
+                    -- Check YYYYMMDD format (8 digits)
+                    v_valid_count := 0;
+                    FOR i IN 1..v_samples.COUNT LOOP
+                        v_sample_val := v_samples(i);
+                        IF REGEXP_LIKE(v_sample_val, '^\d{8}$') THEN
+                            v_valid_count := v_valid_count + 1;
                         END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    END LOOP;
+                    IF v_valid_count = v_samples.COUNT THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
+                        p_date_column := rec.column_name;
+                        p_date_format := 'YYYYMMDD';
+                        RETURN TRUE;
+                    END IF;
 
-                    -- YYYY-MM-DD HH24:MI:SS
-                    BEGIN
-                        EXECUTE IMMEDIATE 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(*) FROM ' ||
-                                        p_owner || '.' || p_table_name ||
-                                        ' WHERE TO_DATE(' || rec.column_name || ', ''YYYY-MM-DD HH24:MI:SS'') IS NOT NULL AND ROWNUM <= 100'
-                                        INTO v_count;
-                        IF v_count > 0 THEN
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYY-MM-DD HH24:MI:SS';
-                            RETURN TRUE;
-                        END IF;
-                    EXCEPTION WHEN OTHERS THEN NULL;
-                    END;
+                    DBMS_OUTPUT.PUT_LINE('    -> No valid date format detected');
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('    -> Error sampling: ' || SQLERRM);
                     NULL; -- Continue to next column
             END;
         END LOOP;
