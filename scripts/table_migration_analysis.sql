@@ -125,7 +125,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
                 UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
                 UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                UPPER(column_name) LIKE '%YM'
+                UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
+                UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
+                UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
+                UPPER(column_name) LIKE '%REPORT%'
             ))
             OR
             -- VARCHAR columns with date-like names
@@ -133,7 +136,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
                 UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
                 UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                UPPER(column_name) LIKE '%YM'
+                UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
+                UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
+                UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
+                UPPER(column_name) LIKE '%REPORT%'
             ))
         )
         ORDER BY
@@ -614,7 +620,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%DT'
                 OR UPPER(column_name) LIKE '%MONTH%'
                 OR UPPER(column_name) LIKE '%PERIOD%'
-                OR UPPER(column_name) LIKE '%YM'
+                OR UPPER(column_name) LIKE '%YM%'
+                OR UPPER(column_name) LIKE '%YR%'
+                OR UPPER(column_name) LIKE '%YEAR%'
+                OR UPPER(column_name) LIKE '%MO%'
+                OR UPPER(column_name) LIKE '%FISCAL%'
+                OR UPPER(column_name) LIKE '%RPT%'
+                OR UPPER(column_name) LIKE '%REPORT%'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
         ) LOOP
@@ -707,7 +719,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 OR UPPER(column_name) LIKE '%DT'
                 OR UPPER(column_name) LIKE '%MONTH%'
                 OR UPPER(column_name) LIKE '%PERIOD%'
-                OR UPPER(column_name) LIKE '%YM'
+                OR UPPER(column_name) LIKE '%YM%'
+                OR UPPER(column_name) LIKE '%YR%'
+                OR UPPER(column_name) LIKE '%YEAR%'
+                OR UPPER(column_name) LIKE '%MO%'
+                OR UPPER(column_name) LIKE '%FISCAL%'
+                OR UPPER(column_name) LIKE '%RPT%'
+                OR UPPER(column_name) LIKE '%REPORT%'
                 OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
             )
         ) LOOP
@@ -2145,14 +2163,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
                             UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
                             UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                            UPPER(column_name) LIKE '%YM'
+                            UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
+                            UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
+                            UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
+                            UPPER(column_name) LIKE '%REPORT%'
                         ))
                         OR
                         (data_type IN ('VARCHAR2', 'CHAR') AND (
                             UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
                             UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
                             UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                            UPPER(column_name) LIKE '%YM'
+                            UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
+                            UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
+                            UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
+                            UPPER(column_name) LIKE '%REPORT%'
                         ))
                     )
                     ORDER BY data_type, column_name;
