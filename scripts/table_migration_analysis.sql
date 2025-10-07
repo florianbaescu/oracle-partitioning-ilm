@@ -1036,132 +1036,214 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
 
     -- FALLBACK: Detect date columns by sampling content (when name patterns don't match)
-    -- This is more expensive, so only use as fallback after name-based detection fails
+    -- This checks ALL columns that were NOT already checked by name pattern functions
     FUNCTION detect_date_column_by_content(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
         p_parallel_degree NUMBER,
+        p_exclude_columns SYS.ODCIVARCHAR2LIST,  -- Columns already checked by name patterns
         p_date_column OUT VARCHAR2,
         p_date_format OUT VARCHAR2,
         p_data_type OUT VARCHAR2
     ) RETURN BOOLEAN
     AS
         v_sql VARCHAR2(4000);
-        TYPE t_sample_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30), sample_value VARCHAR2(100));
-        TYPE t_sample_list IS TABLE OF t_sample_rec;
-        v_samples t_sample_list;
+        TYPE t_number_list IS TABLE OF NUMBER;
+        TYPE t_varchar_list IS TABLE OF VARCHAR2(4000);
+        v_number_samples t_number_list;
+        v_varchar_samples t_varchar_list;
         v_sample_num NUMBER;
+        v_valid_count NUMBER;
+        v_month_part NUMBER;
+        v_skip BOOLEAN;
     BEGIN
-        DBMS_OUTPUT.PUT_LINE('FALLBACK: Sampling NUMBER/VARCHAR columns by content (no name pattern matches)...');
+        DBMS_OUTPUT.PUT_LINE('FALLBACK: Sampling columns without date-related names...');
 
-        -- Get ALL NUMBER columns and sample their values
+        -- Get ALL NUMBER columns (excluding those already checked)
         FOR rec IN (
-            SELECT column_name, data_type
+            SELECT column_name
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
             AND data_type = 'NUMBER'
             ORDER BY column_id
         ) LOOP
-            BEGIN
-                -- Sample 10 non-null values
-                v_sql := 'SELECT ' || rec.column_name ||
-                         ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+            -- Skip if already checked by name pattern
+            v_skip := FALSE;
+            IF p_exclude_columns IS NOT NULL THEN
+                FOR i IN 1..p_exclude_columns.COUNT LOOP
+                    IF p_exclude_columns(i) = rec.column_name THEN
+                        v_skip := TRUE;
+                        EXIT;
+                    END IF;
+                END LOOP;
+            END IF;
 
-                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+            IF NOT v_skip THEN
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column (no name pattern): ' || rec.column_name);
 
-                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
-                    -- Check if values look like YYYYMMDD, YYYYMM, etc.
-                    FOR i IN 1..LEAST(v_samples.COUNT, 10) LOOP
-                        v_sample_num := TO_NUMBER(v_samples(i).sample_value);
+                    -- Sample 10 non-null values
+                    v_sql := 'SELECT ' || rec.column_name ||
+                             ' FROM ' || p_owner || '.' || p_table_name ||
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
 
-                        -- Check for YYYYMMDD (8 digits)
-                        IF v_sample_num >= 19000101 AND v_sample_num <= 21001231
-                           AND LENGTH(TRUNC(v_sample_num)) = 8 THEN
-                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (NUMBER YYYYMMDD) sample=' || v_sample_num);
+                    EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_number_samples;
+
+                    IF v_number_samples IS NOT NULL AND v_number_samples.COUNT > 0 THEN
+                        v_valid_count := 0;
+
+                        -- Check YYYYMMDD format (all samples must match)
+                        FOR i IN 1..v_number_samples.COUNT LOOP
+                            v_sample_num := v_number_samples(i);
+                            IF v_sample_num >= 19000101 AND v_sample_num <= 21001231
+                               AND LENGTH(TRUNC(v_sample_num)) = 8 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count = v_number_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
                             p_data_type := 'NUMBER';
                             RETURN TRUE;
+                        END IF;
 
-                        -- Check for YYYYMM (6 digits with month 01-12)
-                        ELSIF v_sample_num >= 190001 AND v_sample_num <= 210012
-                              AND LENGTH(TRUNC(v_sample_num)) = 6
-                              AND MOD(v_sample_num, 100) BETWEEN 1 AND 12 THEN
-                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (NUMBER YYYYMM) sample=' || v_sample_num);
+                        -- Check YYYYMM format (all samples must match)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_number_samples.COUNT LOOP
+                            v_sample_num := v_number_samples(i);
+                            IF v_sample_num >= 190001 AND v_sample_num <= 210012
+                               AND LENGTH(TRUNC(v_sample_num)) = 6
+                               AND MOD(v_sample_num, 100) BETWEEN 1 AND 12 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count = v_number_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
                             p_data_type := 'NUMBER';
                             RETURN TRUE;
                         END IF;
-                    END LOOP;
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN NULL; -- Skip columns with errors
-            END;
+
+                        DBMS_OUTPUT.PUT_LINE('    -> No valid date format');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
+                        NULL; -- Skip columns with errors
+                END;
+            END IF;
         END LOOP;
 
-        -- Get ALL VARCHAR columns and sample their values
+        -- Get ALL VARCHAR columns (excluding those already checked)
         FOR rec IN (
-            SELECT column_name, data_type
+            SELECT column_name
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
             AND data_type IN ('VARCHAR2', 'CHAR')
             ORDER BY column_id
         ) LOOP
-            BEGIN
-                -- Sample 10 non-null values
-                v_sql := 'SELECT ' || rec.column_name ||
-                         ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+            -- Skip if already checked by name pattern
+            v_skip := FALSE;
+            IF p_exclude_columns IS NOT NULL THEN
+                FOR i IN 1..p_exclude_columns.COUNT LOOP
+                    IF p_exclude_columns(i) = rec.column_name THEN
+                        v_skip := TRUE;
+                        EXIT;
+                    END IF;
+                END LOOP;
+            END IF;
 
-                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+            IF NOT v_skip THEN
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column (no name pattern): ' || rec.column_name);
 
-                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
-                    -- Check if values look like date formats
-                    FOR i IN 1..LEAST(v_samples.COUNT, 10) LOOP
-                        -- Try YYYY-MM pattern
-                        IF REGEXP_LIKE(v_samples(i).sample_value, '^\d{4}-\d{2}$') THEN
-                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYY-MM) sample=' || v_samples(i).sample_value);
-                            p_date_column := rec.column_name;
-                            p_date_format := 'YYYY-MM';
-                            p_data_type := 'VARCHAR2';
-                            RETURN TRUE;
+                    -- Sample 10 non-null values
+                    v_sql := 'SELECT ' || rec.column_name ||
+                             ' FROM ' || p_owner || '.' || p_table_name ||
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
 
-                        -- Try YYYYMM pattern (6 digits as string)
-                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{6}$') THEN
-                            -- Verify it's a valid month
-                            IF TO_NUMBER(SUBSTR(v_samples(i).sample_value, 5, 2)) BETWEEN 1 AND 12 THEN
-                                DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYYMM) sample=' || v_samples(i).sample_value);
-                                p_date_column := rec.column_name;
-                                p_date_format := 'YYYYMM';
-                                p_data_type := 'VARCHAR2';
-                                RETURN TRUE;
+                    EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_varchar_samples;
+
+                    IF v_varchar_samples IS NOT NULL AND v_varchar_samples.COUNT > 0 THEN
+                        v_valid_count := 0;
+
+                        -- Check YYYY-MM-DD format (all samples must match)
+                        FOR i IN 1..v_varchar_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}-\d{2}$') THEN
+                                v_valid_count := v_valid_count + 1;
                             END IF;
-
-                        -- Try YYYY-MM-DD pattern
-                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{4}-\d{2}-\d{2}$') THEN
-                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYY-MM-DD) sample=' || v_samples(i).sample_value);
+                        END LOOP;
+                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM-DD';
                             p_data_type := 'VARCHAR2';
                             RETURN TRUE;
+                        END IF;
 
-                        -- Try YYYYMMDD pattern (8 digits as string)
-                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{8}$') THEN
-                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYYMMDD) sample=' || v_samples(i).sample_value);
+                        -- Check YYYY-MM format (all samples must match with month validation)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_varchar_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{4}-\d{2}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 6, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM';
+                            p_data_type := 'VARCHAR2';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYYMM format (all samples must match with month validation)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_varchar_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{6}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_varchar_samples(i), 5, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            p_data_type := 'VARCHAR2';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYYMMDD format (all samples must match)
+                        v_valid_count := 0;
+                        FOR i IN 1..v_varchar_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_varchar_samples(i), '^\d{8}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count = v_varchar_samples.COUNT THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
                             p_data_type := 'VARCHAR2';
                             RETURN TRUE;
                         END IF;
-                    END LOOP;
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN NULL; -- Skip columns with errors
-            END;
+
+                        DBMS_OUTPUT.PUT_LINE('    -> No valid date format');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
+                        NULL; -- Skip columns with errors
+                END;
+            END IF;
         END LOOP;
 
         DBMS_OUTPUT.PUT_LINE('  No date columns found by content sampling');
@@ -1240,10 +1322,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             DBMS_OUTPUT.PUT_LINE('  Added VARCHAR candidate: ' || v_temp_col || ' (format: ' || v_format || ')');
         END IF;
 
-        -- 4. FALLBACK: Content-based detection if nothing found yet
-        IF v_count = 0 THEN
-            DBMS_OUTPUT.PUT_LINE('  No candidates found by name patterns, trying content-based detection...');
-            IF detect_date_column_by_content(p_owner, p_table_name, p_parallel_degree, v_temp_col, v_format, v_temp_type) THEN
+        -- 4. FALLBACK: Content-based detection for columns WITHOUT name patterns
+        -- Build exclusion list of columns already checked
+        DBMS_OUTPUT.PUT_LINE('  Checking remaining columns by content sampling...');
+        DECLARE
+            v_exclude_list SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();
+        BEGIN
+            -- Build exclusion list from all columns already found by name patterns
+            FOR i IN 1..p_column_names.COUNT LOOP
+                v_exclude_list.EXTEND;
+                v_exclude_list(v_exclude_list.COUNT) := p_column_names(i);
+            END LOOP;
+
+            -- Run fallback with exclusion list
+            IF detect_date_column_by_content(p_owner, p_table_name, p_parallel_degree, v_exclude_list, v_temp_col, v_format, v_temp_type) THEN
                 p_column_names.EXTEND;
                 p_data_types.EXTEND;
                 p_date_formats.EXTEND;
@@ -1253,7 +1345,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_count := v_count + 1;
                 DBMS_OUTPUT.PUT_LINE('  Added by content: ' || v_temp_col || ' (' || v_temp_type || ' ' || v_format || ')');
             END IF;
-        END IF;
+        END;
 
         DBMS_OUTPUT.PUT_LINE('Total candidates collected: ' || v_count);
     EXCEPTION
