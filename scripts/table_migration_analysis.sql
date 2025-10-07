@@ -2540,6 +2540,197 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
 
     -- ==========================================================================
+    -- Partitioning Detection Functions
+    -- ==========================================================================
+
+    -- Check if table is already partitioned by a date column
+    -- Returns: 'SKIP' - skip analysis (already optimally partitioned)
+    --          'WARN' - add warning (partitioned but not by date)
+    --          'CONTINUE' - continue analysis (not partitioned or no date found)
+    FUNCTION check_existing_partitioning(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_details OUT VARCHAR2,  -- Detailed partition info for logging
+        p_warning_json OUT CLOB            -- JSON warning for non-date partitioning
+    ) RETURN VARCHAR2
+    AS
+        v_is_partitioned VARCHAR2(3);
+        v_partitioning_type VARCHAR2(30);
+        v_subpartitioning_type VARCHAR2(30);
+        v_partition_key_cols VARCHAR2(4000);
+        v_subpartition_key_cols VARCHAR2(4000);
+        v_partition_count NUMBER;
+        v_partition_key_is_date CHAR(1) := 'N';
+        v_subpartition_key_is_date CHAR(1) := 'N';
+        v_date_partition_cols VARCHAR2(4000);
+        v_non_date_partition_cols VARCHAR2(4000);
+    BEGIN
+        -- Check if table is partitioned
+        BEGIN
+            SELECT partitioned
+            INTO v_is_partitioned
+            FROM dba_tables
+            WHERE owner = p_owner
+            AND table_name = p_table_name;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN 'CONTINUE';  -- Table not found (will be handled elsewhere)
+        END;
+
+        -- If not partitioned, continue with analysis
+        IF v_is_partitioned = 'NO' THEN
+            RETURN 'CONTINUE';
+        END IF;
+
+        -- Get partitioning details
+        SELECT partitioning_type, subpartitioning_type
+        INTO v_partitioning_type, v_subpartitioning_type
+        FROM dba_part_tables
+        WHERE owner = p_owner
+        AND table_name = p_table_name;
+
+        -- Get partition key columns (main partitioning)
+        SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
+        INTO v_partition_key_cols
+        FROM dba_part_key_columns
+        WHERE owner = p_owner
+        AND name = p_table_name
+        AND object_type = 'TABLE';
+
+        -- Get subpartition key columns if exists
+        BEGIN
+            SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
+            INTO v_subpartition_key_cols
+            FROM dba_subpart_key_columns
+            WHERE owner = p_owner
+            AND name = p_table_name
+            AND object_type = 'TABLE';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_subpartition_key_cols := NULL;
+        END;
+
+        -- Identify DATE partition key columns
+        BEGIN
+            SELECT LISTAGG(pkc.column_name, ', ') WITHIN GROUP (ORDER BY pkc.column_position)
+            INTO v_date_partition_cols
+            FROM dba_part_key_columns pkc
+            JOIN dba_tab_columns tc
+              ON tc.owner = pkc.owner
+              AND tc.table_name = pkc.name
+              AND tc.column_name = pkc.column_name
+            WHERE pkc.owner = p_owner
+            AND pkc.name = p_table_name
+            AND pkc.object_type = 'TABLE'
+            AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_date_partition_cols := NULL;
+        END;
+
+        -- Identify non-DATE partition key columns
+        BEGIN
+            SELECT LISTAGG(pkc.column_name, ', ') WITHIN GROUP (ORDER BY pkc.column_position)
+            INTO v_non_date_partition_cols
+            FROM dba_part_key_columns pkc
+            JOIN dba_tab_columns tc
+              ON tc.owner = pkc.owner
+              AND tc.table_name = pkc.name
+              AND tc.column_name = pkc.column_name
+            WHERE pkc.owner = p_owner
+            AND pkc.name = p_table_name
+            AND pkc.object_type = 'TABLE'
+            AND tc.data_type NOT IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_non_date_partition_cols := NULL;
+        END;
+
+        -- Check if any partition key is a date
+        IF v_date_partition_cols IS NOT NULL THEN
+            v_partition_key_is_date := 'Y';
+        END IF;
+
+        -- Check subpartition keys
+        IF v_subpartition_key_cols IS NOT NULL THEN
+            BEGIN
+                SELECT CASE WHEN COUNT(*) > 0 THEN 'Y' ELSE 'N' END
+                INTO v_subpartition_key_is_date
+                FROM dba_subpart_key_columns spkc
+                JOIN dba_tab_columns tc
+                  ON tc.owner = spkc.owner
+                  AND tc.table_name = spkc.name
+                  AND tc.column_name = spkc.column_name
+                WHERE spkc.owner = p_owner
+                AND spkc.name = p_table_name
+                AND spkc.object_type = 'TABLE'
+                AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_subpartition_key_is_date := 'N';
+            END;
+        END IF;
+
+        -- Get partition count
+        SELECT COUNT(*)
+        INTO v_partition_count
+        FROM dba_tab_partitions
+        WHERE table_owner = p_owner
+        AND table_name = p_table_name;
+
+        -- Build detailed message for output
+        p_partition_details := 'Partition keys: ' || v_partition_key_cols;
+        IF v_date_partition_cols IS NOT NULL THEN
+            p_partition_details := p_partition_details || CHR(10) || '  - DATE columns: ' || v_date_partition_cols;
+        END IF;
+        IF v_non_date_partition_cols IS NOT NULL THEN
+            p_partition_details := p_partition_details || CHR(10) || '  - Non-DATE columns: ' || v_non_date_partition_cols;
+        END IF;
+        IF v_subpartition_key_cols IS NOT NULL THEN
+            p_partition_details := p_partition_details || CHR(10) || 'Subpartition keys: ' || v_subpartition_key_cols;
+        END IF;
+        p_partition_details := p_partition_details || CHR(10) || 'Partitioning: ' || v_partitioning_type;
+        IF v_subpartitioning_type IS NOT NULL THEN
+            p_partition_details := p_partition_details || '-' || v_subpartitioning_type;
+        END IF;
+        p_partition_details := p_partition_details || CHR(10) || 'Partitions: ' || v_partition_count;
+
+        -- Decision: SKIP if partitioned by date, WARN if not
+        IF v_partition_key_is_date = 'Y' OR v_subpartition_key_is_date = 'Y' THEN
+            -- Already optimally partitioned by date - SKIP analysis
+            RETURN 'SKIP';
+        ELSE
+            -- Partitioned but not by date - WARN and continue
+            DECLARE
+                v_warning_detail VARCHAR2(4000);
+            BEGIN
+                v_warning_detail := 'Partition key: ' || v_partition_key_cols || ' (' || v_partitioning_type;
+                IF v_subpartitioning_type IS NOT NULL THEN
+                    v_warning_detail := v_warning_detail || '-' || v_subpartitioning_type;
+                END IF;
+                IF v_subpartition_key_cols IS NOT NULL THEN
+                    v_warning_detail := v_warning_detail || ', Subpartition: ' || v_subpartition_key_cols;
+                END IF;
+                v_warning_detail := v_warning_detail || ', ' || v_partition_count || ' partitions)';
+
+                -- Build JSON warning
+                DBMS_LOB.CREATETEMPORARY(p_warning_json, TRUE, DBMS_LOB.SESSION);
+                DBMS_LOB.APPEND(p_warning_json, '  {' || CHR(10) ||
+                    '    "type": "WARNING",' || CHR(10) ||
+                    '    "issue": "Table already partitioned by non-date columns: ' || v_warning_detail || '",' || CHR(10) ||
+                    '    "action": "Re-partitioning by date requires: 1) Create new partitioned table, 2) Copy data with INSERT SELECT, 3) Drop old table, 4) Rename new table, 5) Recreate indexes/constraints. Consider if date-based partitioning provides sufficient benefit."' || CHR(10) ||
+                    '  }');
+            END;
+            RETURN 'WARN';
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('Warning: Could not check partitioning status: ' || SQLERRM);
+            RETURN 'CONTINUE';  -- Continue with analysis on error
+    END check_existing_partitioning;
+
+
+    -- ==========================================================================
     -- Main Analysis Procedures
     -- ==========================================================================
 
@@ -2621,206 +2812,58 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Check if table is already partitioned by a date column
         DECLARE
-            v_is_partitioned VARCHAR2(3);
-            v_partitioning_type VARCHAR2(30);
-            v_subpartitioning_type VARCHAR2(30);
-            v_partition_key_cols VARCHAR2(4000);
-            v_subpartition_key_cols VARCHAR2(4000);
-            v_partition_count_existing NUMBER;
-            v_partition_key_is_date CHAR(1) := 'N';
-            v_subpartition_key_is_date CHAR(1) := 'N';
-            v_date_partition_cols VARCHAR2(4000);
-            v_non_date_partition_cols VARCHAR2(4000);
+            v_partition_action VARCHAR2(20);
+            v_partition_details VARCHAR2(4000);
+            v_partition_warning CLOB;
         BEGIN
-            -- Check if table is partitioned
-            SELECT partitioned
-            INTO v_is_partitioned
-            FROM dba_tables
-            WHERE owner = v_task.source_owner
-            AND table_name = v_task.source_table;
+            v_partition_action := check_existing_partitioning(
+                p_owner => v_task.source_owner,
+                p_table_name => v_task.source_table,
+                p_partition_details => v_partition_details,
+                p_warning_json => v_partition_warning
+            );
 
-            -- Get partitioning details if partitioned
-            IF v_is_partitioned = 'YES' THEN
-                SELECT partitioning_type, subpartitioning_type
-                INTO v_partitioning_type, v_subpartitioning_type
-                FROM dba_part_tables
-                WHERE owner = v_task.source_owner
-                AND table_name = v_task.source_table;
-            END IF;
+            -- Handle partition check result
+            IF v_partition_action = 'SKIP' THEN
+                -- Already optimally partitioned by date - skip analysis
+                DBMS_OUTPUT.PUT_LINE('Table is already optimally partitioned by date:');
+                DBMS_OUTPUT.PUT_LINE(v_partition_details);
+                DBMS_OUTPUT.PUT_LINE('Skipping analysis.');
 
-            IF v_is_partitioned = 'YES' THEN
-                -- Get partition key columns (main partitioning)
-                SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
-                INTO v_partition_key_cols
-                FROM dba_part_key_columns
-                WHERE owner = v_task.source_owner
-                AND name = v_task.source_table
-                AND object_type = 'TABLE';
+                -- Update task with detailed info
+                UPDATE cmr.dwh_migration_tasks
+                SET status = 'SKIPPED',
+                    analysis_date = SYSTIMESTAMP,
+                    error_message = 'Already partitioned with date column(s). ' || REPLACE(v_partition_details, CHR(10), '; ')
+                WHERE task_id = p_task_id;
+                COMMIT;
 
-                -- Get subpartition key columns if exists
-                BEGIN
-                    SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
-                    INTO v_subpartition_key_cols
-                    FROM dba_subpart_key_columns
-                    WHERE owner = v_task.source_owner
-                    AND name = v_task.source_table
-                    AND object_type = 'TABLE';
-                EXCEPTION
-                    WHEN NO_DATA_FOUND THEN
-                        v_subpartition_key_cols := NULL;
-                END;
-
-                -- Identify DATE partition key columns
-                SELECT LISTAGG(pkc.column_name, ', ') WITHIN GROUP (ORDER BY pkc.column_position)
-                INTO v_date_partition_cols
-                FROM dba_part_key_columns pkc
-                JOIN dba_tab_columns tc
-                  ON tc.owner = pkc.owner
-                  AND tc.table_name = pkc.name
-                  AND tc.column_name = pkc.column_name
-                WHERE pkc.owner = v_task.source_owner
-                AND pkc.name = v_task.source_table
-                AND pkc.object_type = 'TABLE'
-                AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
-
-                -- Identify non-DATE partition key columns
-                SELECT LISTAGG(pkc.column_name, ', ') WITHIN GROUP (ORDER BY pkc.column_position)
-                INTO v_non_date_partition_cols
-                FROM dba_part_key_columns pkc
-                JOIN dba_tab_columns tc
-                  ON tc.owner = pkc.owner
-                  AND tc.table_name = pkc.name
-                  AND tc.column_name = pkc.column_name
-                WHERE pkc.owner = v_task.source_owner
-                AND pkc.name = v_task.source_table
-                AND pkc.object_type = 'TABLE'
-                AND tc.data_type NOT IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
-
-                -- Check if any partition or subpartition key is a date
-                IF v_date_partition_cols IS NOT NULL THEN
-                    v_partition_key_is_date := 'Y';
+                -- Clean up LOB
+                IF DBMS_LOB.ISTEMPORARY(v_warnings) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_warnings);
                 END IF;
 
-                -- Check subpartition keys
-                IF v_subpartition_key_cols IS NOT NULL THEN
-                    SELECT CASE WHEN COUNT(*) > 0 THEN 'Y' ELSE 'N' END
-                    INTO v_subpartition_key_is_date
-                    FROM dba_subpart_key_columns spkc
-                    JOIN dba_tab_columns tc
-                      ON tc.owner = spkc.owner
-                      AND tc.table_name = spkc.name
-                      AND tc.column_name = spkc.column_name
-                    WHERE spkc.owner = v_task.source_owner
-                    AND spkc.name = v_task.source_table
-                    AND spkc.object_type = 'TABLE'
-                    AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+                RETURN;  -- Exit procedure
+
+            ELSIF v_partition_action = 'WARN' THEN
+                -- Partitioned but not by date - add warning and continue
+                DBMS_OUTPUT.PUT_LINE('WARNING: Table is already partitioned but NOT by a date column');
+                DBMS_OUTPUT.PUT_LINE(v_partition_details);
+                DBMS_OUTPUT.PUT_LINE('Analysis will continue to identify potential date-based partitioning opportunities.');
+
+                -- Add warning to warnings CLOB
+                IF v_error_count > 0 THEN
+                    DBMS_LOB.APPEND(v_warnings, ',' || CHR(10));
                 END IF;
+                DBMS_LOB.APPEND(v_warnings, v_partition_warning);
+                v_error_count := v_error_count + 1;
 
-                -- Get partition count
-                SELECT COUNT(*)
-                INTO v_partition_count_existing
-                FROM dba_tab_partitions
-                WHERE table_owner = v_task.source_owner
-                AND table_name = v_task.source_table;
-
-                -- Decision logic: Skip if partitioned by date in an optimal way
-                IF v_partition_key_is_date = 'Y' OR v_subpartition_key_is_date = 'Y' THEN
-                    DECLARE
-                        v_skip_message VARCHAR2(4000);
-                    BEGIN
-                        -- Build detailed message
-                        v_skip_message := 'Already partitioned with date column(s). ';
-
-                        IF v_partition_key_is_date = 'Y' THEN
-                            v_skip_message := v_skip_message || 'Partition key: ' || v_partition_key_cols || ' (DATE columns: ' || v_date_partition_cols;
-                            IF v_non_date_partition_cols IS NOT NULL THEN
-                                v_skip_message := v_skip_message || ', Non-DATE: ' || v_non_date_partition_cols;
-                            END IF;
-                            v_skip_message := v_skip_message || ')';
-                        END IF;
-
-                        IF v_subpartition_key_is_date = 'Y' THEN
-                            IF v_partition_key_is_date = 'Y' THEN
-                                v_skip_message := v_skip_message || '; ';
-                            END IF;
-                            v_skip_message := v_skip_message || 'Subpartition key: ' || v_subpartition_key_cols;
-                        END IF;
-
-                        v_skip_message := v_skip_message || '. Type: ' || v_partitioning_type;
-                        IF v_subpartitioning_type IS NOT NULL THEN
-                            v_skip_message := v_skip_message || '-' || v_subpartitioning_type;
-                        END IF;
-                        v_skip_message := v_skip_message || ', ' || v_partition_count_existing || ' partitions';
-
-                        DBMS_OUTPUT.PUT_LINE('Table is already optimally partitioned by date:');
-                        DBMS_OUTPUT.PUT_LINE('  Partition keys: ' || v_partition_key_cols);
-                        IF v_date_partition_cols IS NOT NULL THEN
-                            DBMS_OUTPUT.PUT_LINE('    - DATE columns: ' || v_date_partition_cols);
-                        END IF;
-                        IF v_non_date_partition_cols IS NOT NULL THEN
-                            DBMS_OUTPUT.PUT_LINE('    - Non-DATE columns: ' || v_non_date_partition_cols);
-                        END IF;
-                        IF v_subpartition_key_cols IS NOT NULL THEN
-                            DBMS_OUTPUT.PUT_LINE('  Subpartition keys: ' || v_subpartition_key_cols);
-                        END IF;
-                        DBMS_OUTPUT.PUT_LINE('  Partitioning: ' || v_partitioning_type ||
-                            CASE WHEN v_subpartitioning_type IS NOT NULL THEN '-' || v_subpartitioning_type ELSE '' END);
-                        DBMS_OUTPUT.PUT_LINE('  Partitions: ' || v_partition_count_existing);
-                        DBMS_OUTPUT.PUT_LINE('  Skipping analysis.');
-
-                        -- Update task with detailed info
-                        UPDATE cmr.dwh_migration_tasks
-                        SET status = 'SKIPPED',
-                            analysis_date = SYSTIMESTAMP,
-                            error_message = v_skip_message
-                        WHERE task_id = p_task_id;
-                        COMMIT;
-                    END;
-
-                    -- Clean up LOB
-                    IF DBMS_LOB.ISTEMPORARY(v_warnings) = 1 THEN
-                        DBMS_LOB.FREETEMPORARY(v_warnings);
-                    END IF;
-
-                    RETURN;  -- Exit procedure
-                ELSE
-                    -- Partitioned but not by date column - add detailed warning
-                    DECLARE
-                        v_warning_detail VARCHAR2(4000);
-                    BEGIN
-                        v_warning_detail := 'Partition key: ' || v_partition_key_cols || ' (' || v_partitioning_type;
-                        IF v_subpartitioning_type IS NOT NULL THEN
-                            v_warning_detail := v_warning_detail || '-' || v_subpartitioning_type;
-                        END IF;
-                        IF v_subpartition_key_cols IS NOT NULL THEN
-                            v_warning_detail := v_warning_detail || ', Subpartition: ' || v_subpartition_key_cols;
-                        END IF;
-                        v_warning_detail := v_warning_detail || ', ' || v_partition_count_existing || ' partitions)';
-
-                        DBMS_OUTPUT.PUT_LINE('WARNING: Table is already partitioned but NOT by a date column');
-                        DBMS_OUTPUT.PUT_LINE('  Partition keys: ' || v_partition_key_cols);
-                        IF v_subpartition_key_cols IS NOT NULL THEN
-                            DBMS_OUTPUT.PUT_LINE('  Subpartition keys: ' || v_subpartition_key_cols);
-                        END IF;
-                        DBMS_OUTPUT.PUT_LINE('  Partitioning: ' || v_partitioning_type ||
-                            CASE WHEN v_subpartitioning_type IS NOT NULL THEN '-' || v_subpartitioning_type ELSE '' END);
-                        DBMS_OUTPUT.PUT_LINE('  Analysis will continue to identify potential date-based partitioning opportunities.');
-
-                        IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
-                        DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
-                            '    "type": "WARNING",' || CHR(10) ||
-                            '    "issue": "Table already partitioned by non-date columns: ' || v_warning_detail || '",' || CHR(10) ||
-                            '    "action": "Re-partitioning by date requires: 1) Create new partitioned table, 2) Copy data with INSERT SELECT, 3) Drop old table, 4) Rename new table, 5) Recreate indexes/constraints. Consider if date-based partitioning provides sufficient benefit."' || CHR(10) ||
-                            '  }');
-                        v_error_count := v_error_count + 1;
-                    END;
+                -- Clean up temporary LOB
+                IF DBMS_LOB.ISTEMPORARY(v_partition_warning) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_partition_warning);
                 END IF;
             END IF;
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                NULL;  -- Table not found in dba_tables (already handled above)
-            WHEN OTHERS THEN
-                DBMS_OUTPUT.PUT_LINE('Warning: Could not check partitioning status: ' || SQLERRM);
+            -- If 'CONTINUE' - proceed with normal analysis
         END;
 
         -- Get table statistics
