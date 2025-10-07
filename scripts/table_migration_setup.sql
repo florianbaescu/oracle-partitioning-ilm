@@ -182,6 +182,11 @@ CREATE TABLE cmr.dwh_migration_analysis (
     complexity_factors  VARCHAR2(2000),
     estimated_downtime_minutes NUMBER,
 
+    -- Online redefinition capability
+    supports_online_redef CHAR(1) DEFAULT 'N', -- Y if DBMS_REDEFINITION supported
+    online_redef_method VARCHAR2(30),          -- CONS_USE_PK, CONS_USE_ROWID, or NULL
+    recommended_method  VARCHAR2(30),          -- CTAS, ONLINE, EXCHANGE, OFFLINE
+
     -- Dependencies
     dependent_objects   CLOB,                  -- JSON list of dependent objects
     blocking_issues     CLOB,                  -- Issues that must be resolved

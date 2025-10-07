@@ -2788,6 +2788,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_start_time TIMESTAMP;
         v_end_time TIMESTAMP;
         v_duration_seconds NUMBER;
+        -- Online redefinition capability
+        v_supports_online_redef CHAR(1) := 'N';
+        v_online_redef_method VARCHAR2(30) := NULL;
+        v_recommended_method VARCHAR2(30) := 'CTAS';  -- Default to CTAS
     BEGIN
         v_start_time := SYSTIMESTAMP;
         -- Get task details
@@ -3471,6 +3475,56 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_space_savings_mb := 0;
         END IF;
 
+        -- Check if table supports online redefinition (Enterprise Edition only)
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('Checking online redefinition capability...');
+
+        BEGIN
+            -- Try CONS_USE_PK first (Primary Key-based)
+            DBMS_REDEFINITION.CAN_REDEF_TABLE(
+                uname => v_task.source_owner,
+                tname => v_task.source_table,
+                options_flag => DBMS_REDEFINITION.CONS_USE_PK
+            );
+            v_supports_online_redef := 'Y';
+            v_online_redef_method := 'CONS_USE_PK';
+            DBMS_OUTPUT.PUT_LINE('  ✓ Table supports ONLINE redefinition using PRIMARY KEY');
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- No PK or PK-based failed, try ROWID-based
+                BEGIN
+                    DBMS_REDEFINITION.CAN_REDEF_TABLE(
+                        uname => v_task.source_owner,
+                        tname => v_task.source_table,
+                        options_flag => DBMS_REDEFINITION.CONS_USE_ROWID
+                    );
+                    v_supports_online_redef := 'Y';
+                    v_online_redef_method := 'CONS_USE_ROWID';
+                    DBMS_OUTPUT.PUT_LINE('  ✓ Table supports ONLINE redefinition using ROWID (no PK)');
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_supports_online_redef := 'N';
+                        v_online_redef_method := NULL;
+                        DBMS_OUTPUT.PUT_LINE('  ✗ Table does NOT support online redefinition');
+                        DBMS_OUTPUT.PUT_LINE('    Reason: ' || SQLERRM);
+                END;
+        END;
+
+        -- Determine recommended migration method
+        IF v_supports_online_redef = 'Y' AND v_table_size >= 1024 THEN
+            -- Large tables (1GB+) with online redef support → recommend ONLINE
+            v_recommended_method := 'ONLINE';
+            DBMS_OUTPUT.PUT_LINE('  Recommended method: ONLINE (large table + supports online redef)');
+        ELSIF v_requires_conversion = 'N' AND v_supports_online_redef = 'Y' THEN
+            -- Medium tables with online redef support but no conversion needed
+            v_recommended_method := 'ONLINE';
+            DBMS_OUTPUT.PUT_LINE('  Recommended method: ONLINE (supports online redef, no conversion needed)');
+        ELSE
+            -- Default to CTAS for smaller tables or those requiring conversion
+            v_recommended_method := 'CTAS';
+            DBMS_OUTPUT.PUT_LINE('  Recommended method: CTAS (standard migration)');
+        END IF;
+
         -- Calculate duration
         v_end_time := SYSTIMESTAMP;
         v_duration_seconds := EXTRACT(DAY FROM (v_end_time - v_start_time)) * 86400 +
@@ -3478,6 +3532,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                               EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
                               EXTRACT(SECOND FROM (v_end_time - v_start_time));
 
+        DBMS_OUTPUT.PUT_LINE('');
         DBMS_OUTPUT.PUT_LINE('Analysis completed in ' || ROUND(v_duration_seconds, 2) || ' seconds');
 
         -- Store or update analysis results (supports rerun)
@@ -3509,6 +3564,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 complexity_score = v_complexity,
                 complexity_factors = v_complexity_factors,
                 estimated_downtime_minutes = v_estimated_downtime,
+                supports_online_redef = v_supports_online_redef,
+                online_redef_method = v_online_redef_method,
+                recommended_method = v_recommended_method,
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
                 warnings = v_warnings,
@@ -3540,6 +3598,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 complexity_score,
                 complexity_factors,
                 estimated_downtime_minutes,
+                supports_online_redef,
+                online_redef_method,
+                recommended_method,
                 dependent_objects,
                 blocking_issues,
                 warnings,
@@ -3570,6 +3631,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_complexity,
                 v_complexity_factors,
                 v_estimated_downtime,
+                v_supports_online_redef,
+                v_online_redef_method,
+                v_recommended_method,
                 v_dependent_objects,
                 v_blocking_issues,
                 v_warnings,
@@ -3582,9 +3646,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         FROM cmr.dwh_migration_analysis
         WHERE task_id = p_task_id;
 
-        -- Update task
+        -- Update task with recommended method
         UPDATE cmr.dwh_migration_tasks
         SET status = 'ANALYZED',
+            migration_method = v_recommended_method,
             source_rows = v_num_rows,
             source_size_mb = v_table_size,
             validation_status = CASE
