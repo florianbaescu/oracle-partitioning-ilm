@@ -2178,6 +2178,94 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 RAISE;  -- Re-raise to stop analysis
         END;
 
+        -- Check if table is already partitioned by a date column
+        DECLARE
+            v_is_partitioned VARCHAR2(3);
+            v_partitioning_type VARCHAR2(30);
+            v_partition_key_cols VARCHAR2(4000);
+            v_partition_count_existing NUMBER;
+            v_partition_key_is_date CHAR(1) := 'N';
+        BEGIN
+            -- Check if table is partitioned
+            SELECT partitioned, partitioning_type
+            INTO v_is_partitioned, v_partitioning_type
+            FROM dba_tables
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table;
+
+            IF v_is_partitioned = 'YES' THEN
+                -- Get partition key columns
+                SELECT LISTAGG(column_name, ', ') WITHIN GROUP (ORDER BY column_position)
+                INTO v_partition_key_cols
+                FROM dba_part_key_columns
+                WHERE owner = v_task.source_owner
+                AND name = v_task.source_table
+                AND object_type = 'TABLE';
+
+                -- Check if any partition key column is a date type
+                SELECT CASE WHEN COUNT(*) > 0 THEN 'Y' ELSE 'N' END
+                INTO v_partition_key_is_date
+                FROM dba_part_key_columns pkc
+                JOIN dba_tab_columns tc
+                  ON tc.owner = pkc.owner
+                  AND tc.table_name = pkc.name
+                  AND tc.column_name = pkc.column_name
+                WHERE pkc.owner = v_task.source_owner
+                AND pkc.name = v_task.source_table
+                AND pkc.object_type = 'TABLE'
+                AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+
+                -- Get partition count
+                SELECT COUNT(*)
+                INTO v_partition_count_existing
+                FROM dba_tab_partitions
+                WHERE table_owner = v_task.source_owner
+                AND table_name = v_task.source_table;
+
+                -- If already partitioned by date column, skip analysis
+                IF v_partition_key_is_date = 'Y' THEN
+                    DBMS_OUTPUT.PUT_LINE('Table is already partitioned by date column(s): ' || v_partition_key_cols);
+                    DBMS_OUTPUT.PUT_LINE('  Partitioning type: ' || v_partitioning_type);
+                    DBMS_OUTPUT.PUT_LINE('  Number of partitions: ' || v_partition_count_existing);
+                    DBMS_OUTPUT.PUT_LINE('  Skipping analysis.');
+
+                    -- Update task with info that table is already partitioned
+                    UPDATE cmr.dwh_migration_tasks
+                    SET status = 'SKIPPED',
+                        analysis_date = SYSTIMESTAMP,
+                        error_message = 'Table already partitioned by date column(s): ' || v_partition_key_cols ||
+                                       ' (' || v_partitioning_type || ', ' || v_partition_count_existing || ' partitions)'
+                    WHERE task_id = p_task_id;
+                    COMMIT;
+
+                    -- Clean up LOB
+                    IF DBMS_LOB.ISTEMPORARY(v_warnings) = 1 THEN
+                        DBMS_LOB.FREETEMPORARY(v_warnings);
+                    END IF;
+
+                    RETURN;  -- Exit procedure
+                ELSE
+                    -- Partitioned but not by date column - add warning
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Table is already partitioned but NOT by a date column');
+                    DBMS_OUTPUT.PUT_LINE('  Current partition key(s): ' || v_partition_key_cols);
+                    DBMS_OUTPUT.PUT_LINE('  Partitioning type: ' || v_partitioning_type);
+
+                    IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
+                    DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                        '    "type": "WARNING",' || CHR(10) ||
+                        '    "issue": "Table already partitioned by: ' || v_partition_key_cols || ' (' || v_partitioning_type || ')",' || CHR(10) ||
+                        '    "action": "Consider if re-partitioning by date is needed. Requires dropping and recreating partitions."' || CHR(10) ||
+                        '  }');
+                    v_error_count := v_error_count + 1;
+                END IF;
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                NULL;  -- Table not found in dba_tables (already handled above)
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('Warning: Could not check partitioning status: ' || SQLERRM);
+        END;
+
         -- Get table statistics
         BEGIN
             SELECT num_rows INTO v_num_rows
