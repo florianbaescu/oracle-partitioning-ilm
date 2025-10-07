@@ -2586,6 +2586,27 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             END IF;
 
             DBMS_LOB.APPEND(v_all_date_analysis, ']');
+
+            -- Build candidate_columns from actual collected candidates
+            IF v_all_column_names IS NOT NULL AND v_all_column_names.COUNT > 0 THEN
+                DECLARE
+                    v_temp_columns VARCHAR2(4000) := '';
+                    v_first BOOLEAN := TRUE;
+                BEGIN
+                    FOR i IN 1..v_all_column_names.COUNT LOOP
+                        IF NOT v_first THEN
+                            v_temp_columns := v_temp_columns || ', ';
+                        END IF;
+                        -- Format: COLUMN_NAME (TYPE)
+                        v_temp_columns := v_temp_columns || v_all_column_names(i) ||
+                                         ' (' || v_all_data_types(i) || ')';
+                        v_first := FALSE;
+                    END LOOP;
+                    DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
+                END;
+            ELSE
+                DBMS_LOB.APPEND(v_candidate_columns, 'No date column candidates found');
+            END IF;
         END;
 
         -- Recommend partitioning strategy if not specified
@@ -2664,76 +2685,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             END IF;
 
             v_estimated_downtime := ROUND(v_base_time, 2);
-        END;
-
-        -- Build candidate_columns: ALL potential date columns (DATE/TIMESTAMP/NUMBER/VARCHAR with date-like names)
-        DECLARE
-            v_temp_columns VARCHAR2(4000) := '';
-            v_first BOOLEAN := TRUE;
-            TYPE t_column_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30));
-            TYPE t_column_list IS TABLE OF t_column_rec;
-            v_all_candidates t_column_list;
-        BEGIN
-            -- Get ALL date candidate columns (DATE, TIMESTAMP, NUMBER/VARCHAR with date-like names)
-            SELECT column_name, data_type
-            BULK COLLECT INTO v_all_candidates
-            FROM dba_tab_columns
-            WHERE owner = v_task.source_owner
-            AND table_name = v_task.source_table
-            AND (
-                -- Standard date types
-                data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
-                OR
-                -- NUMBER columns with date-like names
-                (data_type = 'NUMBER' AND (
-                    UPPER(column_name) LIKE '%DATE%'
-                    OR UPPER(column_name) LIKE '%TIME%'
-                    OR UPPER(column_name) LIKE '%DTTM%'
-                    OR UPPER(column_name) LIKE '%TIMESTAMP%'
-                    OR UPPER(column_name) LIKE '%DT'
-                    OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
-                ))
-                OR
-                -- VARCHAR columns with date-like names
-                (data_type IN ('VARCHAR2', 'CHAR') AND (
-                    UPPER(column_name) LIKE '%DATE%'
-                    OR UPPER(column_name) LIKE '%TIME%'
-                    OR UPPER(column_name) LIKE '%DTTM%'
-                    OR UPPER(column_name) LIKE '%TIMESTAMP%'
-                    OR UPPER(column_name) LIKE '%DT'
-                    OR UPPER(column_name) IN ('EFFECTIVE_DT', 'VALID_FROM', 'VALID_TO', 'START_DT', 'END_DT')
-                ))
-            )
-            ORDER BY
-                CASE data_type
-                    WHEN 'DATE' THEN 1
-                    WHEN 'TIMESTAMP' THEN 2
-                    WHEN 'TIMESTAMP(6)' THEN 3
-                    WHEN 'NUMBER' THEN 4
-                    ELSE 5
-                END,
-                column_name;
-
-            -- Build comma-separated list with data type indicators
-            IF v_all_candidates IS NOT NULL AND v_all_candidates.COUNT > 0 THEN
-                FOR i IN 1..v_all_candidates.COUNT LOOP
-                    IF NOT v_first THEN
-                        v_temp_columns := v_temp_columns || ', ';
-                    END IF;
-                    -- Format: COLUMN_NAME (TYPE)
-                    v_temp_columns := v_temp_columns || v_all_candidates(i).column_name ||
-                                     ' (' || v_all_candidates(i).data_type || ')';
-                    v_first := FALSE;
-                END LOOP;
-                DBMS_LOB.APPEND(v_candidate_columns, v_temp_columns);
-            ELSE
-                -- No date-like columns found at all
-                DBMS_LOB.APPEND(v_candidate_columns, 'No date-like columns found');
-            END IF;
-        EXCEPTION
-            WHEN OTHERS THEN
-                -- If candidate search fails, use fallback
-                DBMS_LOB.APPEND(v_candidate_columns, 'Error collecting candidates: ' || SQLERRM);
         END;
 
         -- Estimate partition count
