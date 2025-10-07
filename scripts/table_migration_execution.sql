@@ -650,7 +650,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     --   - Space: Needs 2x table space (original + interim table)
     --   - Privileges: EXECUTE on DBMS_REDEFINITION
     --   - License: Oracle Enterprise Edition ONLY
-    --   - Primary Key: Table MUST have a primary key
+    --   - Primary Key: RECOMMENDED but not required (can use ROWID if no PK)
     --
     -- USE CASES:
     --   - Large tables (100GB+) where downtime is unacceptable
@@ -658,7 +658,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     --   - 24/7 systems with no maintenance windows
     --
     -- PROCESS:
-    --   1. Verify table can be redefined (has PK, no unsupported features)
+    --   1. Verify table can be redefined:
+    --      a) Try CONS_USE_PK (Primary Key) - PREFERRED, faster
+    --      b) If no PK, try CONS_USE_ROWID (ROWID-based) - works on any table
     --   2. Create interim partitioned table structure
     --   3. Start redefinition (DBMS_REDEFINITION.START_REDEF_TABLE)
     --   4. Copy dependent objects (indexes, constraints, triggers)
@@ -674,7 +676,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     --
     -- DISADVANTAGES:
     --   - Requires Enterprise Edition license
-    --   - Table must have primary key
+    --   - ROWID-based slightly slower than PK-based
     --   - More complex error handling
     --   - Takes longer than CTAS
     --   - Does NOT support date column conversion (NUMBER/VARCHAR to DATE)
@@ -697,6 +699,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_interim_table VARCHAR2(128);
         v_requires_conversion CHAR(1);
         v_can_redef NUMBER;
+        v_redef_option PLS_INTEGER;  -- CONS_USE_PK or CONS_USE_ROWID
+        v_has_pk BOOLEAN := FALSE;
     BEGIN
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
@@ -732,42 +736,86 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             RETURN;
         END IF;
 
-        -- Step 1: Verify table can be redefined
-        IF p_simulate THEN
-            DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
-            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
-            DBMS_OUTPUT.PUT_LINE('DBMS_REDEFINITION.CAN_REDEF_TABLE(');
-            DBMS_OUTPUT.PUT_LINE('    uname => ''' || v_task.source_owner || ''',');
-            DBMS_OUTPUT.PUT_LINE('    tname => ''' || v_task.source_table || ''',');
-            DBMS_OUTPUT.PUT_LINE('    options_flag => DBMS_REDEFINITION.CONS_USE_PK');
-            DBMS_OUTPUT.PUT_LINE(');');
-            DBMS_OUTPUT.PUT_LINE('');
-            DBMS_OUTPUT.PUT_LINE('Requirements: Table must have PRIMARY KEY');
-            DBMS_OUTPUT.PUT_LINE('');
-        ELSE
-            v_start := SYSTIMESTAMP;
-            BEGIN
+        -- Step 1: Verify table can be redefined (try PK first, then ROWID)
+        v_start := SYSTIMESTAMP;
+
+        -- Try with PRIMARY KEY first
+        BEGIN
+            IF NOT p_simulate THEN
                 DBMS_REDEFINITION.CAN_REDEF_TABLE(
                     uname => v_task.source_owner,
                     tname => v_task.source_table,
                     options_flag => DBMS_REDEFINITION.CONS_USE_PK
                 );
-                DBMS_OUTPUT.PUT_LINE('  Table can be redefined online (has primary key)');
-                log_step(p_task_id, v_step, 'Verify table can be redefined', 'VALIDATE', NULL,
+            END IF;
+            v_has_pk := TRUE;
+            v_redef_option := DBMS_REDEFINITION.CONS_USE_PK;
+
+            IF p_simulate THEN
+                DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
+                DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                DBMS_OUTPUT.PUT_LINE('Option: CONS_USE_PK (Primary Key-based redefinition)');
+                DBMS_OUTPUT.PUT_LINE('Table has PRIMARY KEY - using PK-based redefinition');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  Table can be redefined online using PRIMARY KEY');
+                log_step(p_task_id, v_step, 'Verify table can be redefined (PK)', 'VALIDATE', NULL,
                         'SUCCESS', v_start, SYSTIMESTAMP);
-            EXCEPTION
-                WHEN OTHERS THEN
-                    DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
-                    DBMS_OUTPUT.PUT_LINE('       Common reasons:');
-                    DBMS_OUTPUT.PUT_LINE('       - No primary key defined');
-                    DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
-                    DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
-                    DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
-                    log_step(p_task_id, v_step, 'Cannot redefine online', 'VALIDATE', NULL,
-                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
-                    migrate_using_ctas(p_task_id, p_simulate);
-                    RETURN;
-            END;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- No PK or PK-based redef failed, try ROWID-based
+                IF p_simulate THEN
+                    DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
+                    DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                    DBMS_OUTPUT.PUT_LINE('Note: Table has no PRIMARY KEY');
+                    DBMS_OUTPUT.PUT_LINE('Attempting CONS_USE_ROWID (ROWID-based redefinition)');
+                END IF;
+
+                BEGIN
+                    IF NOT p_simulate THEN
+                        DBMS_REDEFINITION.CAN_REDEF_TABLE(
+                            uname => v_task.source_owner,
+                            tname => v_task.source_table,
+                            options_flag => DBMS_REDEFINITION.CONS_USE_ROWID
+                        );
+                    END IF;
+                    v_has_pk := FALSE;
+                    v_redef_option := DBMS_REDEFINITION.CONS_USE_ROWID;
+
+                    IF p_simulate THEN
+                        DBMS_OUTPUT.PUT_LINE('Option: CONS_USE_ROWID (ROWID-based redefinition)');
+                        DBMS_OUTPUT.PUT_LINE('ROWID-based redefinition is SUPPORTED');
+                        DBMS_OUTPUT.PUT_LINE('');
+                        DBMS_OUTPUT.PUT_LINE('Note: ROWID-based redefinition:');
+                        DBMS_OUTPUT.PUT_LINE('  - Works on tables WITHOUT primary key');
+                        DBMS_OUTPUT.PUT_LINE('  - Uses Oracle internal ROWIDs');
+                        DBMS_OUTPUT.PUT_LINE('  - Slightly slower than PK-based');
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('  Table can be redefined online using ROWID (no PK required)');
+                        log_step(p_task_id, v_step, 'Verify table can be redefined (ROWID)', 'VALIDATE', NULL,
+                                'SUCCESS', v_start, SYSTIMESTAMP);
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- Both PK and ROWID failed
+                        DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
+                        DBMS_OUTPUT.PUT_LINE('       Common reasons:');
+                        DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
+                        DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
+                        DBMS_OUTPUT.PUT_LINE('       - Table has unsupported features');
+                        DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
+
+                        IF NOT p_simulate THEN
+                            log_step(p_task_id, v_step, 'Cannot redefine online', 'VALIDATE', NULL,
+                                    'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                        END IF;
+                        migrate_using_ctas(p_task_id, p_simulate);
+                        RETURN;
+                END;
+        END;
+
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('');
         END IF;
         v_step := v_step + 10;
 
@@ -797,7 +845,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('  - Table will remain accessible during migration');
             DBMS_OUTPUT.PUT_LINE('  - Only brief lock during final swap');
             DBMS_OUTPUT.PUT_LINE('  - Interim table: ' || v_interim_table);
-            DBMS_OUTPUT.PUT_LINE('  - Requires Enterprise Edition + Primary Key');
+
+            IF v_has_pk THEN
+                DBMS_OUTPUT.PUT_LINE('  - Method: CONS_USE_PK (Primary Key-based, faster)');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  - Method: CONS_USE_ROWID (ROWID-based, no PK needed)');
+            END IF;
+
+            DBMS_OUTPUT.PUT_LINE('  - Requires: Enterprise Edition');
             DBMS_OUTPUT.PUT_LINE('');
             RETURN;
         ELSE
@@ -815,11 +870,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             uname => v_task.source_owner,
             orig_table => v_task.source_table,
             int_table => v_interim_table,
-            options_flag => DBMS_REDEFINITION.CONS_USE_PK
+            options_flag => v_redef_option  -- Use determined option (PK or ROWID)
         );
         log_step(p_task_id, v_step, 'Start online redefinition', 'REDEFINE', NULL,
                 'SUCCESS', v_start, SYSTIMESTAMP);
-        DBMS_OUTPUT.PUT_LINE('  Started online redefinition (table remains accessible)');
+
+        IF v_has_pk THEN
+            DBMS_OUTPUT.PUT_LINE('  Started online redefinition using PRIMARY KEY (table remains accessible)');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('  Started online redefinition using ROWID (table remains accessible)');
+        END IF;
         v_step := v_step + 10;
 
         -- Step 4: Copy dependent objects (indexes, constraints, triggers)
