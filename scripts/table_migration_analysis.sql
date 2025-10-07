@@ -585,7 +585,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         END IF;
 
         -- Get distinct date count
-        v_sql := 'SELECT COUNT(DISTINCT ' || v_column_expr || ') ' ||
+        v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ COUNT(DISTINCT ' || v_column_expr || ') ' ||
                 ' FROM ' || p_owner || '.' || p_table_name ||
                 ' WHERE ' || p_column_name || ' IS NOT NULL';
         BEGIN
