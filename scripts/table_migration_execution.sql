@@ -6,25 +6,30 @@
 CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
     -- Main execution procedures
     PROCEDURE execute_migration(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE  -- If TRUE, generates DDL without executing
     );
 
     PROCEDURE execute_all_ready_tasks(
         p_project_id NUMBER DEFAULT NULL,
-        p_max_tasks NUMBER DEFAULT NULL
+        p_max_tasks NUMBER DEFAULT NULL,
+        p_simulate BOOLEAN DEFAULT FALSE  -- If TRUE, simulates all migrations
     );
 
     -- Migration methods
     PROCEDURE migrate_using_ctas(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     );
 
     PROCEDURE migrate_using_online_redef(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     );
 
     PROCEDURE migrate_using_exchange(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     );
 
     -- Post-migration tasks
@@ -392,7 +397,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- -------------------------------------------------------------------------
 
     PROCEDURE migrate_using_ctas(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
         v_ddl CLOB;
@@ -406,7 +412,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
-        DBMS_OUTPUT.PUT_LINE('Migrating using CTAS method: ' || v_task.source_table);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION MODE: CTAS Migration');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('Method: CTAS (Create Table As Select)');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Migrating using CTAS method: ' || v_task.source_table);
+        END IF;
 
         v_new_table := v_task.source_table || '_PART';
         v_old_table := v_task.source_table || '_OLD';
@@ -414,15 +429,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Step 1: Build partition DDL
         v_start := SYSTIMESTAMP;
         build_partition_ddl(v_task, v_ddl);
-        log_step(p_task_id, v_step, 'Build DDL', 'PREPARE', v_ddl,
-                'SUCCESS', v_start, SYSTIMESTAMP);
+
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 1: BUILD PARTITION DDL');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE(v_ddl);
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            log_step(p_task_id, v_step, 'Build DDL', 'PREPARE', v_ddl,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+        END IF;
         v_step := v_step + 10;
 
         -- Step 2: Create partitioned table
-        v_start := SYSTIMESTAMP;
-        EXECUTE IMMEDIATE v_ddl;
-        log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
-                'SUCCESS', v_start, SYSTIMESTAMP);
+        IF NOT p_simulate THEN
+            v_start := SYSTIMESTAMP;
+            EXECUTE IMMEDIATE v_ddl;
+            log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+        END IF;
         v_step := v_step + 10;
 
         -- Step 3: Copy data (with date conversion if needed)
@@ -458,77 +483,150 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         v_task.source_owner || '.' || v_new_table ||
                         ' SELECT ' || v_select_list || ' FROM ' || v_task.source_owner || '.' || v_task.source_table;
 
-                DBMS_OUTPUT.PUT_LINE('  Converting date column ' || v_date_column || ' during copy');
+                IF p_simulate THEN
+                    DBMS_OUTPUT.PUT_LINE('Step 2: COPY DATA (with date conversion)');
+                    DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                    DBMS_OUTPUT.PUT_LINE('Converting column: ' || v_date_column);
+                    DBMS_OUTPUT.PUT_LINE('Conversion expression: ' || v_conversion_expr);
+                    DBMS_OUTPUT.PUT_LINE('');
+                    DBMS_OUTPUT.PUT_LINE(v_sql);
+                    DBMS_OUTPUT.PUT_LINE('');
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('  Converting date column ' || v_date_column || ' during copy');
+                END IF;
             ELSE
                 -- Standard SELECT *
                 v_sql := 'INSERT /*+ APPEND PARALLEL(' || v_task.parallel_degree || ') */ INTO ' ||
                         v_task.source_owner || '.' || v_new_table ||
                         ' SELECT * FROM ' || v_task.source_owner || '.' || v_task.source_table;
+
+                IF p_simulate THEN
+                    DBMS_OUTPUT.PUT_LINE('Step 2: COPY DATA');
+                    DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                    DBMS_OUTPUT.PUT_LINE(v_sql);
+                    DBMS_OUTPUT.PUT_LINE('');
+                END IF;
             END IF;
 
-            EXECUTE IMMEDIATE v_sql;
-            COMMIT;
-
-            log_step(p_task_id, v_step, 'Copy data' ||
-                    CASE WHEN v_requires_conversion = 'Y' THEN ' (with date conversion)' ELSE '' END,
-                    'COPY', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+            IF NOT p_simulate THEN
+                EXECUTE IMMEDIATE v_sql;
+                COMMIT;
+                log_step(p_task_id, v_step, 'Copy data' ||
+                        CASE WHEN v_requires_conversion = 'Y' THEN ' (with date conversion)' ELSE '' END,
+                        'COPY', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+            END IF;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 -- No analysis record, use standard copy
                 v_sql := 'INSERT /*+ APPEND PARALLEL(' || v_task.parallel_degree || ') */ INTO ' ||
                         v_task.source_owner || '.' || v_new_table ||
                         ' SELECT * FROM ' || v_task.source_owner || '.' || v_task.source_table;
-                EXECUTE IMMEDIATE v_sql;
-                COMMIT;
-                log_step(p_task_id, v_step, 'Copy data', 'COPY', v_sql,
-                        'SUCCESS', v_start, SYSTIMESTAMP);
+
+                IF p_simulate THEN
+                    DBMS_OUTPUT.PUT_LINE('Step 2: COPY DATA');
+                    DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                    DBMS_OUTPUT.PUT_LINE(v_sql);
+                    DBMS_OUTPUT.PUT_LINE('');
+                ELSE
+                    EXECUTE IMMEDIATE v_sql;
+                    COMMIT;
+                    log_step(p_task_id, v_step, 'Copy data', 'COPY', v_sql,
+                            'SUCCESS', v_start, SYSTIMESTAMP);
+                END IF;
         END;
         v_step := v_step + 10;
 
         -- Step 4: Recreate indexes
-        v_start := SYSTIMESTAMP;
-        recreate_indexes(p_task_id, v_task.source_owner, v_task.source_table, v_new_table, v_step);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 3: RECREATE INDEXES');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('(Indexes from ' || v_task.source_table || ' will be recreated on ' || v_new_table || ')');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            v_start := SYSTIMESTAMP;
+            recreate_indexes(p_task_id, v_task.source_owner, v_task.source_table, v_new_table, v_step);
+        END IF;
         v_step := v_step + 100;
 
         -- Step 5: Recreate constraints
-        recreate_constraints(p_task_id, v_task.source_owner, v_task.source_table, v_new_table, v_step);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 4: RECREATE CONSTRAINTS');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('(Constraints from ' || v_task.source_table || ' will be recreated on ' || v_new_table || ')');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            recreate_constraints(p_task_id, v_task.source_owner, v_task.source_table, v_new_table, v_step);
+        END IF;
         v_step := v_step + 100;
 
         -- Step 6: Gather statistics
-        v_start := SYSTIMESTAMP;
-        DBMS_STATS.GATHER_TABLE_STATS(
-            ownname => v_task.source_owner,
-            tabname => v_new_table,
-            cascade => TRUE,
-            degree => v_task.parallel_degree
-        );
-        log_step(p_task_id, v_step, 'Gather statistics', 'STATS', NULL,
-                'SUCCESS', v_start, SYSTIMESTAMP);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 5: GATHER STATISTICS');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('DBMS_STATS.GATHER_TABLE_STATS(ownname => ''' || v_task.source_owner || ''',');
+            DBMS_OUTPUT.PUT_LINE('                              tabname => ''' || v_new_table || ''',');
+            DBMS_OUTPUT.PUT_LINE('                              cascade => TRUE,');
+            DBMS_OUTPUT.PUT_LINE('                              degree => ' || v_task.parallel_degree || ');');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            v_start := SYSTIMESTAMP;
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname => v_task.source_owner,
+                tabname => v_new_table,
+                cascade => TRUE,
+                degree => v_task.parallel_degree
+            );
+            log_step(p_task_id, v_step, 'Gather statistics', 'STATS', NULL,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+        END IF;
         v_step := v_step + 10;
 
         -- Step 7: Rename tables
-        v_start := SYSTIMESTAMP;
         v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_task.source_table ||
                 ' RENAME TO ' || v_old_table;
-        EXECUTE IMMEDIATE v_sql;
 
-        v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
-                ' RENAME TO ' || v_task.source_table;
-        EXECUTE IMMEDIATE v_sql;
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 6: RENAME TABLES (CUTOVER)');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE(v_sql || ';');
+            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
+                    ' RENAME TO ' || v_task.source_table;
+            DBMS_OUTPUT.PUT_LINE(v_sql || ';');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('Summary:');
+            DBMS_OUTPUT.PUT_LINE('  - Original table will be renamed to: ' || v_old_table);
+            DBMS_OUTPUT.PUT_LINE('  - New partitioned table will become: ' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('  - Backup preserved for rollback: ' || v_old_table);
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('To execute this migration, call:');
+            DBMS_OUTPUT.PUT_LINE('  EXEC pck_dwh_table_migration_executor.execute_migration(p_task_id => ' || p_task_id || ');');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            v_start := SYSTIMESTAMP;
+            EXECUTE IMMEDIATE v_sql;
 
-        log_step(p_task_id, v_step, 'Rename tables', 'RENAME', v_sql,
-                'SUCCESS', v_start, SYSTIMESTAMP);
+            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
+                    ' RENAME TO ' || v_task.source_table;
+            EXECUTE IMMEDIATE v_sql;
 
-        -- Update task with backup name
-        UPDATE cmr.dwh_migration_tasks
-        SET backup_table_name = v_old_table,
-            can_rollback = 'Y'
-        WHERE task_id = p_task_id;
-        COMMIT;
+            log_step(p_task_id, v_step, 'Rename tables', 'RENAME', v_sql,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
 
-        DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
-        DBMS_OUTPUT.PUT_LINE('  Original table renamed to: ' || v_old_table);
-        DBMS_OUTPUT.PUT_LINE('  New partitioned table: ' || v_task.source_table);
+            -- Update task with backup name
+            UPDATE cmr.dwh_migration_tasks
+            SET backup_table_name = v_old_table,
+                can_rollback = 'Y'
+            WHERE task_id = p_task_id;
+            COMMIT;
+
+            DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
+            DBMS_OUTPUT.PUT_LINE('  Original table renamed to: ' || v_old_table);
+            DBMS_OUTPUT.PUT_LINE('  New partitioned table: ' || v_task.source_table);
+        END IF;
 
     EXCEPTION
         WHEN OTHERS THEN
@@ -588,7 +686,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- -------------------------------------------------------------------------
 
     PROCEDURE migrate_using_online_redef(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
         v_ddl CLOB;
@@ -603,7 +702,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
-        DBMS_OUTPUT.PUT_LINE('Migrating using Online Redefinition method: ' || v_task.source_table);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Note: Simulating ONLINE redefinition (DBMS_REDEFINITION)');
+            DBMS_OUTPUT.PUT_LINE('      Table will remain accessible during actual migration');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Migrating using Online Redefinition method: ' || v_task.source_table);
+        END IF;
 
         v_interim_table := v_task.source_table || '_REDEF';
 
@@ -623,45 +728,85 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('WARNING: Online redefinition does not support date column conversion');
             DBMS_OUTPUT.PUT_LINE('         Table requires conversion from NUMBER/VARCHAR to DATE');
             DBMS_OUTPUT.PUT_LINE('         Falling back to CTAS method...');
-            migrate_using_ctas(p_task_id);
+            migrate_using_ctas(p_task_id, p_simulate);
             RETURN;
         END IF;
 
         -- Step 1: Verify table can be redefined
-        v_start := SYSTIMESTAMP;
-        BEGIN
-            DBMS_REDEFINITION.CAN_REDEF_TABLE(
-                uname => v_task.source_owner,
-                tname => v_task.source_table,
-                options_flag => DBMS_REDEFINITION.CONS_USE_PK
-            );
-            DBMS_OUTPUT.PUT_LINE('  Table can be redefined online (has primary key)');
-            log_step(p_task_id, v_step, 'Verify table can be redefined', 'VALIDATE', NULL,
-                    'SUCCESS', v_start, SYSTIMESTAMP);
-        EXCEPTION
-            WHEN OTHERS THEN
-                DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
-                DBMS_OUTPUT.PUT_LINE('       Common reasons:');
-                DBMS_OUTPUT.PUT_LINE('       - No primary key defined');
-                DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
-                DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
-                DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
-                log_step(p_task_id, v_step, 'Cannot redefine online', 'VALIDATE', NULL,
-                        'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
-                migrate_using_ctas(p_task_id);
-                RETURN;
-        END;
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('DBMS_REDEFINITION.CAN_REDEF_TABLE(');
+            DBMS_OUTPUT.PUT_LINE('    uname => ''' || v_task.source_owner || ''',');
+            DBMS_OUTPUT.PUT_LINE('    tname => ''' || v_task.source_table || ''',');
+            DBMS_OUTPUT.PUT_LINE('    options_flag => DBMS_REDEFINITION.CONS_USE_PK');
+            DBMS_OUTPUT.PUT_LINE(');');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('Requirements: Table must have PRIMARY KEY');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            v_start := SYSTIMESTAMP;
+            BEGIN
+                DBMS_REDEFINITION.CAN_REDEF_TABLE(
+                    uname => v_task.source_owner,
+                    tname => v_task.source_table,
+                    options_flag => DBMS_REDEFINITION.CONS_USE_PK
+                );
+                DBMS_OUTPUT.PUT_LINE('  Table can be redefined online (has primary key)');
+                log_step(p_task_id, v_step, 'Verify table can be redefined', 'VALIDATE', NULL,
+                        'SUCCESS', v_start, SYSTIMESTAMP);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('       Common reasons:');
+                    DBMS_OUTPUT.PUT_LINE('       - No primary key defined');
+                    DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
+                    DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
+                    DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
+                    log_step(p_task_id, v_step, 'Cannot redefine online', 'VALIDATE', NULL,
+                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                    migrate_using_ctas(p_task_id, p_simulate);
+                    RETURN;
+            END;
+        END IF;
         v_step := v_step + 10;
 
         -- Step 2: Create interim partitioned table
-        v_start := SYSTIMESTAMP;
         build_partition_ddl(v_task, v_ddl);
-        -- Replace target table name with interim name
         v_ddl := REPLACE(v_ddl, v_task.source_table || '_PART', v_interim_table);
-        EXECUTE IMMEDIATE v_ddl;
-        log_step(p_task_id, v_step, 'Create interim partitioned table', 'CREATE', v_ddl,
-                'SUCCESS', v_start, SYSTIMESTAMP);
-        DBMS_OUTPUT.PUT_LINE('  Created interim table: ' || v_interim_table);
+
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 2-7: ONLINE REDEFINITION PROCESS');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('The following steps would be executed:');
+            DBMS_OUTPUT.PUT_LINE('  2. Create interim partitioned table: ' || v_interim_table);
+            DBMS_OUTPUT.PUT_LINE('  3. DBMS_REDEFINITION.START_REDEF_TABLE');
+            DBMS_OUTPUT.PUT_LINE('     (Table remains ACCESSIBLE during this phase)');
+            DBMS_OUTPUT.PUT_LINE('  4. DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS');
+            DBMS_OUTPUT.PUT_LINE('     (Copies indexes, constraints, triggers)');
+            DBMS_OUTPUT.PUT_LINE('  5. DBMS_REDEFINITION.SYNC_INTERIM_TABLE');
+            DBMS_OUTPUT.PUT_LINE('     (Captures ongoing changes)');
+            DBMS_OUTPUT.PUT_LINE('  6. Gather statistics on interim table');
+            DBMS_OUTPUT.PUT_LINE('  7. DBMS_REDEFINITION.FINISH_REDEF_TABLE');
+            DBMS_OUTPUT.PUT_LINE('     (Final atomic swap - brief lock ~seconds)');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE - ONLINE Method');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('Summary:');
+            DBMS_OUTPUT.PUT_LINE('  - Table will remain accessible during migration');
+            DBMS_OUTPUT.PUT_LINE('  - Only brief lock during final swap');
+            DBMS_OUTPUT.PUT_LINE('  - Interim table: ' || v_interim_table);
+            DBMS_OUTPUT.PUT_LINE('  - Requires Enterprise Edition + Primary Key');
+            DBMS_OUTPUT.PUT_LINE('');
+            RETURN;
+        ELSE
+            v_start := SYSTIMESTAMP;
+            EXECUTE IMMEDIATE v_ddl;
+            log_step(p_task_id, v_step, 'Create interim partitioned table', 'CREATE', v_ddl,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+            DBMS_OUTPUT.PUT_LINE('  Created interim table: ' || v_interim_table);
+        END IF;
         v_step := v_step + 10;
 
         -- Step 3: Start redefinition
@@ -831,7 +976,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- -------------------------------------------------------------------------
 
     PROCEDURE migrate_using_exchange(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
         v_ddl CLOB;
@@ -850,7 +996,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
-        DBMS_OUTPUT.PUT_LINE('Migrating using Partition Exchange method: ' || v_task.source_table);
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Note: Simulating EXCHANGE PARTITION migration');
+            DBMS_OUTPUT.PUT_LINE('      Instant metadata-only operation (no data copy)');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Migrating using Partition Exchange method: ' || v_task.source_table);
+        END IF;
 
         v_part_table := v_task.source_table || '_PART';
 
@@ -870,7 +1022,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('WARNING: Exchange partition does not support date column conversion');
             DBMS_OUTPUT.PUT_LINE('         Table requires conversion from NUMBER/VARCHAR to DATE');
             DBMS_OUTPUT.PUT_LINE('         Falling back to CTAS method...');
-            migrate_using_ctas(p_task_id);
+            migrate_using_ctas(p_task_id, p_simulate);
             RETURN;
         END IF;
 
@@ -924,12 +1076,38 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_step := v_step + 10;
 
         -- Step 3: Create partitioned table structure
-        v_start := SYSTIMESTAMP;
         build_partition_ddl(v_task, v_ddl);
-        EXECUTE IMMEDIATE v_ddl;
-        log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
-                'SUCCESS', v_start, SYSTIMESTAMP);
-        DBMS_OUTPUT.PUT_LINE('  Created partitioned table: ' || v_part_table);
+
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 3-7: EXCHANGE PARTITION PROCESS');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('The following steps would be executed:');
+            DBMS_OUTPUT.PUT_LINE('  3. Create partitioned table: ' || v_part_table);
+            DBMS_OUTPUT.PUT_LINE('  4. Prepare source table for exchange');
+            DBMS_OUTPUT.PUT_LINE('  5. ALTER TABLE ' || v_part_table || ' EXCHANGE PARTITION ' || v_partition_name);
+            DBMS_OUTPUT.PUT_LINE('     WITH TABLE ' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('     INCLUDING INDEXES WITHOUT VALIDATION');
+            DBMS_OUTPUT.PUT_LINE('     (Instant metadata-only operation)');
+            DBMS_OUTPUT.PUT_LINE('  6. Rename tables (cutover)');
+            DBMS_OUTPUT.PUT_LINE('  7. Gather statistics');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE - EXCHANGE Method');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('Summary:');
+            DBMS_OUTPUT.PUT_LINE('  - Instant operation (no data copy)');
+            DBMS_OUTPUT.PUT_LINE('  - Data range: ' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' || TO_CHAR(v_max_date, 'YYYY-MM-DD'));
+            DBMS_OUTPUT.PUT_LINE('  - Target partition: ' || v_partition_name);
+            DBMS_OUTPUT.PUT_LINE('  - Empty table preserved: ' || v_task.source_table || '_EMPTY');
+            DBMS_OUTPUT.PUT_LINE('');
+            RETURN;
+        ELSE
+            v_start := SYSTIMESTAMP;
+            EXECUTE IMMEDIATE v_ddl;
+            log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+            DBMS_OUTPUT.PUT_LINE('  Created partitioned table: ' || v_part_table);
+        END IF;
         v_step := v_step + 10;
 
         -- Step 4: Recreate indexes on source table to match target
@@ -1007,7 +1185,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- ==========================================================================
 
     PROCEDURE execute_migration(
-        p_task_id NUMBER
+        p_task_id NUMBER,
+        p_simulate BOOLEAN DEFAULT FALSE
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
         v_backup_name VARCHAR2(128);
@@ -1027,74 +1206,87 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             RAISE_APPLICATION_ERROR(-20001, 'Task not ready for migration. Current status: ' || v_task.status);
         END IF;
 
-        DBMS_OUTPUT.PUT_LINE('========================================');
-        DBMS_OUTPUT.PUT_LINE('Starting Migration');
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION MODE - No changes will be made');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('Starting Migration');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+        END IF;
+
         DBMS_OUTPUT.PUT_LINE('Task ID: ' || p_task_id);
         DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
         DBMS_OUTPUT.PUT_LINE('Method: ' || v_task.migration_method);
         DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('');
 
-        v_start_time := SYSTIMESTAMP;
-        v_source_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
+        IF NOT p_simulate THEN
+            v_start_time := SYSTIMESTAMP;
+            v_source_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
-        -- Update status
-        UPDATE cmr.dwh_migration_tasks
-        SET status = 'RUNNING',
-            execution_start = v_start_time
-        WHERE task_id = p_task_id;
-        COMMIT;
+            -- Update status
+            UPDATE cmr.dwh_migration_tasks
+            SET status = 'RUNNING',
+                execution_start = v_start_time
+            WHERE task_id = p_task_id;
+            COMMIT;
 
-        -- Create backup if enabled
-        IF get_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
-            create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
+            -- Create backup if enabled
+            IF get_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
+                create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
+            END IF;
         END IF;
 
         -- Execute migration based on method
         CASE v_task.migration_method
             WHEN 'CTAS' THEN
-                migrate_using_ctas(p_task_id);
+                migrate_using_ctas(p_task_id, p_simulate);
             WHEN 'ONLINE' THEN
-                migrate_using_online_redef(p_task_id);
+                migrate_using_online_redef(p_task_id, p_simulate);
             WHEN 'EXCHANGE' THEN
-                migrate_using_exchange(p_task_id);
+                migrate_using_exchange(p_task_id, p_simulate);
             WHEN 'OFFLINE' THEN
-                migrate_using_ctas(p_task_id);
+                migrate_using_ctas(p_task_id, p_simulate);
             ELSE
                 RAISE_APPLICATION_ERROR(-20002, 'Unknown migration method: ' || v_task.migration_method);
         END CASE;
 
-        v_end_time := SYSTIMESTAMP;
-        v_target_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
+        IF NOT p_simulate THEN
+            v_end_time := SYSTIMESTAMP;
+            v_target_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
-        -- Apply ILM policies if requested
-        IF v_task.apply_dwh_ilm_policies = 'Y' THEN
-            apply_dwh_ilm_policies(p_task_id);
+            -- Apply ILM policies if requested
+            IF v_task.apply_dwh_ilm_policies = 'Y' THEN
+                apply_dwh_ilm_policies(p_task_id);
+            END IF;
+
+            -- Validate migration
+            IF get_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
+                validate_migration(p_task_id);
+            END IF;
+
+            -- Update task
+            UPDATE cmr.dwh_migration_tasks
+            SET status = 'COMPLETED',
+                execution_end = v_end_time,
+                duration_seconds = EXTRACT(SECOND FROM (v_end_time - v_start_time)) +
+                                 EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
+                                 EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600,
+                target_size_mb = v_target_size,
+                space_saved_mb = v_source_size - v_target_size
+            WHERE task_id = p_task_id;
+            COMMIT;
+
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('Migration Completed Successfully');
+            DBMS_OUTPUT.PUT_LINE('Duration: ' || ROUND((v_end_time - v_start_time) * 24 * 60, 2) || ' minutes');
+            DBMS_OUTPUT.PUT_LINE('Source size: ' || v_source_size || ' MB');
+            DBMS_OUTPUT.PUT_LINE('Target size: ' || v_target_size || ' MB');
+            DBMS_OUTPUT.PUT_LINE('Space saved: ' || (v_source_size - v_target_size) || ' MB');
+            DBMS_OUTPUT.PUT_LINE('========================================');
         END IF;
-
-        -- Validate migration
-        IF get_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
-            validate_migration(p_task_id);
-        END IF;
-
-        -- Update task
-        UPDATE cmr.dwh_migration_tasks
-        SET status = 'COMPLETED',
-            execution_end = v_end_time,
-            duration_seconds = EXTRACT(SECOND FROM (v_end_time - v_start_time)) +
-                             EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
-                             EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600,
-            target_size_mb = v_target_size,
-            space_saved_mb = v_source_size - v_target_size
-        WHERE task_id = p_task_id;
-        COMMIT;
-
-        DBMS_OUTPUT.PUT_LINE('========================================');
-        DBMS_OUTPUT.PUT_LINE('Migration Completed Successfully');
-        DBMS_OUTPUT.PUT_LINE('Duration: ' || ROUND((v_end_time - v_start_time) * 24 * 60, 2) || ' minutes');
-        DBMS_OUTPUT.PUT_LINE('Source size: ' || v_source_size || ' MB');
-        DBMS_OUTPUT.PUT_LINE('Target size: ' || v_target_size || ' MB');
-        DBMS_OUTPUT.PUT_LINE('Space saved: ' || (v_source_size - v_target_size) || ' MB');
-        DBMS_OUTPUT.PUT_LINE('========================================');
 
     EXCEPTION
         WHEN OTHERS THEN
