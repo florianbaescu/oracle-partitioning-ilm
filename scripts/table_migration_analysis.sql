@@ -4,7 +4,25 @@
 -- =============================================================================
 
 CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER AS
+    -- ==========================================================================
+    -- Configuration Constants
+    -- ==========================================================================
+
+    -- Sample size for Stage 1 detection (fast, no IS NOT NULL filter)
+    -- Larger sample = better detection but slower on tables with many NULLs
+    c_stage1_sample_size CONSTANT NUMBER := 100;
+
+    -- Sample size for Stage 2 detection (with IS NOT NULL + parallel hint)
+    -- Smaller sample since IS NOT NULL may trigger full table scan
+    c_stage2_sample_size CONSTANT NUMBER := 20;
+
+    -- Minimum non-null samples required for validation (must be <= stage1_sample_size)
+    c_min_valid_samples CONSTANT NUMBER := 5;
+
+    -- ==========================================================================
     -- Main analysis procedures
+    -- ==========================================================================
+
     PROCEDURE analyze_table(
         p_task_id NUMBER
     );
@@ -796,7 +814,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             BEGIN
                 v_sql := 'SELECT ' || rec.column_name ||
                          ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ROWNUM <= 10';
+                         ' WHERE ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size;
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
@@ -812,7 +830,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     END LOOP;
 
                     -- Need at least 5 non-null samples to validate
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         v_valid_count := 0;
 
                         -- Check YYYYMMDD format (8 digits, 19000101-21001231)
@@ -825,7 +843,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (' || v_valid_count || ' valid samples)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -844,7 +862,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (' || v_valid_count || ' valid samples)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -862,7 +880,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected UNIX_TIMESTAMP format (' || v_valid_count || ' valid samples)');
                             p_date_column := rec.column_name;
                             p_date_format := 'UNIX_TIMESTAMP';
@@ -871,7 +889,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                         DBMS_OUTPUT.PUT_LINE('    -> No valid date format detected');
                     ELSE
-                        DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_valid_count || '/10)');
+                        DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_valid_count || '/' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ')');
                     END IF;
                 END IF;
             EXCEPTION
@@ -930,11 +948,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             )
             ORDER BY column_id
         ) LOOP
-            -- Sample 10 values to validate format (Stage 1: no IS NOT NULL filter)
+            -- Sample values to validate format (Stage 1: no IS NOT NULL filter)
             BEGIN
                 v_sql := 'SELECT ' || rec.column_name ||
                          ' FROM ' || p_owner || '.' || p_table_name ||
-                         ' WHERE ROWNUM <= 10';
+                         ' WHERE ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size;
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
@@ -952,8 +970,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         END LOOP;
 
                         -- Need at least 5 non-null samples to validate
-                        IF v_non_null_count < 5 THEN
-                            DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                        IF v_non_null_count < pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ')');
                             GOTO next_varchar_column;
                         END IF;
                     END;
@@ -969,7 +987,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYY-MM-DD';
@@ -986,7 +1004,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected DD/MM/YYYY format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'DD/MM/YYYY';
@@ -1003,7 +1021,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected MM/DD/YYYY format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'MM/DD/YYYY';
@@ -1023,7 +1041,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYY-MM';
@@ -1043,7 +1061,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMM';
@@ -1060,7 +1078,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END IF;
                     END LOOP;
-                    IF v_valid_count >= 5 THEN
+                    IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                         p_date_column := rec.column_name;
                         p_date_format := 'YYYYMMDD';
@@ -1133,10 +1151,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 BEGIN
                     DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column (no name pattern): ' || rec.column_name);
 
-                    -- Sample 10 values (Stage 1: no IS NOT NULL filter)
+                    -- Sample values (Stage 1: no IS NOT NULL filter)
                     v_sql := 'SELECT ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ROWNUM <= 10';
+                             ' WHERE ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size;
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_number_samples;
 
@@ -1152,8 +1170,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END LOOP;
 
                             -- Need at least 5 non-null samples to validate
-                            IF v_non_null_count < 5 THEN
-                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                            IF v_non_null_count < pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
+                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ')');
                                 GOTO next_number_column;
                             END IF;
                         END;
@@ -1170,7 +1188,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -1190,7 +1208,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1234,10 +1252,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 BEGIN
                     DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column (no name pattern): ' || rec.column_name);
 
-                    -- Sample 10 values (Stage 1: no IS NOT NULL filter)
+                    -- Sample values (Stage 1: no IS NOT NULL filter)
                     v_sql := 'SELECT ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ROWNUM <= 10';
+                             ' WHERE ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size;
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_varchar_samples;
 
@@ -1253,8 +1271,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END LOOP;
 
                             -- Need at least 5 non-null samples to validate
-                            IF v_non_null_count < 5 THEN
-                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/10)');
+                            IF v_non_null_count < pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
+                                DBMS_OUTPUT.PUT_LINE('    -> Not enough non-null samples (' || v_non_null_count || '/' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ')');
                                 GOTO next_varchar_fallback_column;
                             END IF;
                         END;
@@ -1269,7 +1287,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM-DD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM-DD';
@@ -1289,7 +1307,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYY-MM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM';
@@ -1309,7 +1327,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMM format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1326,7 +1344,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Detected YYYYMMDD format (all ' || v_valid_count || ' samples valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -1401,11 +1419,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Sample with IS NOT NULL + parallel hint (may trigger full scan)
                     v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage2_sample_size;
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
-                    IF v_samples IS NOT NULL AND v_samples.COUNT >= 5 THEN
+                    IF v_samples IS NOT NULL AND v_samples.COUNT >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         -- Check YYYYMMDD format
                         v_valid_count := 0;
                         FOR i IN 1..v_samples.COUNT LOOP
@@ -1415,7 +1433,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMMDD (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
@@ -1432,7 +1450,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMM (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1447,7 +1465,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected UNIX_TIMESTAMP (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'UNIX_TIMESTAMP';
@@ -1516,11 +1534,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Sample with IS NOT NULL + parallel hint
                     v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
                              ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= ' || pck_dwh_table_migration_analyzer.c_stage2_sample_size;
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
 
-                    IF v_samples IS NOT NULL AND v_samples.COUNT >= 5 THEN
+                    IF v_samples IS NOT NULL AND v_samples.COUNT >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                         -- Check YYYY-MM-DD
                         v_valid_count := 0;
                         FOR i IN 1..v_samples.COUNT LOOP
@@ -1528,7 +1546,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYY-MM-DD (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM-DD';
@@ -1542,7 +1560,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected DD/MM/YYYY (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'DD/MM/YYYY';
@@ -1559,7 +1577,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYY-MM (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYY-MM';
@@ -1576,7 +1594,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 END IF;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMM (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMM';
@@ -1590,7 +1608,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                 v_valid_count := v_valid_count + 1;
                             END IF;
                         END LOOP;
-                        IF v_valid_count >= 5 THEN
+                        IF v_valid_count >= pck_dwh_table_migration_analyzer.c_min_valid_samples THEN
                             DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMMDD (' || v_valid_count || ' valid)');
                             p_date_column := rec.column_name;
                             p_date_format := 'YYYYMMDD';
