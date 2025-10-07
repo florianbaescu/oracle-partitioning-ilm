@@ -1355,6 +1355,265 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END detect_date_column_by_content;
 
 
+    -- STAGE 2: Detect NUMBER date columns with IS NOT NULL + parallel hint
+    -- Only runs if Stage 1 found nothing (more expensive due to potential full scan)
+    FUNCTION detect_numeric_date_column_stage2(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_parallel_degree NUMBER,
+        p_exclude_columns SYS.ODCIVARCHAR2LIST,
+        p_date_column OUT VARCHAR2,
+        p_date_format OUT VARCHAR2
+    ) RETURN BOOLEAN
+    AS
+        TYPE t_number_list IS TABLE OF NUMBER;
+        v_samples t_number_list;
+        v_sql VARCHAR2(4000);
+        v_valid_count NUMBER;
+        v_sample_val NUMBER;
+        v_skip BOOLEAN;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('STAGE 2: Checking NUMBER columns with IS NOT NULL + parallel hint...');
+
+        FOR rec IN (
+            SELECT column_name
+            FROM dba_tab_columns
+            WHERE owner = p_owner
+            AND table_name = p_table_name
+            AND data_type = 'NUMBER'
+            ORDER BY column_id
+        ) LOOP
+            -- Skip if already checked
+            v_skip := FALSE;
+            IF p_exclude_columns IS NOT NULL THEN
+                FOR i IN 1..p_exclude_columns.COUNT LOOP
+                    IF p_exclude_columns(i) = rec.column_name THEN
+                        v_skip := TRUE;
+                        EXIT;
+                    END IF;
+                END LOOP;
+            END IF;
+
+            IF NOT v_skip THEN
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('  Stage 2 sampling NUMBER: ' || rec.column_name);
+
+                    -- Sample with IS NOT NULL + parallel hint (may trigger full scan)
+                    v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
+                             ' FROM ' || p_owner || '.' || p_table_name ||
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+
+                    EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+
+                    IF v_samples IS NOT NULL AND v_samples.COUNT >= 5 THEN
+                        -- Check YYYYMMDD format
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            v_sample_val := v_samples(i);
+                            IF v_sample_val >= 19000101 AND v_sample_val <= 21001231
+                               AND LENGTH(TRUNC(v_sample_val)) = 8 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMMDD (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMMDD';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYYMM format
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            v_sample_val := v_samples(i);
+                            IF v_sample_val >= 190001 AND v_sample_val <= 210012
+                               AND LENGTH(TRUNC(v_sample_val)) = 6
+                               AND MOD(v_sample_val, 100) BETWEEN 1 AND 12 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMM (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check UNIX_TIMESTAMP format
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            v_sample_val := v_samples(i);
+                            IF v_sample_val >= 946684800 AND v_sample_val <= 4102444800 THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected UNIX_TIMESTAMP (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'UNIX_TIMESTAMP';
+                            RETURN TRUE;
+                        END IF;
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('    -> Insufficient samples (' || NVL(v_samples.COUNT, 0) || ')');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
+                        NULL;
+                END;
+            END IF;
+        END LOOP;
+
+        RETURN FALSE;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN FALSE;
+    END detect_numeric_date_column_stage2;
+
+
+    -- STAGE 2: Detect VARCHAR date columns with IS NOT NULL + parallel hint
+    FUNCTION detect_varchar_date_column_stage2(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_parallel_degree NUMBER,
+        p_exclude_columns SYS.ODCIVARCHAR2LIST,
+        p_date_column OUT VARCHAR2,
+        p_date_format OUT VARCHAR2
+    ) RETURN BOOLEAN
+    AS
+        TYPE t_varchar_list IS TABLE OF VARCHAR2(4000);
+        v_samples t_varchar_list;
+        v_sql VARCHAR2(4000);
+        v_valid_count NUMBER;
+        v_month_part NUMBER;
+        v_skip BOOLEAN;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('STAGE 2: Checking VARCHAR columns with IS NOT NULL + parallel hint...');
+
+        FOR rec IN (
+            SELECT column_name
+            FROM dba_tab_columns
+            WHERE owner = p_owner
+            AND table_name = p_table_name
+            AND data_type IN ('VARCHAR2', 'CHAR')
+            ORDER BY column_id
+        ) LOOP
+            -- Skip if already checked
+            v_skip := FALSE;
+            IF p_exclude_columns IS NOT NULL THEN
+                FOR i IN 1..p_exclude_columns.COUNT LOOP
+                    IF p_exclude_columns(i) = rec.column_name THEN
+                        v_skip := TRUE;
+                        EXIT;
+                    END IF;
+                END LOOP;
+            END IF;
+
+            IF NOT v_skip THEN
+                BEGIN
+                    DBMS_OUTPUT.PUT_LINE('  Stage 2 sampling VARCHAR: ' || rec.column_name);
+
+                    -- Sample with IS NOT NULL + parallel hint
+                    v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
+                             ' FROM ' || p_owner || '.' || p_table_name ||
+                             ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+
+                    EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+
+                    IF v_samples IS NOT NULL AND v_samples.COUNT >= 5 THEN
+                        -- Check YYYY-MM-DD
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_samples(i), '^\d{4}-\d{2}-\d{2}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYY-MM-DD (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM-DD';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check DD/MM/YYYY
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_samples(i), '^\d{2}/\d{2}/\d{4}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected DD/MM/YYYY (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'DD/MM/YYYY';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYY-MM
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_samples(i), '^\d{4}-\d{2}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_samples(i), 6, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYY-MM (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYYMM
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_samples(i), '^\d{6}$') THEN
+                                v_month_part := TO_NUMBER(SUBSTR(v_samples(i), 5, 2));
+                                IF v_month_part BETWEEN 1 AND 12 THEN
+                                    v_valid_count := v_valid_count + 1;
+                                END IF;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMM (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            RETURN TRUE;
+                        END IF;
+
+                        -- Check YYYYMMDD
+                        v_valid_count := 0;
+                        FOR i IN 1..v_samples.COUNT LOOP
+                            IF REGEXP_LIKE(v_samples(i), '^\d{8}$') THEN
+                                v_valid_count := v_valid_count + 1;
+                            END IF;
+                        END LOOP;
+                        IF v_valid_count >= 5 THEN
+                            DBMS_OUTPUT.PUT_LINE('    -> Stage 2 detected YYYYMMDD (' || v_valid_count || ' valid)');
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMMDD';
+                            RETURN TRUE;
+                        END IF;
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('    -> Insufficient samples (' || NVL(v_samples.COUNT, 0) || ')');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('    -> Error: ' || SQLERRM);
+                        NULL;
+                END;
+            END IF;
+        END LOOP;
+
+        RETURN FALSE;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN FALSE;
+    END detect_varchar_date_column_stage2;
+
+
     -- Collect ALL potential date columns with their types and formats
     -- Returns a collection that can be used for unified analysis
     PROCEDURE collect_all_date_candidates(
@@ -1446,6 +1705,66 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE('  Added by content: ' || v_temp_col || ' (' || v_temp_type || ' ' || v_format || ')');
             END IF;
         END;
+
+        -- 5. STAGE 2: If no candidates found and no DATE columns, try IS NOT NULL + parallel
+        -- This is more expensive (may trigger full scans) so only run as last resort
+        IF v_count = 0 THEN
+            DBMS_OUTPUT.PUT_LINE('No candidates found in Stage 1. Trying Stage 2 (IS NOT NULL + parallel)...');
+
+            DECLARE
+                v_exclude_list SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();
+                v_date_count NUMBER := 0;
+            BEGIN
+                -- Count how many DATE columns we have
+                SELECT COUNT(*)
+                INTO v_date_count
+                FROM dba_tab_columns
+                WHERE owner = p_owner
+                AND table_name = p_table_name
+                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+
+                -- Only run Stage 2 if NO DATE columns found
+                IF v_date_count = 0 THEN
+                    -- Build exclusion list (should be empty at this point, but include for safety)
+                    FOR i IN 1..p_column_names.COUNT LOOP
+                        v_exclude_list.EXTEND;
+                        v_exclude_list(v_exclude_list.COUNT) := p_column_names(i);
+                    END LOOP;
+
+                    -- Try Stage 2 NUMBER detection
+                    IF detect_numeric_date_column_stage2(p_owner, p_table_name, p_parallel_degree, v_exclude_list, v_temp_col, v_format) THEN
+                        p_column_names.EXTEND;
+                        p_data_types.EXTEND;
+                        p_date_formats.EXTEND;
+                        p_column_names(p_column_names.COUNT) := v_temp_col;
+                        p_data_types(p_data_types.COUNT) := 'NUMBER';
+                        p_date_formats(p_date_formats.COUNT) := v_format;
+                        v_count := v_count + 1;
+                        DBMS_OUTPUT.PUT_LINE('  Added by Stage 2 NUMBER: ' || v_temp_col || ' (format: ' || v_format || ')');
+                    ELSE
+                        -- If Stage 2 NUMBER didn't find anything, try Stage 2 VARCHAR
+                        -- Update exclusion list
+                        IF p_column_names.COUNT > 0 THEN
+                            v_exclude_list.EXTEND;
+                            v_exclude_list(v_exclude_list.COUNT) := p_column_names(p_column_names.COUNT);
+                        END IF;
+
+                        IF detect_varchar_date_column_stage2(p_owner, p_table_name, p_parallel_degree, v_exclude_list, v_temp_col, v_format) THEN
+                            p_column_names.EXTEND;
+                            p_data_types.EXTEND;
+                            p_date_formats.EXTEND;
+                            p_column_names(p_column_names.COUNT) := v_temp_col;
+                            p_data_types(p_data_types.COUNT) := 'VARCHAR2';
+                            p_date_formats(p_date_formats.COUNT) := v_format;
+                            v_count := v_count + 1;
+                            DBMS_OUTPUT.PUT_LINE('  Added by Stage 2 VARCHAR: ' || v_temp_col || ' (format: ' || v_format || ')');
+                        END IF;
+                    END IF;
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('Stage 2 skipped: Found ' || v_date_count || ' DATE/TIMESTAMP columns');
+                END IF;
+            END;
+        END IF;
 
         DBMS_OUTPUT.PUT_LINE('Total candidates collected: ' || v_count);
     EXCEPTION
