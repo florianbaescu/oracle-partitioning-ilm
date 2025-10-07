@@ -31,7 +31,24 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_project_id NUMBER DEFAULT NULL
     );
 
+    -- ==========================================================================
+    -- Partitioning Detection Functions
+    -- ==========================================================================
+
+    -- Check if table is already partitioned by a date column
+    -- Returns: 'SKIP' - skip analysis (already optimally partitioned by date)
+    --          'WARN' - add warning (partitioned but not by date)
+    --          'CONTINUE' - continue analysis (not partitioned)
+    FUNCTION check_existing_partitioning(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_details OUT VARCHAR2,  -- Detailed partition info for logging
+        p_warning_json OUT CLOB            -- JSON warning for non-date partitioning
+    ) RETURN VARCHAR2;
+
+    -- ==========================================================================
     -- Analysis helper functions
+    -- ==========================================================================
     FUNCTION recommend_partition_strategy(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
