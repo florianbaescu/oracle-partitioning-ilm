@@ -123,10 +123,10 @@ END IF
 
 1. ✅ Create analyze_any_date_column() - DONE
 2. ✅ Create detect_date_column_by_content() - DONE
-3. 🔄 Build unified candidate collection
-4. 🔄 Replace DATE-only loop with unified loop
-5. 🔄 Integrate stereotype detection
-6. 🔄 Test with all scenarios
+3. ✅ Build unified candidate collection - DONE (collect_all_date_candidates)
+4. ✅ Replace DATE-only loop with unified loop - DONE (lines 2168-2476)
+5. ✅ Integrate stereotype detection - DONE (Phase 1 + Phase 4 override)
+6. 🔄 Test with all scenarios - READY FOR TESTING
 
 ## Variables Needed
 

@@ -445,6 +445,45 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END analyze_date_column;
 
 
+    -- Helper function to build conversion expression for NUMBER/VARCHAR date columns
+    FUNCTION get_date_conversion_expr(
+        p_column_name VARCHAR2,
+        p_data_type VARCHAR2,
+        p_date_format VARCHAR2
+    ) RETURN VARCHAR2
+    AS
+    BEGIN
+        -- Handle NUMBER-based dates
+        IF p_data_type = 'NUMBER' THEN
+            IF p_date_format = 'YYYYMMDD' THEN
+                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYYYMMDD'')';
+            ELSIF p_date_format = 'YYYYMM' THEN
+                -- Convert YYYYMM to date by appending '01' for first day of month
+                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || ') || ''01'', ''YYYYMMDD'')';
+            ELSIF p_date_format = 'YYMMDD' THEN
+                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYMMDD'')';
+            ELSIF p_date_format = 'UNIX_TIMESTAMP' THEN
+                RETURN 'TO_DATE(''1970-01-01'', ''YYYY-MM-DD'') + (' || p_column_name || ' / 86400)';
+            END IF;
+
+        -- Handle VARCHAR/CHAR-based dates
+        ELSIF p_data_type IN ('VARCHAR2', 'CHAR') THEN
+            IF p_date_format = 'YYYY-MM' THEN
+                -- Convert YYYY-MM to date by appending '-01' for first day of month
+                RETURN 'TO_DATE(' || p_column_name || ' || ''-01'', ''YYYY-MM-DD'')';
+            ELSIF p_date_format = 'YYYYMM' THEN
+                -- Convert YYYYMM (VARCHAR) to date by appending '01'
+                RETURN 'TO_DATE(' || p_column_name || ' || ''01'', ''YYYYMMDD'')';
+            ELSE
+                RETURN 'TO_DATE(' || p_column_name || ', ''' || p_date_format || ''')';
+            END IF;
+        END IF;
+
+        -- Default: return column as-is
+        RETURN p_column_name;
+    END get_date_conversion_expr;
+
+
     -- Unified analysis function that works for DATE, NUMBER, and VARCHAR columns
     -- For NUMBER/VARCHAR, it converts to DATE using the detected format
     FUNCTION analyze_any_date_column(
@@ -973,45 +1012,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         WHEN OTHERS THEN
             RETURN FALSE;
     END detect_varchar_date_column;
-
-
-    -- Generate conversion expression for non-standard date formats
-    FUNCTION get_date_conversion_expr(
-        p_column_name VARCHAR2,
-        p_data_type VARCHAR2,
-        p_date_format VARCHAR2
-    ) RETURN VARCHAR2
-    AS
-    BEGIN
-        -- Handle NUMBER-based dates
-        IF p_data_type = 'NUMBER' THEN
-            IF p_date_format = 'YYYYMMDD' THEN
-                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYYYMMDD'')';
-            ELSIF p_date_format = 'YYYYMM' THEN
-                -- Convert YYYYMM to date by appending '01' for first day of month
-                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || ') || ''01'', ''YYYYMMDD'')';
-            ELSIF p_date_format = 'YYMMDD' THEN
-                RETURN 'TO_DATE(TO_CHAR(' || p_column_name || '), ''YYMMDD'')';
-            ELSIF p_date_format = 'UNIX_TIMESTAMP' THEN
-                RETURN 'TO_DATE(''1970-01-01'', ''YYYY-MM-DD'') + (' || p_column_name || ' / 86400)';
-            END IF;
-
-        -- Handle VARCHAR/CHAR-based dates
-        ELSIF p_data_type IN ('VARCHAR2', 'CHAR') THEN
-            IF p_date_format = 'YYYY-MM' THEN
-                -- Convert YYYY-MM to date by appending '-01' for first day of month
-                RETURN 'TO_DATE(' || p_column_name || ' || ''-01'', ''YYYY-MM-DD'')';
-            ELSIF p_date_format = 'YYYYMM' THEN
-                -- Convert YYYYMM (VARCHAR) to date by appending '01'
-                RETURN 'TO_DATE(' || p_column_name || ' || ''01'', ''YYYYMMDD'')';
-            ELSE
-                RETURN 'TO_DATE(' || p_column_name || ', ''' || p_date_format || ''')';
-            END IF;
-        END IF;
-
-        -- Default: return column as-is
-        RETURN p_column_name;
-    END get_date_conversion_expr;
 
 
     -- FALLBACK: Detect date columns by sampling content (when name patterns don't match)
