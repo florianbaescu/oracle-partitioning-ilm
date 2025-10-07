@@ -1152,6 +1152,99 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END detect_date_column_by_content;
 
 
+    -- Collect ALL potential date columns with their types and formats
+    -- Returns a collection that can be used for unified analysis
+    PROCEDURE collect_all_date_candidates(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_parallel_degree NUMBER,
+        p_column_names OUT SYS.ODCIVARCHAR2LIST,
+        p_data_types OUT SYS.ODCIVARCHAR2LIST,
+        p_date_formats OUT SYS.ODCIVARCHAR2LIST
+    ) AS
+        v_count NUMBER := 0;
+        v_format VARCHAR2(50);
+        v_detected BOOLEAN;
+        v_temp_col VARCHAR2(128);
+        v_temp_type VARCHAR2(30);
+    BEGIN
+        p_column_names := SYS.ODCIVARCHAR2LIST();
+        p_data_types := SYS.ODCIVARCHAR2LIST();
+        p_date_formats := SYS.ODCIVARCHAR2LIST();
+
+        DBMS_OUTPUT.PUT_LINE('Collecting ALL potential date column candidates...');
+
+        -- 1. Get all DATE/TIMESTAMP columns
+        FOR rec IN (
+            SELECT column_name, data_type
+            FROM dba_tab_columns
+            WHERE owner = p_owner
+            AND table_name = p_table_name
+            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            ORDER BY column_id
+        ) LOOP
+            p_column_names.EXTEND;
+            p_data_types.EXTEND;
+            p_date_formats.EXTEND;
+            p_column_names(p_column_names.COUNT) := rec.column_name;
+            p_data_types(p_data_types.COUNT) := rec.data_type;
+            p_date_formats(p_date_formats.COUNT) := 'STANDARD';
+            v_count := v_count + 1;
+            DBMS_OUTPUT.PUT_LINE('  Added DATE candidate: ' || rec.column_name || ' (' || rec.data_type || ')');
+        END LOOP;
+
+        -- 2. Try NUMBER columns with name patterns
+        DBMS_OUTPUT.PUT_LINE('  Checking NUMBER columns by name pattern...');
+        IF detect_numeric_date_column(p_owner, p_table_name, p_parallel_degree, v_temp_col, v_format) THEN
+            p_column_names.EXTEND;
+            p_data_types.EXTEND;
+            p_date_formats.EXTEND;
+            p_column_names(p_column_names.COUNT) := v_temp_col;
+            p_data_types(p_data_types.COUNT) := 'NUMBER';
+            p_date_formats(p_date_formats.COUNT) := v_format;
+            v_count := v_count + 1;
+            DBMS_OUTPUT.PUT_LINE('  Added NUMBER candidate: ' || v_temp_col || ' (format: ' || v_format || ')');
+        END IF;
+
+        -- 3. Try VARCHAR columns with name patterns
+        DBMS_OUTPUT.PUT_LINE('  Checking VARCHAR columns by name pattern...');
+        IF detect_varchar_date_column(p_owner, p_table_name, p_parallel_degree, v_temp_col, v_format) THEN
+            p_column_names.EXTEND;
+            p_data_types.EXTEND;
+            p_date_formats.EXTEND;
+            p_column_names(p_column_names.COUNT) := v_temp_col;
+            p_data_types(p_data_types.COUNT) := 'VARCHAR2';
+            p_date_formats(p_date_formats.COUNT) := v_format;
+            v_count := v_count + 1;
+            DBMS_OUTPUT.PUT_LINE('  Added VARCHAR candidate: ' || v_temp_col || ' (format: ' || v_format || ')');
+        END IF;
+
+        -- 4. FALLBACK: Content-based detection if nothing found yet
+        IF v_count = 0 THEN
+            DBMS_OUTPUT.PUT_LINE('  No candidates found by name patterns, trying content-based detection...');
+            IF detect_date_column_by_content(p_owner, p_table_name, p_parallel_degree, v_temp_col, v_format, v_temp_type) THEN
+                p_column_names.EXTEND;
+                p_data_types.EXTEND;
+                p_date_formats.EXTEND;
+                p_column_names(p_column_names.COUNT) := v_temp_col;
+                p_data_types(p_data_types.COUNT) := v_temp_type;
+                p_date_formats(p_date_formats.COUNT) := v_format;
+                v_count := v_count + 1;
+                DBMS_OUTPUT.PUT_LINE('  Added by content: ' || v_temp_col || ' (' || v_temp_type || ' ' || v_format || ')');
+            END IF;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Total candidates collected: ' || v_count);
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR in collect_all_date_candidates: ' || SQLERRM);
+            -- Return empty lists on error
+            p_column_names := SYS.ODCIVARCHAR2LIST();
+            p_data_types := SYS.ODCIVARCHAR2LIST();
+            p_date_formats := SYS.ODCIVARCHAR2LIST();
+    END collect_all_date_candidates;
+
+
     FUNCTION detect_staging_table(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
@@ -2072,114 +2165,84 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         DBMS_LOB.CREATETEMPORARY(v_candidate_columns, TRUE, DBMS_LOB.SESSION);
 
-        -- Comprehensive date column analysis
+        -- Unified date column analysis (DATE, NUMBER, VARCHAR)
         DECLARE
+            -- Candidate collection arrays
+            v_all_column_names SYS.ODCIVARCHAR2LIST;
+            v_all_data_types SYS.ODCIVARCHAR2LIST;
+            v_all_date_formats SYS.ODCIVARCHAR2LIST;
+
+            -- Analysis results for current column
+            v_min_date DATE;
+            v_max_date DATE;
+            v_range_days NUMBER;
+            v_null_count NUMBER;
+            v_non_null_count NUMBER;
+            v_null_percentage NUMBER;
+            v_has_time_component VARCHAR2(1);
+            v_distinct_dates NUMBER;
+            v_usage_score NUMBER;
+            v_data_quality_issue VARCHAR2(1);
+
+            -- Selection tracking
+            v_max_range NUMBER := 0;
+            v_selected_null_pct NUMBER := 0;
+            v_selected_has_time VARCHAR2(1) := 'N';
+            v_max_usage_score NUMBER := 0;
+            v_best_has_quality_issue VARCHAR2(1) := 'N';
+
+            -- Stereotype tracking
             v_scd2_type VARCHAR2(30);
             v_event_column VARCHAR2(128);
             v_staging_column VARCHAR2(128);
             v_hist_column VARCHAR2(128);
-            v_min_date DATE;
-            v_max_date DATE;
-            v_range_days NUMBER;
-            v_max_range NUMBER := 0;
-            v_null_count NUMBER;
-            v_non_null_count NUMBER;
-            v_null_percentage NUMBER;
-            v_selected_null_pct NUMBER := 0;
-            v_has_time_component VARCHAR2(1);
-            v_distinct_dates NUMBER;
-            v_selected_has_time VARCHAR2(1) := 'N';
-            v_usage_score NUMBER;
-            v_max_usage_score NUMBER := 0;
-            v_selected_usage_score NUMBER := 0;
-            v_json_analysis VARCHAR2(32767);
-            v_first_json BOOLEAN := TRUE;
-            v_data_quality_issue VARCHAR2(1);
-            v_best_has_quality_issue VARCHAR2(1) := 'N';
             v_stereotype_column VARCHAR2(128);  -- Track which column was detected via stereotype
             v_stereotype_type VARCHAR2(30);     -- Track the stereotype type
+            v_stereotype_quality VARCHAR2(1);   -- Track quality of stereotype column
+
+            -- JSON building
+            v_json_analysis VARCHAR2(32767);
+            v_first_json BOOLEAN := TRUE;
+
         BEGIN
-            -- Try SCD2 pattern first
-            IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_date_column) THEN
-                v_stereotype_column := v_date_column;
+            -- Phase 1: Stereotype Detection (for priority override later)
+            IF detect_scd2_pattern(v_task.source_owner, v_task.source_table, v_scd2_type, v_stereotype_column) THEN
                 v_stereotype_type := 'SCD2';
-                v_date_type := 'DATE';
-                v_date_format := v_scd2_type;
-                v_conversion_expr := v_date_column;
-                v_date_found := TRUE;
-                DBMS_OUTPUT.PUT_LINE('Detected SCD2 date column: ' || v_date_column || ' (Type: ' || v_scd2_type || ')');
-            -- Try Events pattern
+                DBMS_OUTPUT.PUT_LINE('Detected SCD2 stereotype column: ' || v_stereotype_column || ' (Type: ' || v_scd2_type || ')');
             ELSIF detect_events_table(v_task.source_owner, v_task.source_table, v_event_column) THEN
                 v_stereotype_column := v_event_column;
                 v_stereotype_type := 'EVENTS';
-                v_date_column := v_event_column;
-                v_date_type := 'DATE';
-                v_date_format := 'EVENTS';
-                v_conversion_expr := v_date_column;
-                v_date_found := TRUE;
-                DBMS_OUTPUT.PUT_LINE('Detected Events date column: ' || v_date_column);
-            -- Try Staging pattern
+                DBMS_OUTPUT.PUT_LINE('Detected Events stereotype column: ' || v_stereotype_column);
             ELSIF detect_staging_table(v_task.source_owner, v_task.source_table, v_staging_column) THEN
                 v_stereotype_column := v_staging_column;
                 v_stereotype_type := 'STAGING';
-                v_date_column := v_staging_column;
-                v_date_type := 'DATE';
-                v_date_format := 'STAGING';
-                v_conversion_expr := v_date_column;
-                v_date_found := TRUE;
-                DBMS_OUTPUT.PUT_LINE('Detected Staging date column: ' || v_date_column);
-            -- Try HIST pattern
+                DBMS_OUTPUT.PUT_LINE('Detected Staging stereotype column: ' || v_stereotype_column);
             ELSIF detect_hist_table(v_task.source_owner, v_task.source_table, v_hist_column) THEN
                 v_stereotype_column := v_hist_column;
                 v_stereotype_type := 'HIST';
-                v_date_column := v_hist_column;
-                v_date_type := 'DATE';
-                v_date_format := 'HIST';
-                v_conversion_expr := v_date_column;
-                v_date_found := TRUE;
-                DBMS_OUTPUT.PUT_LINE('Detected HIST date column: ' || v_date_column);
+                DBMS_OUTPUT.PUT_LINE('Detected HIST stereotype column: ' || v_stereotype_column);
             END IF;
 
-            -- Validate stereotype-detected column for data quality issues
-            IF v_date_found THEN
-                DECLARE
-                    v_temp_min_date DATE;
-                    v_temp_max_date DATE;
-                    v_temp_range NUMBER;
-                    v_temp_null_count NUMBER;
-                    v_temp_non_null NUMBER;
-                    v_temp_null_pct NUMBER;
-                    v_temp_has_time VARCHAR2(1);
-                    v_temp_distinct NUMBER;
-                    v_temp_score NUMBER;
-                    v_temp_quality VARCHAR2(1);
-                BEGIN
-                    IF analyze_date_column(
-                        v_task.source_owner, v_task.source_table, v_date_column, v_parallel_degree,
-                        v_temp_min_date, v_temp_max_date, v_temp_range,
-                        v_temp_null_count, v_temp_non_null, v_temp_null_pct,
-                        v_temp_has_time, v_temp_distinct, v_temp_score, v_temp_quality
-                    ) THEN
-                        IF v_temp_quality = 'Y' THEN
-                            DBMS_OUTPUT.PUT_LINE('WARNING: Stereotype-detected column ' || v_stereotype_column ||
-                                ' has data quality issues (years outside 1900-2100)');
-                            DBMS_OUTPUT.PUT_LINE('  Will evaluate all date columns for better alternatives...');
-                            v_date_found := FALSE;  -- Allow quality-based selection to override
-                            v_date_column := NULL;  -- Reset to allow fresh selection
-                        END IF;
-                    END IF;
-                END;
-            END IF;
+            -- Phase 2: Collect ALL date column candidates (DATE + NUMBER + VARCHAR)
+            collect_all_date_candidates(
+                v_task.source_owner,
+                v_task.source_table,
+                v_parallel_degree,
+                v_all_column_names,
+                v_all_data_types,
+                v_all_date_formats
+            );
 
-            -- Analyze ALL date columns for comprehensive analysis
-            v_date_columns := get_date_columns(v_task.source_owner, v_task.source_table);
+            -- Phase 3: Unified analysis loop for ALL candidates
+            IF v_all_column_names IS NOT NULL AND v_all_column_names.COUNT > 0 THEN
+                DBMS_OUTPUT.PUT_LINE('Analyzing ' || v_all_column_names.COUNT || ' total date candidate(s) (all types)...');
 
-            IF v_date_columns IS NOT NULL AND v_date_columns.COUNT > 0 THEN
-                DBMS_OUTPUT.PUT_LINE('Analyzing ' || v_date_columns.COUNT || ' date column(s)...');
-
-                FOR i IN 1..v_date_columns.COUNT LOOP
-                    IF analyze_date_column(
-                        v_task.source_owner, v_task.source_table, v_date_columns(i), v_parallel_degree,
+                FOR i IN 1..v_all_column_names.COUNT LOOP
+                    -- Analyze this candidate using unified function
+                    IF analyze_any_date_column(
+                        v_task.source_owner, v_task.source_table,
+                        v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i),
+                        v_parallel_degree,
                         v_min_date, v_max_date, v_range_days,
                         v_null_count, v_non_null_count, v_null_percentage,
                         v_has_time_component, v_distinct_dates, v_usage_score,
@@ -2187,40 +2250,36 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     ) THEN
                         -- Penalize usage score for data quality issues (heavy penalty)
                         IF v_data_quality_issue = 'Y' THEN
-                            v_usage_score := GREATEST(0, v_usage_score - 50);  -- Reduce score by 50 points (heavy penalty)
+                            v_usage_score := GREATEST(0, v_usage_score - 50);
                             DBMS_OUTPUT.PUT_LINE('  *** PENALIZED: Score reduced by 50 points due to data quality issue');
                         END IF;
-                        -- Validate date ranges for data quality issues
+
+                        -- Validate date ranges and generate warnings
                         DECLARE
                             v_min_year NUMBER;
                             v_max_year NUMBER;
-                            v_data_quality_warning VARCHAR2(500) := '';
                         BEGIN
                             v_min_year := EXTRACT(YEAR FROM v_min_date);
                             v_max_year := EXTRACT(YEAR FROM v_max_date);
 
                             -- Check for suspicious years (likely data quality issues)
                             IF v_min_year < 1900 THEN
-                                v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (< 1900) - possible data quality issue';
-                                DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
-
+                                DBMS_OUTPUT.PUT_LINE('  *** WARNING: MIN date has year ' || v_min_year || ' (< 1900)');
                                 IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                                     '    "type": "DATA_QUALITY",' || CHR(10) ||
-                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "column": "' || v_all_column_names(i) || '",' || CHR(10) ||
                                     '    "issue": "MIN date year ' || v_min_year || ' is before 1900",' || CHR(10) ||
                                     '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                                     '    "action": "Review and clean data before migration"' || CHR(10) ||
                                     '  }');
                                 v_error_count := v_error_count + 1;
                             ELSIF v_min_year > 2100 THEN
-                                v_data_quality_warning := 'WARNING: MIN date has year ' || v_min_year || ' (> 2100) - possible data quality issue';
-                                DBMS_OUTPUT.PUT_LINE('  *** ' || v_data_quality_warning);
-
+                                DBMS_OUTPUT.PUT_LINE('  *** WARNING: MIN date has year ' || v_min_year || ' (> 2100)');
                                 IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                                     '    "type": "DATA_QUALITY",' || CHR(10) ||
-                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "column": "' || v_all_column_names(i) || '",' || CHR(10) ||
                                     '    "issue": "MIN date year ' || v_min_year || ' is after 2100",' || CHR(10) ||
                                     '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                                     '    "action": "Review and clean data before migration"' || CHR(10) ||
@@ -2229,28 +2288,22 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
 
                             IF v_max_year < 1900 THEN
-                                v_data_quality_warning := v_data_quality_warning || CASE WHEN LENGTH(v_data_quality_warning) > 0 THEN '; ' ELSE '' END ||
-                                    'WARNING: MAX date has year ' || v_max_year || ' (< 1900)';
                                 DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' < 1900');
-
                                 IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                                     '    "type": "DATA_QUALITY",' || CHR(10) ||
-                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "column": "' || v_all_column_names(i) || '",' || CHR(10) ||
                                     '    "issue": "MAX date year ' || v_max_year || ' is before 1900",' || CHR(10) ||
                                     '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                                     '    "action": "Review and clean data before migration"' || CHR(10) ||
                                     '  }');
                                 v_error_count := v_error_count + 1;
                             ELSIF v_max_year > 2100 THEN
-                                v_data_quality_warning := v_data_quality_warning || CASE WHEN LENGTH(v_data_quality_warning) > 0 THEN '; ' ELSE '' END ||
-                                    'WARNING: MAX date has year ' || v_max_year || ' (> 2100)';
                                 DBMS_OUTPUT.PUT_LINE('  *** MAX date year ' || v_max_year || ' > 2100');
-
                                 IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
                                 DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
                                     '    "type": "DATA_QUALITY",' || CHR(10) ||
-                                    '    "column": "' || v_date_columns(i) || '",' || CHR(10) ||
+                                    '    "column": "' || v_all_column_names(i) || '",' || CHR(10) ||
                                     '    "issue": "MAX date year ' || v_max_year || ' is after 2100",' || CHR(10) ||
                                     '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                                     '    "action": "Review and clean data before migration"' || CHR(10) ||
@@ -2259,15 +2312,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             END IF;
                         END;
 
-                        -- Build JSON entry for this date column
+                        -- Build JSON entry for this candidate
                         IF NOT v_first_json THEN
                             DBMS_LOB.APPEND(v_all_date_analysis, ',');
                         END IF;
                         v_first_json := FALSE;
 
                         v_json_analysis := '{' || CHR(10) ||
-                            '    "column_name": "' || v_date_columns(i) || '",' || CHR(10) ||
-                            '    "data_type": "DATE",' || CHR(10) ||
+                            '    "column_name": "' || v_all_column_names(i) || '",' || CHR(10) ||
+                            '    "data_type": "' || v_all_data_types(i) || '",' || CHR(10) ||
+                            '    "date_format": "' || NVL(v_all_date_formats(i), 'STANDARD') || '",' || CHR(10) ||
                             '    "min_date": "' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                             '    "max_date": "' || TO_CHAR(v_max_date, 'YYYY-MM-DD') || '",' || CHR(10) ||
                             '    "min_year": ' || EXTRACT(YEAR FROM v_min_date) || ',' || CHR(10) ||
@@ -2281,277 +2335,144 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             '    "distinct_dates": ' || NVL(TO_CHAR(v_distinct_dates), 'null') || ',' || CHR(10) ||
                             '    "usage_score": ' || v_usage_score || ',' || CHR(10) ||
                             '    "data_quality_issue": "' || v_data_quality_issue || '",' || CHR(10) ||
-                            '    "stereotype_detected": "' || CASE WHEN v_date_columns(i) = v_stereotype_column THEN 'Y' ELSE 'N' END || '",' || CHR(10) ||
-                            '    "stereotype_type": "' || CASE WHEN v_date_columns(i) = v_stereotype_column THEN NVL(v_stereotype_type, 'NONE') ELSE 'NONE' END || '",' || CHR(10) ||
-                            '    "is_primary": ' || CASE WHEN v_date_columns(i) = v_date_column THEN 'true' ELSE 'false' END || CHR(10) ||
+                            '    "stereotype_detected": "' || CASE WHEN v_all_column_names(i) = v_stereotype_column THEN 'Y' ELSE 'N' END || '",' || CHR(10) ||
+                            '    "stereotype_type": "' || CASE WHEN v_all_column_names(i) = v_stereotype_column THEN NVL(v_stereotype_type, 'NONE') ELSE 'NONE' END || '",' || CHR(10) ||
+                            '    "is_primary": ' || CASE WHEN v_all_column_names(i) = v_date_column THEN 'true' ELSE 'false' END || CHR(10) ||
                         '  }';
 
                         DBMS_LOB.APPEND(v_all_date_analysis, v_json_analysis);
 
-                        DBMS_OUTPUT.PUT_LINE('  - ' || v_date_columns(i) || ': ' ||
+                        DBMS_OUTPUT.PUT_LINE('  - ' || v_all_column_names(i) || ' (' || v_all_data_types(i) ||
+                            CASE WHEN v_all_date_formats(i) IS NOT NULL THEN ' ' || v_all_date_formats(i) ELSE '' END || '): ' ||
                             TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' (year ' || EXTRACT(YEAR FROM v_min_date) || ') to ' ||
                             TO_CHAR(v_max_date, 'YYYY-MM-DD') || ' (year ' || EXTRACT(YEAR FROM v_max_date) || ')' ||
                             ' (' || v_range_days || ' days, ' || v_null_percentage || '% NULLs' ||
                             CASE WHEN v_has_time_component = 'Y' THEN ', has time component' ELSE '' END ||
                             ', usage score: ' || v_usage_score || ')');
 
-                        -- Track stats of selected column
-                        IF v_date_columns(i) = v_date_column THEN
-                            v_selected_null_pct := v_null_percentage;
-                            v_selected_has_time := v_has_time_component;
-                            v_selected_usage_score := v_usage_score;
+                        -- Track stereotype column quality
+                        IF v_all_column_names(i) = v_stereotype_column THEN
+                            v_stereotype_quality := v_data_quality_issue;
                         END IF;
 
-                        -- If no stereotype found, pick column with best combination of:
-                        -- 1. Data quality (prefer columns without data quality issues)
-                        -- 2. Highest usage score (primary factor)
-                        -- 3. Widest range (secondary factor if usage scores are similar)
-                        IF NOT v_date_found THEN
-                            -- Selection logic priority:
-                            -- 1. Data quality (years 1900-2100)
-                            -- 2. NULL percentage (lower is better)
-                            -- 3. Time component (prefer DATE without time)
-                            -- 4. Usage score (higher is better)
-                            -- 5. Date range (wider is better - tiebreaker)
-                            IF v_date_column IS NULL THEN
-                                -- No column selected yet - select first column as baseline
-                                v_max_range := v_range_days;
-                                v_max_usage_score := v_usage_score;
-                                v_date_column := v_date_columns(i);
-                                v_date_type := 'DATE';
-                                v_date_format := 'STANDARD';
-                                v_conversion_expr := v_date_column;
-                                v_selected_null_pct := v_null_percentage;
-                                v_selected_has_time := v_has_time_component;
-                                v_selected_usage_score := v_usage_score;
-                                v_best_has_quality_issue := v_data_quality_issue;
-                            ELSIF (
-                                -- Case 1: Current has no data quality issue, best has issue -> always select current
-                                (v_data_quality_issue = 'N' AND v_best_has_quality_issue = 'Y') OR
+                        -- Unified selection logic (applied to ALL column types equally)
+                        -- Selection priority:
+                        -- 1. Data quality (years 1900-2100)
+                        -- 2. NULL percentage (lower is better)
+                        -- 3. Time component (prefer DATE without time)
+                        -- 4. Usage score (higher is better)
+                        -- 5. Date range (wider is better - tiebreaker)
+                        IF v_date_column IS NULL THEN
+                            -- No column selected yet - select first column as baseline
+                            v_date_column := v_all_column_names(i);
+                            v_date_type := v_all_data_types(i);
+                            v_date_format := NVL(v_all_date_formats(i), 'STANDARD');
+                            v_max_range := v_range_days;
+                            v_max_usage_score := v_usage_score;
+                            v_selected_null_pct := v_null_percentage;
+                            v_selected_has_time := v_has_time_component;
+                            v_best_has_quality_issue := v_data_quality_issue;
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
+                        ELSIF (
+                            -- Case 1: Current has no data quality issue, best has issue -> always select current
+                            (v_data_quality_issue = 'N' AND v_best_has_quality_issue = 'Y') OR
 
-                                -- Case 2: Both have same data quality status -> apply additional criteria
-                                (v_data_quality_issue = v_best_has_quality_issue AND (
-                                    -- Prefer column with significantly fewer NULLs (>10% difference)
-                                    (v_null_percentage < v_selected_null_pct - 10) OR
+                            -- Case 2: Both have same data quality status -> apply additional criteria
+                            (v_data_quality_issue = v_best_has_quality_issue AND (
+                                -- Prefer column with significantly fewer NULLs (>10% difference)
+                                (v_null_percentage < v_selected_null_pct - 10) OR
 
-                                    -- If NULL percentages similar, prefer column without time component
-                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
-                                     v_has_time_component = 'N' AND v_selected_has_time = 'Y') OR
+                                -- If NULL percentages similar, prefer column without time component
+                                (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                 v_has_time_component = 'N' AND v_selected_has_time = 'Y') OR
 
-                                    -- If NULL% and time component same, use usage score
-                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
-                                     v_has_time_component = v_selected_has_time AND
-                                     v_usage_score > v_max_usage_score) OR
+                                -- If NULL% and time component same, use usage score
+                                (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                 v_has_time_component = v_selected_has_time AND
+                                 v_usage_score > v_max_usage_score) OR
 
-                                    -- If all similar, use wider range as tiebreaker
-                                    (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
-                                     v_has_time_component = v_selected_has_time AND
-                                     v_usage_score >= v_max_usage_score * 0.8 AND
-                                     v_range_days > v_max_range)
-                                ))
-                                -- Case 3: Current has issue, best has no issue -> don't select (implicit)
-                            ) THEN
-                                v_max_range := v_range_days;
-                                v_max_usage_score := v_usage_score;
-                                v_date_column := v_date_columns(i);
-                                v_date_type := 'DATE';
-                                v_date_format := 'STANDARD';
-                                v_conversion_expr := v_date_column;
-                                v_selected_null_pct := v_null_percentage;
-                                v_selected_has_time := v_has_time_component;
-                                v_selected_usage_score := v_usage_score;
-                                v_best_has_quality_issue := v_data_quality_issue;
-                            END IF;
+                                -- If all similar, use wider range as tiebreaker
+                                (ABS(v_null_percentage - v_selected_null_pct) <= 10 AND
+                                 v_has_time_component = v_selected_has_time AND
+                                 v_usage_score >= v_max_usage_score * 0.8 AND
+                                 v_range_days > v_max_range)
+                            ))
+                            -- Case 3: Current has issue, best has no issue -> don't select (implicit)
+                        ) THEN
+                            v_date_column := v_all_column_names(i);
+                            v_date_type := v_all_data_types(i);
+                            v_date_format := NVL(v_all_date_formats(i), 'STANDARD');
+                            v_max_range := v_range_days;
+                            v_max_usage_score := v_usage_score;
+                            v_selected_null_pct := v_null_percentage;
+                            v_selected_has_time := v_has_time_component;
+                            v_best_has_quality_issue := v_data_quality_issue;
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
                         END IF;
                     END IF;
                 END LOOP;
 
-                -- If we found a date column via range/usage analysis
-                IF NOT v_date_found AND v_date_column IS NOT NULL THEN
+                -- Phase 4: Stereotype Priority Override
+                -- If stereotype column found and has acceptable quality, prefer it
+                IF v_stereotype_column IS NOT NULL AND (v_stereotype_quality = 'N' OR v_date_column IS NULL) THEN
+                    DBMS_OUTPUT.PUT_LINE('Applying stereotype priority override: ' || v_stereotype_column || ' (' || v_stereotype_type || ')');
+                    -- Find stereotype column in candidates to get its properties
+                    FOR i IN 1..v_all_column_names.COUNT LOOP
+                        IF v_all_column_names(i) = v_stereotype_column THEN
+                            v_date_column := v_stereotype_column;
+                            v_date_type := v_all_data_types(i);
+                            v_date_format := NVL(v_all_date_formats(i), v_stereotype_type);
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
+                            EXIT;
+                        END IF;
+                    END LOOP;
+                ELSIF v_stereotype_column IS NOT NULL AND v_stereotype_quality = 'Y' THEN
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Stereotype column ' || v_stereotype_column || ' has data quality issues - using quality-based selection instead');
+                END IF;
+
+                -- Final selection reporting
+                IF v_date_column IS NOT NULL THEN
                     v_date_found := TRUE;
-                    DBMS_OUTPUT.PUT_LINE('Selected date column: ' || v_date_column ||
-                        ' (usage score: ' || v_selected_usage_score || ', range: ' || v_max_range || ' days)');
-                END IF;
+                    DBMS_OUTPUT.PUT_LINE('Selected date column: ' || v_date_column || ' (' || v_date_type ||
+                        CASE WHEN v_date_format NOT IN ('STANDARD', 'SCD2', 'EVENTS', 'STAGING', 'HIST') THEN ' format: ' || v_date_format ELSE '' END ||
+                        ', usage score: ' || v_max_usage_score || ', range: ' || v_max_range || ' days)');
 
-                -- Add warning if selected column has NULLs
-                IF v_date_found AND v_selected_null_pct > 0 THEN
-                    IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                    DBMS_LOB.APPEND(v_warnings,
-                        '{"type":"WARNING",' ||
-                        '"issue":"Selected date column ' || v_date_column || ' has ' || v_selected_null_pct || '% NULL values",' ||
-                        '"action":"Consider: 1) Choose different date column, 2) Use DEFAULT partition for NULLs, 3) Populate NULL values before migration"}');
-                    v_error_count := v_error_count + 1;
+                    -- Add warning if selected column has NULLs
+                    IF v_selected_null_pct > 0 THEN
+                        IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                        DBMS_LOB.APPEND(v_warnings,
+                            '{"type":"WARNING",' ||
+                            '"issue":"Selected date column ' || v_date_column || ' has ' || v_selected_null_pct || '% NULL values",' ||
+                            '"action":"Consider: 1) Choose different date column, 2) Use DEFAULT partition for NULLs, 3) Populate NULL values before migration"}');
+                        v_error_count := v_error_count + 1;
+                        DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has ' || v_selected_null_pct || '% NULL values');
 
-                    DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has ' || v_selected_null_pct || '% NULL values');
-
-                    -- Escalate to blocking issue if >25% NULLs
-                    IF v_selected_null_pct > 25 THEN
-                        DBMS_OUTPUT.PUT_LINE('CRITICAL: >25% NULL values - strongly recommend addressing before migration');
+                        IF v_selected_null_pct > 25 THEN
+                            DBMS_OUTPUT.PUT_LINE('CRITICAL: >25% NULL values - strongly recommend addressing before migration');
+                        END IF;
                     END IF;
-                END IF;
 
-                -- Add warning if selected column has time component
-                IF v_date_found AND v_selected_has_time = 'Y' THEN
-                    IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
-                    DBMS_LOB.APPEND(v_warnings,
-                        '{"type":"WARNING",' ||
-                        '"issue":"Selected date column ' || v_date_column || ' contains time component (HH:MI:SS)",' ||
-                        '"action":"Partition key must use TRUNC(' || v_date_column || ') for daily partitions or TO_CHAR(' || v_date_column || ', ''YYYY-MM'') for monthly partitions"}');
-                    v_error_count := v_error_count + 1;
-
-                    DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has time component - use TRUNC() in partition key');
-                END IF;
-            END IF;
-
-            -- ALWAYS analyze NUMBER/VARCHAR columns as alternatives (even if DATE columns exist)
-            DBMS_OUTPUT.PUT_LINE('Analyzing NUMBER/VARCHAR date candidates as alternatives...');
-            DECLARE
-                    TYPE t_candidate_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30));
-                    TYPE t_candidate_list IS TABLE OF t_candidate_rec;
-                    v_number_varchar_candidates t_candidate_list;
-                    v_sample_value VARCHAR2(100);
-                    v_candidate_json VARCHAR2(32767);
-                BEGIN
-                    -- Get NUMBER/VARCHAR columns with date-like names
-                    SELECT column_name, data_type
-                    BULK COLLECT INTO v_number_varchar_candidates
-                    FROM dba_tab_columns
-                    WHERE owner = v_task.source_owner
-                    AND table_name = v_task.source_table
-                    AND (
-                        (data_type = 'NUMBER' AND (
-                            UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
-                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
-                            UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                            UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
-                            UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
-                            UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
-                            UPPER(column_name) LIKE '%REPORT%'
-                        ))
-                        OR
-                        (data_type IN ('VARCHAR2', 'CHAR') AND (
-                            UPPER(column_name) LIKE '%DATE%' OR UPPER(column_name) LIKE '%TIME%' OR
-                            UPPER(column_name) LIKE '%DTTM%' OR UPPER(column_name) LIKE '%DT' OR
-                            UPPER(column_name) LIKE '%MONTH%' OR UPPER(column_name) LIKE '%PERIOD%' OR
-                            UPPER(column_name) LIKE '%YM%' OR UPPER(column_name) LIKE '%YR%' OR
-                            UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MO%' OR
-                            UPPER(column_name) LIKE '%FISCAL%' OR UPPER(column_name) LIKE '%RPT%' OR
-                            UPPER(column_name) LIKE '%REPORT%'
-                        ))
-                    )
-                    ORDER BY data_type, column_name;
-
-                    IF v_number_varchar_candidates IS NOT NULL AND v_number_varchar_candidates.COUNT > 0 THEN
-                        DBMS_OUTPUT.PUT_LINE('Found ' || v_number_varchar_candidates.COUNT || ' NUMBER/VARCHAR date candidate(s)');
-
-                        FOR i IN 1..v_number_varchar_candidates.COUNT LOOP
-                            IF NOT v_first_json THEN
-                                DBMS_LOB.APPEND(v_all_date_analysis, ',');
-                            END IF;
-                            v_first_json := FALSE;
-
-                            -- Get sample value
-                            BEGIN
-                                EXECUTE IMMEDIATE 'SELECT ' || v_number_varchar_candidates(i).column_name ||
-                                    ' FROM ' || v_task.source_owner || '.' || v_task.source_table ||
-                                    ' WHERE ' || v_number_varchar_candidates(i).column_name || ' IS NOT NULL AND ROWNUM = 1'
-                                    INTO v_sample_value;
-                            EXCEPTION
-                                WHEN OTHERS THEN v_sample_value := NULL;
-                            END;
-
-                            v_candidate_json := '{' || CHR(10) ||
-                                '    "column_name": "' || v_number_varchar_candidates(i).column_name || '",' || CHR(10) ||
-                                '    "data_type": "' || v_number_varchar_candidates(i).data_type || '",' || CHR(10) ||
-                                '    "sample_value": "' || NVL(v_sample_value, 'NULL') || '",' || CHR(10) ||
-                                '    "requires_conversion": "Y",' || CHR(10) ||
-                                '    "note": "Detected as potential date column based on naming pattern"' || CHR(10) ||
-                                '  }';
-
-                            DBMS_LOB.APPEND(v_all_date_analysis, v_candidate_json);
-
-                            DBMS_OUTPUT.PUT_LINE('  - ' || v_number_varchar_candidates(i).column_name ||
-                                ' (' || v_number_varchar_candidates(i).data_type || '): sample=' || NVL(v_sample_value, 'NULL'));
-                        END LOOP;
-                    ELSE
-                        DBMS_OUTPUT.PUT_LINE('No NUMBER/VARCHAR date candidates found either');
+                    -- Add warning if selected column has time component
+                    IF v_selected_has_time = 'Y' THEN
+                        IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ','); END IF;
+                        DBMS_LOB.APPEND(v_warnings,
+                            '{"type":"WARNING",' ||
+                            '"issue":"Selected date column ' || v_date_column || ' contains time component (HH:MI:SS)",' ||
+                            '"action":"Partition key must use TRUNC(' || v_date_column || ') for daily partitions or TO_CHAR(' || v_date_column || ', ''YYYY-MM'') for monthly partitions"}');
+                        v_error_count := v_error_count + 1;
+                        DBMS_OUTPUT.PUT_LINE('WARNING: Selected date column has time component - use TRUNC() in partition key');
                     END IF;
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        DBMS_OUTPUT.PUT_LINE('Error analyzing NUMBER/VARCHAR candidates: ' || SQLERRM);
-                END;
-
-            DBMS_LOB.APPEND(v_all_date_analysis, ']');
-        END;
-
-        -- ALWAYS check for non-standard formats (NUMBER or VARCHAR-based dates) as alternatives
-        -- This allows comparison between DATE columns and NUMBER/VARCHAR alternatives
-        DECLARE
-            v_alt_date_column VARCHAR2(128);
-            v_alt_date_format VARCHAR2(50);
-            v_alt_date_type VARCHAR2(30);
-            v_alt_conversion_expr VARCHAR2(500);
-        BEGIN
-            DBMS_OUTPUT.PUT_LINE('Checking for NUMBER/VARCHAR date columns as alternatives...');
-
-            -- Try NUMBER-based dates first
-            IF detect_numeric_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format) THEN
-                v_alt_date_type := 'NUMBER';
-                v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, 'NUMBER', v_alt_date_format);
-                DBMS_OUTPUT.PUT_LINE('Detected NUMBER-based date column: ' || v_alt_date_column || ' (Format: ' || v_alt_date_format || ')');
-
-                -- If no DATE column was found, use this as primary
-                IF v_date_column IS NULL THEN
-                    v_date_column := v_alt_date_column;
-                    v_date_type := v_alt_date_type;
-                    v_date_format := v_alt_date_format;
-                    v_conversion_expr := v_alt_conversion_expr;
-                    v_requires_conversion := 'Y';
-                    DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (no DATE columns found)');
                 ELSE
-                    DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
-                END IF;
-
-            -- Try VARCHAR-based dates if NUMBER not found
-            ELSIF detect_varchar_date_column(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format) THEN
-                v_alt_date_type := 'VARCHAR2';
-                v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, 'VARCHAR2', v_alt_date_format);
-                DBMS_OUTPUT.PUT_LINE('Detected VARCHAR-based date column: ' || v_alt_date_column || ' (Format: ' || v_alt_date_format || ')');
-
-                -- If no DATE column was found, use this as primary
-                IF v_date_column IS NULL THEN
-                    v_date_column := v_alt_date_column;
-                    v_date_type := v_alt_date_type;
-                    v_date_format := v_alt_date_format;
-                    v_conversion_expr := v_alt_conversion_expr;
-                    v_requires_conversion := 'Y';
-                    DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (no DATE columns found)');
-                ELSE
-                    DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
+                    DBMS_OUTPUT.PUT_LINE('WARNING: No suitable date column found');
                 END IF;
             ELSE
-                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns detected by name patterns');
-
-                -- FALLBACK: Try content-based detection (samples 10 rows per column)
-                IF detect_date_column_by_content(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format, v_alt_date_type) THEN
-                    v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, v_alt_date_type, v_alt_date_format);
-                    DBMS_OUTPUT.PUT_LINE('Detected by content: ' || v_alt_date_column || ' (' || v_alt_date_type || ' ' || v_alt_date_format || ')');
-
-                    -- If no DATE column was found, use this as primary
-                    IF v_date_column IS NULL THEN
-                        v_date_column := v_alt_date_column;
-                        v_date_type := v_alt_date_type;
-                        v_date_format := v_alt_date_format;
-                        v_conversion_expr := v_alt_conversion_expr;
-                        v_requires_conversion := 'Y';
-                        DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (found by content sampling)');
-                    ELSE
-                        DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
-                    END IF;
-                ELSE
-                    DBMS_OUTPUT.PUT_LINE('No date columns found even with content-based fallback');
-                END IF;
+                DBMS_OUTPUT.PUT_LINE('WARNING: No date column candidates found');
             END IF;
+
+            DBMS_LOB.APPEND(v_all_date_analysis, ']');
         END;
 
         -- Recommend partitioning strategy if not specified
