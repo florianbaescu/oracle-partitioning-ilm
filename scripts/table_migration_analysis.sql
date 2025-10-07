@@ -445,6 +445,128 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
     END analyze_date_column;
 
 
+    -- Unified analysis function that works for DATE, NUMBER, and VARCHAR columns
+    -- For NUMBER/VARCHAR, it converts to DATE using the detected format
+    FUNCTION analyze_any_date_column(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_column_name VARCHAR2,
+        p_data_type VARCHAR2,          -- 'DATE', 'NUMBER', 'VARCHAR2'
+        p_date_format VARCHAR2,        -- Format for NUMBER/VARCHAR conversion
+        p_parallel_degree NUMBER,
+        p_min_date OUT DATE,
+        p_max_date OUT DATE,
+        p_range_days OUT NUMBER,
+        p_null_count OUT NUMBER,
+        p_non_null_count OUT NUMBER,
+        p_null_percentage OUT NUMBER,
+        p_has_time_component OUT VARCHAR2,
+        p_distinct_dates OUT NUMBER,
+        p_usage_score OUT NUMBER,
+        p_data_quality_issue OUT VARCHAR2
+    ) RETURN BOOLEAN
+    AS
+        v_sql VARCHAR2(4000);
+        v_column_expr VARCHAR2(500);
+        v_total_count NUMBER;
+        v_min_year NUMBER;
+        v_max_year NUMBER;
+    BEGIN
+        -- Initialize
+        p_data_quality_issue := 'N';
+        p_has_time_component := 'N';
+
+        -- Build column expression based on data type
+        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN
+            v_column_expr := p_column_name;
+        ELSE
+            -- For NUMBER/VARCHAR, use conversion expression
+            v_column_expr := get_date_conversion_expr(p_column_name, p_data_type, p_date_format);
+        END IF;
+
+        -- Get date range and NULL statistics
+        v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' ||
+                '  MIN(' || v_column_expr || '), ' ||
+                '  MAX(' || v_column_expr || '), ' ||
+                '  COUNT(*), ' ||
+                '  COUNT(' || p_column_name || '), ' ||  -- Count original column for NULLs
+                '  COUNT(*) - COUNT(' || p_column_name || ') ' ||
+                ' FROM ' || p_owner || '.' || p_table_name;
+
+        BEGIN
+            EXECUTE IMMEDIATE v_sql INTO p_min_date, p_max_date, v_total_count, p_non_null_count, p_null_count;
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('  ERROR analyzing ' || p_column_name || ': ' || SQLERRM);
+                RETURN FALSE;
+        END;
+
+        -- Calculate NULL percentage
+        IF v_total_count > 0 THEN
+            p_null_percentage := ROUND((p_null_count / v_total_count) * 100, 4);
+        ELSE
+            p_null_percentage := 0;
+        END IF;
+
+        -- If MIN/MAX are NULL, column has no non-NULL data
+        IF p_min_date IS NULL OR p_max_date IS NULL THEN
+            RETURN FALSE;
+        END IF;
+
+        -- Check for data quality issues (years outside 1900-2100)
+        v_min_year := EXTRACT(YEAR FROM p_min_date);
+        v_max_year := EXTRACT(YEAR FROM p_max_date);
+
+        IF v_min_year < 1900 OR v_min_year > 2100 OR v_max_year < 1900 OR v_max_year > 2100 THEN
+            p_data_quality_issue := 'Y';
+        END IF;
+
+        -- Calculate range
+        p_range_days := ROUND(p_max_date - p_min_date, 4);
+
+        -- Check for time component (only for DATE columns)
+        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN
+            v_sql := 'SELECT COUNT(*) FROM (' ||
+                    '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || p_column_name ||
+                    '  FROM ' || p_owner || '.' || p_table_name ||
+                    '  WHERE ' || p_column_name || ' IS NOT NULL' ||
+                    '  AND TO_CHAR(' || p_column_name || ', ''HH24:MI:SS'') != ''00:00:00''' ||
+                    '  AND ROWNUM <= 100)';
+            BEGIN
+                EXECUTE IMMEDIATE v_sql INTO v_total_count;
+                IF v_total_count > 0 THEN
+                    p_has_time_component := 'Y';
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+        ELSE
+            -- NUMBER/VARCHAR date columns don't have time component
+            p_has_time_component := 'N';
+        END IF;
+
+        -- Get distinct date count
+        v_sql := 'SELECT COUNT(DISTINCT ' || v_column_expr || ') ' ||
+                ' FROM ' || p_owner || '.' || p_table_name ||
+                ' WHERE ' || p_column_name || ' IS NOT NULL';
+        BEGIN
+            EXECUTE IMMEDIATE v_sql INTO p_distinct_dates;
+        EXCEPTION
+            WHEN OTHERS THEN
+                p_distinct_dates := 0;
+        END;
+
+        -- Get usage score (indexes, FKs, views, etc.)
+        p_usage_score := get_column_usage_score(p_owner, p_table_name, p_column_name);
+
+        RETURN TRUE;
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('  ERROR in analyze_any_date_column for ' || p_column_name || ': ' || SQLERRM);
+            RETURN FALSE;
+    END analyze_any_date_column;
+
+
     FUNCTION detect_scd2_pattern(
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
@@ -890,6 +1012,144 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Default: return column as-is
         RETURN p_column_name;
     END get_date_conversion_expr;
+
+
+    -- FALLBACK: Detect date columns by sampling content (when name patterns don't match)
+    -- This is more expensive, so only use as fallback after name-based detection fails
+    FUNCTION detect_date_column_by_content(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_parallel_degree NUMBER,
+        p_date_column OUT VARCHAR2,
+        p_date_format OUT VARCHAR2,
+        p_data_type OUT VARCHAR2
+    ) RETURN BOOLEAN
+    AS
+        v_sql VARCHAR2(4000);
+        TYPE t_sample_rec IS RECORD (column_name VARCHAR2(128), data_type VARCHAR2(30), sample_value VARCHAR2(100));
+        TYPE t_sample_list IS TABLE OF t_sample_rec;
+        v_samples t_sample_list;
+        v_sample_num NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('FALLBACK: Sampling NUMBER/VARCHAR columns by content (no name pattern matches)...');
+
+        -- Get ALL NUMBER columns and sample their values
+        FOR rec IN (
+            SELECT column_name, data_type
+            FROM dba_tab_columns
+            WHERE owner = p_owner
+            AND table_name = p_table_name
+            AND data_type = 'NUMBER'
+            ORDER BY column_id
+        ) LOOP
+            BEGIN
+                -- Sample 10 non-null values
+                v_sql := 'SELECT ' || rec.column_name ||
+                         ' FROM ' || p_owner || '.' || p_table_name ||
+                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+
+                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+
+                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    -- Check if values look like YYYYMMDD, YYYYMM, etc.
+                    FOR i IN 1..LEAST(v_samples.COUNT, 10) LOOP
+                        v_sample_num := TO_NUMBER(v_samples(i).sample_value);
+
+                        -- Check for YYYYMMDD (8 digits)
+                        IF v_sample_num >= 19000101 AND v_sample_num <= 21001231
+                           AND LENGTH(TRUNC(v_sample_num)) = 8 THEN
+                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (NUMBER YYYYMMDD) sample=' || v_sample_num);
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMMDD';
+                            p_data_type := 'NUMBER';
+                            RETURN TRUE;
+
+                        -- Check for YYYYMM (6 digits with month 01-12)
+                        ELSIF v_sample_num >= 190001 AND v_sample_num <= 210012
+                              AND LENGTH(TRUNC(v_sample_num)) = 6
+                              AND MOD(v_sample_num, 100) BETWEEN 1 AND 12 THEN
+                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (NUMBER YYYYMM) sample=' || v_sample_num);
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMM';
+                            p_data_type := 'NUMBER';
+                            RETURN TRUE;
+                        END IF;
+                    END LOOP;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL; -- Skip columns with errors
+            END;
+        END LOOP;
+
+        -- Get ALL VARCHAR columns and sample their values
+        FOR rec IN (
+            SELECT column_name, data_type
+            FROM dba_tab_columns
+            WHERE owner = p_owner
+            AND table_name = p_table_name
+            AND data_type IN ('VARCHAR2', 'CHAR')
+            ORDER BY column_id
+        ) LOOP
+            BEGIN
+                -- Sample 10 non-null values
+                v_sql := 'SELECT ' || rec.column_name ||
+                         ' FROM ' || p_owner || '.' || p_table_name ||
+                         ' WHERE ' || rec.column_name || ' IS NOT NULL AND ROWNUM <= 10';
+
+                EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
+
+                IF v_samples IS NOT NULL AND v_samples.COUNT > 0 THEN
+                    -- Check if values look like date formats
+                    FOR i IN 1..LEAST(v_samples.COUNT, 10) LOOP
+                        -- Try YYYY-MM pattern
+                        IF REGEXP_LIKE(v_samples(i).sample_value, '^\d{4}-\d{2}$') THEN
+                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYY-MM) sample=' || v_samples(i).sample_value);
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM';
+                            p_data_type := 'VARCHAR2';
+                            RETURN TRUE;
+
+                        -- Try YYYYMM pattern (6 digits as string)
+                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{6}$') THEN
+                            -- Verify it's a valid month
+                            IF TO_NUMBER(SUBSTR(v_samples(i).sample_value, 5, 2)) BETWEEN 1 AND 12 THEN
+                                DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYYMM) sample=' || v_samples(i).sample_value);
+                                p_date_column := rec.column_name;
+                                p_date_format := 'YYYYMM';
+                                p_data_type := 'VARCHAR2';
+                                RETURN TRUE;
+                            END IF;
+
+                        -- Try YYYY-MM-DD pattern
+                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{4}-\d{2}-\d{2}$') THEN
+                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYY-MM-DD) sample=' || v_samples(i).sample_value);
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYY-MM-DD';
+                            p_data_type := 'VARCHAR2';
+                            RETURN TRUE;
+
+                        -- Try YYYYMMDD pattern (8 digits as string)
+                        ELSIF REGEXP_LIKE(v_samples(i).sample_value, '^\d{8}$') THEN
+                            DBMS_OUTPUT.PUT_LINE('  Found by content: ' || rec.column_name || ' (VARCHAR YYYYMMDD) sample=' || v_samples(i).sample_value);
+                            p_date_column := rec.column_name;
+                            p_date_format := 'YYYYMMDD';
+                            p_data_type := 'VARCHAR2';
+                            RETURN TRUE;
+                        END IF;
+                    END LOOP;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL; -- Skip columns with errors
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('  No date columns found by content sampling');
+        RETURN FALSE;
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('  Error in content-based detection: ' || SQLERRM);
+            RETURN FALSE;
+    END detect_date_column_by_content;
 
 
     FUNCTION detect_staging_table(
@@ -2270,7 +2530,27 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
                 END IF;
             ELSE
-                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns detected');
+                DBMS_OUTPUT.PUT_LINE('No NUMBER or VARCHAR date columns detected by name patterns');
+
+                -- FALLBACK: Try content-based detection (samples 10 rows per column)
+                IF detect_date_column_by_content(v_task.source_owner, v_task.source_table, v_parallel_degree, v_alt_date_column, v_alt_date_format, v_alt_date_type) THEN
+                    v_alt_conversion_expr := get_date_conversion_expr(v_alt_date_column, v_alt_date_type, v_alt_date_format);
+                    DBMS_OUTPUT.PUT_LINE('Detected by content: ' || v_alt_date_column || ' (' || v_alt_date_type || ' ' || v_alt_date_format || ')');
+
+                    -- If no DATE column was found, use this as primary
+                    IF v_date_column IS NULL THEN
+                        v_date_column := v_alt_date_column;
+                        v_date_type := v_alt_date_type;
+                        v_date_format := v_alt_date_format;
+                        v_conversion_expr := v_alt_conversion_expr;
+                        v_requires_conversion := 'Y';
+                        DBMS_OUTPUT.PUT_LINE('  -> Selected as primary partition key (found by content sampling)');
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('  -> Available as alternative (current: ' || v_date_column || ')');
+                    END IF;
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('No date columns found even with content-based fallback');
+                END IF;
             END IF;
         END;
 
