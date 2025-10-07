@@ -320,10 +320,9 @@ WHERE t.validation_status = 'BLOCKED';
 
 | Method | Description | Use Case | Downtime |
 |--------|-------------|----------|----------|
-| **CTAS** | Create Table As Select | Most tables | Seconds to minutes |
+| **CTAS** | Create Table As Select | Most tables, standard migration | Seconds to minutes |
 | **ONLINE** | DBMS_REDEFINITION | Large tables, minimal downtime | Near-zero (EE only) |
-| **EXCHANGE** | Exchange partition | Staging tables | Seconds |
-| **OFFLINE** | Same as CTAS | Batch migrations | Acceptable downtime |
+| **EXCHANGE** | Exchange partition | Staging tables, ETL loads | Seconds (instant) |
 
 #### Execute Single Migration
 

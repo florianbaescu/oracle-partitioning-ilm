@@ -93,7 +93,7 @@ CREATE TABLE cmr.dwh_migration_tasks (
     interval_clause     VARCHAR2(200),         -- For interval partitioning
 
     -- Migration strategy
-    migration_method    VARCHAR2(30) DEFAULT 'ONLINE',  -- ONLINE, OFFLINE, CTAS, EXCHANGE
+    migration_method    VARCHAR2(30) DEFAULT 'CTAS',  -- CTAS, ONLINE, EXCHANGE
     use_compression     CHAR(1) DEFAULT 'Y',
     compression_type    VARCHAR2(50) DEFAULT 'QUERY HIGH',
     target_tablespace   VARCHAR2(30),
@@ -129,7 +129,7 @@ CREATE TABLE cmr.dwh_migration_tasks (
 
     CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
     CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'ANALYZING', 'ANALYZED', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')),
-    CONSTRAINT chk_mig_method CHECK (migration_method IN ('ONLINE', 'OFFLINE', 'CTAS', 'EXCHANGE'))
+    CONSTRAINT chk_mig_method CHECK (migration_method IN ('CTAS', 'ONLINE', 'EXCHANGE'))
 );
 
 CREATE INDEX idx_mig_task_project ON cmr.dwh_migration_tasks(project_id);
@@ -185,7 +185,7 @@ CREATE TABLE cmr.dwh_migration_analysis (
     -- Online redefinition capability
     supports_online_redef CHAR(1) DEFAULT 'N', -- Y if DBMS_REDEFINITION supported
     online_redef_method VARCHAR2(30),          -- CONS_USE_PK, CONS_USE_ROWID, or NULL
-    recommended_method  VARCHAR2(30),          -- CTAS, ONLINE, EXCHANGE, OFFLINE
+    recommended_method  VARCHAR2(30),          -- CTAS, ONLINE, EXCHANGE
 
     -- Dependencies
     dependent_objects   CLOB,                  -- JSON list of dependent objects

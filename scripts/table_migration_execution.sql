@@ -1307,8 +1307,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 migrate_using_online_redef(p_task_id, p_simulate);
             WHEN 'EXCHANGE' THEN
                 migrate_using_exchange(p_task_id, p_simulate);
-            WHEN 'OFFLINE' THEN
-                migrate_using_ctas(p_task_id, p_simulate);
             ELSE
                 RAISE_APPLICATION_ERROR(-20002, 'Unknown migration method: ' || v_task.migration_method);
         END CASE;

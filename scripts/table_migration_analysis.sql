@@ -3422,13 +3422,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_base_time NUMBER;
             v_method_multiplier NUMBER;
         BEGIN
-            -- Base time: ~1 minute per GB for ONLINE, ~30 seconds per GB for OFFLINE/CTAS
+            -- Base time: ~1 minute per GB for ONLINE, ~30 seconds per GB for CTAS
             CASE v_task.migration_method
-                WHEN 'ONLINE' THEN v_method_multiplier := 1.0;   -- Slower but no downtime
-                WHEN 'OFFLINE' THEN v_method_multiplier := 0.5;  -- Faster but requires downtime
-                WHEN 'CTAS' THEN v_method_multiplier := 0.5;
-                WHEN 'EXCHANGE' THEN v_method_multiplier := 0.1; -- Very fast
-                ELSE v_method_multiplier := 1.0;
+                WHEN 'ONLINE' THEN v_method_multiplier := 1.0;   -- Slower but near-zero downtime
+                WHEN 'CTAS' THEN v_method_multiplier := 0.5;     -- Faster but requires downtime
+                WHEN 'EXCHANGE' THEN v_method_multiplier := 0.1; -- Very fast (instant metadata swap)
+                ELSE v_method_multiplier := 0.5;  -- Default to CTAS timing
             END CASE;
 
             -- Base calculation: size_in_GB * minutes_per_GB * method_multiplier * complexity_factor
