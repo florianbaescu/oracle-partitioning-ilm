@@ -2847,6 +2847,55 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 DBMS_OUTPUT.PUT_LINE(v_partition_details);
                 DBMS_OUTPUT.PUT_LINE('Skipping analysis.');
 
+                -- Calculate duration
+                v_end_time := SYSTIMESTAMP;
+                v_duration_seconds := EXTRACT(DAY FROM (v_end_time - v_start_time)) * 86400 +
+                                      EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600 +
+                                      EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
+                                      EXTRACT(SECOND FROM (v_end_time - v_start_time));
+
+                -- Create analysis record with skip reason
+                DECLARE
+                    v_skip_reason CLOB;
+                BEGIN
+                    DBMS_LOB.CREATETEMPORARY(v_skip_reason, TRUE, DBMS_LOB.SESSION);
+                    DBMS_LOB.APPEND(v_skip_reason, '[' || CHR(10) ||
+                        '  {' || CHR(10) ||
+                        '    "type": "INFO",' || CHR(10) ||
+                        '    "issue": "Table already partitioned with date column(s)",' || CHR(10) ||
+                        '    "details": "' || REPLACE(REPLACE(v_partition_details, CHR(10), '; '), '"', '\"') || '",' || CHR(10) ||
+                        '    "action": "No migration needed - table is already optimally partitioned"' || CHR(10) ||
+                        '  }' || CHR(10) ||
+                        ']');
+
+                    -- Insert/Update analysis record
+                    MERGE INTO cmr.dwh_migration_analysis a
+                    USING (SELECT p_task_id AS task_id FROM DUAL) src
+                    ON (a.task_id = src.task_id)
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            warnings = v_skip_reason,
+                            analysis_date = SYSTIMESTAMP,
+                            analysis_duration_seconds = v_duration_seconds
+                    WHEN NOT MATCHED THEN
+                        INSERT (
+                            task_id,
+                            warnings,
+                            analysis_date,
+                            analysis_duration_seconds
+                        ) VALUES (
+                            p_task_id,
+                            v_skip_reason,
+                            SYSTIMESTAMP,
+                            v_duration_seconds
+                        );
+
+                    -- Clean up
+                    IF DBMS_LOB.ISTEMPORARY(v_skip_reason) = 1 THEN
+                        DBMS_LOB.FREETEMPORARY(v_skip_reason);
+                    END IF;
+                END;
+
                 -- Update task with detailed info
                 UPDATE cmr.dwh_migration_tasks
                 SET status = 'SKIPPED',
@@ -2854,6 +2903,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     error_message = 'Already partitioned with date column(s). ' || REPLACE(v_partition_details, CHR(10), '; ')
                 WHERE task_id = p_task_id;
                 COMMIT;
+
+                DBMS_OUTPUT.PUT_LINE('Analysis skipped in ' || ROUND(v_duration_seconds, 2) || ' seconds');
 
                 -- Clean up LOB
                 IF DBMS_LOB.ISTEMPORARY(v_warnings) = 1 THEN
