@@ -2898,7 +2898,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                 -- Update task with detailed info
                 UPDATE cmr.dwh_migration_tasks
-                SET status = 'SKIPPED',
+                SET status = 'ANALYZED',
                     analysis_date = SYSTIMESTAMP,
                     error_message = 'Already partitioned with date column(s). ' || REPLACE(v_partition_details, CHR(10), '; ')
                 WHERE task_id = p_task_id;
