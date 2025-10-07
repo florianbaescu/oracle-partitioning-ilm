@@ -359,15 +359,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'REF_CONSTRAINTS', FALSE);
 
         -- Get CHECK and UNIQUE constraints first (no dependencies)
+        -- NOTE: Include ALL constraints including SYS_% names, as these may be:
+        --   1. NOT NULL constraints (already in build_partition_ddl - will skip)
+        --   2. User-created CHECK constraints without explicit names (IMPORTANT!)
         FOR con IN (
-            SELECT constraint_name, constraint_type
-            FROM dba_constraints
-            WHERE owner = p_source_owner
-            AND table_name = p_source_table
-            AND constraint_type IN ('C', 'U')
-            AND constraint_name NOT LIKE 'SYS_%'  -- Skip system-generated constraints
-            ORDER BY constraint_type, constraint_name
+            SELECT c.constraint_name, c.constraint_type, c.search_condition
+            FROM dba_constraints c
+            WHERE c.owner = p_source_owner
+            AND c.table_name = p_source_table
+            AND c.constraint_type IN ('C', 'U')
+            ORDER BY c.constraint_type, c.constraint_name
         ) LOOP
+            -- Skip NOT NULL constraints (they're already in column definitions)
+            -- NOT NULL constraints have search_condition like "column_name" IS NOT NULL
+            IF con.constraint_type = 'C' AND
+               UPPER(con.search_condition) LIKE '%IS NOT NULL%' THEN
+                CONTINUE;  -- Skip NOT NULL, already in table definition
+            END IF;
+
             v_step := v_step + 1;
             v_start := SYSTIMESTAMP;
 
