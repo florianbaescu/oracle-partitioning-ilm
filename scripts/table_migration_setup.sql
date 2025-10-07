@@ -188,6 +188,7 @@ CREATE TABLE cmr.dwh_migration_analysis (
     warnings            CLOB,                  -- Non-blocking warnings
 
     analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
+    analysis_duration_seconds NUMBER,          -- Duration of analysis in seconds
 
     CONSTRAINT fk_mig_analysis_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
 );

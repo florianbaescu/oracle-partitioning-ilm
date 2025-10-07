@@ -2559,7 +2559,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_complexity_factors VARCHAR2(2000);
         v_estimated_downtime NUMBER;
         v_date_columns SYS.ODCIVARCHAR2LIST;
+        v_start_time TIMESTAMP;
+        v_end_time TIMESTAMP;
+        v_duration_seconds NUMBER;
     BEGIN
+        v_start_time := SYSTIMESTAMP;
         -- Get task details
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
@@ -3231,6 +3235,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_space_savings_mb := 0;
         END IF;
 
+        -- Calculate duration
+        v_end_time := SYSTIMESTAMP;
+        v_duration_seconds := EXTRACT(DAY FROM (v_end_time - v_start_time)) * 86400 +
+                              EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600 +
+                              EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
+                              EXTRACT(SECOND FROM (v_end_time - v_start_time));
+
+        DBMS_OUTPUT.PUT_LINE('Analysis completed in ' || ROUND(v_duration_seconds, 2) || ' seconds');
+
         -- Store or update analysis results (supports rerun)
         MERGE INTO cmr.dwh_migration_analysis a
         USING (SELECT p_task_id AS task_id FROM DUAL) src
@@ -3263,7 +3276,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
                 warnings = v_warnings,
-                analysis_date = SYSTIMESTAMP
+                analysis_date = SYSTIMESTAMP,
+                analysis_duration_seconds = v_duration_seconds
         WHEN NOT MATCHED THEN
             INSERT (
                 task_id,
@@ -3293,7 +3307,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 dependent_objects,
                 blocking_issues,
                 warnings,
-                analysis_date
+                analysis_date,
+                analysis_duration_seconds
             ) VALUES (
                 p_task_id,
                 v_num_rows,
@@ -3322,7 +3337,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_dependent_objects,
                 v_blocking_issues,
                 v_warnings,
-                SYSTIMESTAMP
+                SYSTIMESTAMP,
+                v_duration_seconds
             );
 
         -- Get analysis_id for newly inserted or updated record
@@ -3373,6 +3389,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     END IF;
                 EXCEPTION WHEN OTHERS THEN NULL; END;
 
+                -- Calculate duration even on error
+                v_end_time := SYSTIMESTAMP;
+                v_duration_seconds := EXTRACT(DAY FROM (v_end_time - v_start_time)) * 86400 +
+                                      EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600 +
+                                      EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
+                                      EXTRACT(SECOND FROM (v_end_time - v_start_time));
+
                 -- Build error details as JSON
                 DBMS_LOB.CREATETEMPORARY(v_error_json, TRUE, DBMS_LOB.SESSION);
                 DBMS_LOB.APPEND(v_error_json, '[{"type":"ERROR","issue":"Analysis failed with ' ||
@@ -3386,16 +3409,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 WHEN MATCHED THEN
                     UPDATE SET
                         warnings = v_error_json,
-                        analysis_date = SYSTIMESTAMP
+                        analysis_date = SYSTIMESTAMP,
+                        analysis_duration_seconds = v_duration_seconds
                 WHEN NOT MATCHED THEN
                     INSERT (
                         task_id,
                         warnings,
-                        analysis_date
+                        analysis_date,
+                        analysis_duration_seconds
                     ) VALUES (
                         p_task_id,
                         v_error_json,
-                        SYSTIMESTAMP
+                        SYSTIMESTAMP,
+                        v_duration_seconds
                     );
 
                 -- Update task status
