@@ -52,6 +52,22 @@ END pck_dwh_table_migration_executor;
 CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
     -- ==========================================================================
+    -- Private Helper Function - Get Config Value
+    -- ==========================================================================
+
+    FUNCTION get_config(p_config_key VARCHAR2) RETURN VARCHAR2 AS
+        v_value VARCHAR2(4000);
+    BEGIN
+        SELECT config_value INTO v_value
+        FROM cmr.dwh_ilm_config
+        WHERE config_key = p_config_key;
+        RETURN v_value;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+    END get_config;
+
+    -- ==========================================================================
     -- Private Logging Procedure
     -- ==========================================================================
 
@@ -296,7 +312,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Add PARALLEL if not present
                 IF INSTR(UPPER(v_sql), ' PARALLEL ') = 0 THEN
                     v_sql := REPLACE(v_sql, ';',
-                            ' PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                            ' PARALLEL ' || get_config('MIGRATION_PARALLEL_DEGREE') || ';');
                 END IF;
 
                 EXECUTE IMMEDIATE v_sql;
@@ -844,14 +860,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_start := SYSTIMESTAMP;
 
         -- Try with PRIMARY KEY first
+        -- CONS_USE_PK = 1, CONS_USE_ROWID = 2 (DBMS_REDEFINITION constants)
         BEGIN
             IF NOT p_simulate THEN
                 EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
-                    'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_PK); END;'
-                    USING v_task.source_owner, v_task.source_table;
+                    'uname => :1, tname => :2, options_flag => :3); END;'
+                    USING v_task.source_owner, v_task.source_table, 1; -- CONS_USE_PK = 1
             END IF;
             v_has_pk := TRUE;
-            v_redef_option := DBMS_REDEFINITION.CONS_USE_PK;
+            v_redef_option := 1; -- DBMS_REDEFINITION.CONS_USE_PK
 
             IF p_simulate THEN
                 DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
@@ -889,11 +906,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 BEGIN
                     IF NOT p_simulate THEN
                         EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
-                            'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_ROWID); END;'
-                            USING v_task.source_owner, v_task.source_table;
+                            'uname => :1, tname => :2, options_flag => :3); END;'
+                            USING v_task.source_owner, v_task.source_table, 2; -- CONS_USE_ROWID = 2
                     END IF;
                     v_has_pk := FALSE;
-                    v_redef_option := DBMS_REDEFINITION.CONS_USE_ROWID;
+                    v_redef_option := 2; -- DBMS_REDEFINITION.CONS_USE_ROWID
 
                     IF p_simulate THEN
                         DBMS_OUTPUT.PUT_LINE('Option: CONS_USE_ROWID (ROWID-based redefinition)');
@@ -1019,12 +1036,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DECLARE
             v_num_errors PLS_INTEGER;
         BEGIN
+            -- CONS_ORIG_PARAMS = 1 (use original parameters for indexes)
             EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS(' ||
                 'uname => :1, orig_table => :2, int_table => :3, ' ||
-                'copy_indexes => DBMS_REDEFINITION.CONS_ORIG_PARAMS, ' ||
+                'copy_indexes => :4, ' ||
                 'copy_triggers => TRUE, copy_constraints => TRUE, copy_privileges => TRUE, ' ||
-                'ignore_errors => FALSE, num_errors => :4); END;'
-                USING v_task.source_owner, v_task.source_table, v_interim_table, OUT v_num_errors;
+                'ignore_errors => FALSE, num_errors => :5); END;'
+                USING v_task.source_owner, v_task.source_table, v_interim_table, 1, OUT v_num_errors;
 
             IF v_num_errors > 0 THEN
                 DBMS_OUTPUT.PUT_LINE('  WARNING: ' || v_num_errors || ' errors copying dependents (check DBA_REDEFINITION_ERRORS)');
@@ -1448,7 +1466,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             COMMIT;
 
             -- Create backup if enabled
-            IF get_dwh_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
+            IF get_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
                 create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
             END IF;
         END IF;
@@ -1475,7 +1493,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END IF;
 
             -- Validate migration
-            IF get_dwh_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
+            IF get_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
                 validate_migration(p_task_id);
             END IF;
 
@@ -1493,7 +1511,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('Migration Completed Successfully');
-            DBMS_OUTPUT.PUT_LINE('Duration: ' || ROUND((v_end_time - v_start_time) * 24 * 60, 2) || ' minutes');
+            DBMS_OUTPUT.PUT_LINE('Duration: ' ||
+                ROUND(EXTRACT(DAY FROM (v_end_time - v_start_time)) * 24 * 60 +
+                      EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 60 +
+                      EXTRACT(MINUTE FROM (v_end_time - v_start_time)) +
+                      EXTRACT(SECOND FROM (v_end_time - v_start_time)) / 60, 2) || ' minutes');
             DBMS_OUTPUT.PUT_LINE('Source size: ' || v_source_size || ' MB');
             DBMS_OUTPUT.PUT_LINE('Target size: ' || v_target_size || ' MB');
             DBMS_OUTPUT.PUT_LINE('Space saved: ' || (v_source_size - v_target_size) || ' MB');
@@ -1537,7 +1559,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
     PROCEDURE execute_all_ready_tasks(
         p_project_id NUMBER DEFAULT NULL,
-        p_max_tasks NUMBER DEFAULT NULL
+        p_max_tasks NUMBER DEFAULT NULL,
+        p_simulate BOOLEAN DEFAULT FALSE
     ) AS
         v_count NUMBER := 0;
     BEGIN
@@ -1550,7 +1573,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             ORDER BY task_id
         ) LOOP
             BEGIN
-                execute_migration(task.task_id);
+                execute_migration(task.task_id, p_simulate);
                 v_count := v_count + 1;
 
                 EXIT WHEN p_max_tasks IS NOT NULL AND v_count >= p_max_tasks;
