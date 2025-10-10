@@ -33,7 +33,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
     );
 
     -- Post-migration tasks
-    PROCEDURE apply_dwh_ilm_policies(
+    PROCEDURE apply_ilm_policies(
         p_task_id NUMBER
     );
 
@@ -1488,8 +1488,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             v_target_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
             -- Apply ILM policies if requested
-            IF v_task.apply_dwh_ilm_policies = 'Y' THEN
-                apply_dwh_ilm_policies(p_task_id);
+            IF v_task.apply_ilm_policies = 'Y' THEN
+                apply_ilm_policies(p_task_id);
             END IF;
 
             -- Validate migration
@@ -1591,7 +1591,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- Post-Migration
     -- ==========================================================================
 
-    PROCEDURE apply_dwh_ilm_policies(
+    PROCEDURE apply_ilm_policies(
         p_task_id NUMBER
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
@@ -1622,7 +1622,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             DBMS_OUTPUT.PUT_LINE('Warning: ILM template not found: ' || v_task.ilm_policy_template);
-    END apply_dwh_ilm_policies;
+    END apply_ilm_policies;
 
 
     PROCEDURE validate_migration(
