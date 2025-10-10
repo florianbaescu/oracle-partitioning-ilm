@@ -184,33 +184,103 @@ CREATE TABLE cmr.dwh_ilm_config (
     modified_date       TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 
--- Insert default configuration
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('ENABLE_AUTO_EXECUTION', 'Y', 'Enable automatic policy execution via scheduler');
+-- Insert default configuration (using MERGE for rerunnable script)
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ENABLE_AUTO_EXECUTION' AS config_key, 'Y' AS config_value,
+              'Enable automatic policy execution via scheduler' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('EXECUTION_WINDOW_START', '22:00', 'Start time for ILM operations (HH24:MI)');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'EXECUTION_WINDOW_START' AS config_key, '22:00' AS config_value,
+              'Start time for ILM operations (HH24:MI)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('EXECUTION_WINDOW_END', '06:00', 'End time for ILM operations (HH24:MI)');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'EXECUTION_WINDOW_END' AS config_key, '06:00' AS config_value,
+              'End time for ILM operations (HH24:MI)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('MAX_CONCURRENT_OPERATIONS', '4', 'Maximum number of concurrent partition operations');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'MAX_CONCURRENT_OPERATIONS' AS config_key, '4' AS config_value,
+              'Maximum number of concurrent partition operations' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('ACCESS_TRACKING_ENABLED', 'Y', 'Enable partition access tracking');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ACCESS_TRACKING_ENABLED' AS config_key, 'Y' AS config_value,
+              'Enable partition access tracking' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('HOT_THRESHOLD_DAYS', '90', 'Days threshold for HOT classification');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'HOT_THRESHOLD_DAYS' AS config_key, '90' AS config_value,
+              'Days threshold for HOT classification' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('WARM_THRESHOLD_DAYS', '365', 'Days threshold for WARM classification');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'WARM_THRESHOLD_DAYS' AS config_key, '365' AS config_value,
+              'Days threshold for WARM classification' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('COLD_THRESHOLD_DAYS', '1095', 'Days threshold for COLD classification (3 years)');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'COLD_THRESHOLD_DAYS' AS config_key, '1095' AS config_value,
+              'Days threshold for COLD classification (3 years)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
-INSERT INTO cmr.dwh_ilm_config (config_key, config_value, description) VALUES
-    ('LOG_RETENTION_DAYS', '365', 'Days to retain execution logs');
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'LOG_RETENTION_DAYS' AS config_key, '365' AS config_value,
+              'Days to retain execution logs' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+-- Table migration framework configuration
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'MIGRATION_PARALLEL_DEGREE' AS config_key, '4' AS config_value,
+              'Default parallel degree for table migration operations' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'MIGRATION_BACKUP_ENABLED' AS config_key, 'Y' AS config_value,
+              'Create backup table before migration' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'MIGRATION_VALIDATE_ENABLED' AS config_key, 'Y' AS config_value,
+              'Validate row counts after migration' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
 
 COMMIT;
 
