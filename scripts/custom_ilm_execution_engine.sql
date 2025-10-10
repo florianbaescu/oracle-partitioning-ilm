@@ -588,7 +588,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         END IF;
 
         -- Get max concurrent operations
-        v_max_concurrent := TO_NUMBER(get_ilm_config('MAX_CONCURRENT_OPERATIONS'));
+        v_max_concurrent := TO_NUMBER(get_dwh_ilm_config('MAX_CONCURRENT_OPERATIONS'));
 
         -- Execute pending actions by policy priority
         FOR pol IN (

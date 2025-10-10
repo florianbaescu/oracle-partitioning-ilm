@@ -296,7 +296,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Add PARALLEL if not present
                 IF INSTR(UPPER(v_sql), ' PARALLEL ') = 0 THEN
                     v_sql := REPLACE(v_sql, ';',
-                            ' PARALLEL ' || get_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                            ' PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
                 END IF;
 
                 EXECUTE IMMEDIATE v_sql;
@@ -1448,7 +1448,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             COMMIT;
 
             -- Create backup if enabled
-            IF get_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
+            IF get_dwh_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
                 create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
             END IF;
         END IF;
@@ -1475,7 +1475,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END IF;
 
             -- Validate migration
-            IF get_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
+            IF get_dwh_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
                 validate_migration(p_task_id);
             END IF;
 
