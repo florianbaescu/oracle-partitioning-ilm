@@ -846,11 +846,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Try with PRIMARY KEY first
         BEGIN
             IF NOT p_simulate THEN
-                DBMS_REDEFINITION.CAN_REDEF_TABLE(
-                    uname => v_task.source_owner,
-                    tname => v_task.source_table,
-                    options_flag => DBMS_REDEFINITION.CONS_USE_PK
-                );
+                EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
+                    'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_PK); END;'
+                    USING v_task.source_owner, v_task.source_table;
             END IF;
             v_has_pk := TRUE;
             v_redef_option := DBMS_REDEFINITION.CONS_USE_PK;
@@ -867,6 +865,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END IF;
         EXCEPTION
             WHEN OTHERS THEN
+                -- Check if privilege error first
+                IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION.CAN_REDEF_TABLE');
+                    DBMS_OUTPUT.PUT_LINE('       Required: EXECUTE privilege on DBMS_REDEFINITION package');
+                    DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
+                    IF NOT p_simulate THEN
+                        log_step(p_task_id, v_step, 'Cannot redefine - no privileges', 'VALIDATE', NULL,
+                                'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                    END IF;
+                    migrate_using_ctas(p_task_id, p_simulate);
+                    RETURN;
+                END IF;
+
                 -- No PK or PK-based redef failed, try ROWID-based
                 IF p_simulate THEN
                     DBMS_OUTPUT.PUT_LINE('Step 1: VERIFY TABLE CAN BE REDEFINED');
@@ -877,11 +888,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 BEGIN
                     IF NOT p_simulate THEN
-                        DBMS_REDEFINITION.CAN_REDEF_TABLE(
-                            uname => v_task.source_owner,
-                            tname => v_task.source_table,
-                            options_flag => DBMS_REDEFINITION.CONS_USE_ROWID
-                        );
+                        EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
+                            'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_ROWID); END;'
+                            USING v_task.source_owner, v_task.source_table;
                     END IF;
                     v_has_pk := FALSE;
                     v_redef_option := DBMS_REDEFINITION.CONS_USE_ROWID;
@@ -902,11 +911,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 EXCEPTION
                     WHEN OTHERS THEN
                         -- Both PK and ROWID failed
-                        DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
-                        DBMS_OUTPUT.PUT_LINE('       Common reasons:');
-                        DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
-                        DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
-                        DBMS_OUTPUT.PUT_LINE('       - Table has unsupported features');
+                        IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                            DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION');
+                            DBMS_OUTPUT.PUT_LINE('       Required: EXECUTE privilege on DBMS_REDEFINITION package');
+                        ELSE
+                            DBMS_OUTPUT.PUT_LINE('ERROR: Table cannot be redefined online: ' || SQLERRM);
+                            DBMS_OUTPUT.PUT_LINE('       Common reasons:');
+                            DBMS_OUTPUT.PUT_LINE('       - Unsupported column types (LONG, BFILE, etc.)');
+                            DBMS_OUTPUT.PUT_LINE('       - Not running Enterprise Edition');
+                            DBMS_OUTPUT.PUT_LINE('       - Table has unsupported features');
+                        END IF;
                         DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
 
                         IF NOT p_simulate THEN
@@ -970,20 +984,34 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         -- Step 3: Start redefinition
         v_start := SYSTIMESTAMP;
-        DBMS_REDEFINITION.START_REDEF_TABLE(
-            uname => v_task.source_owner,
-            orig_table => v_task.source_table,
-            int_table => v_interim_table,
-            options_flag => v_redef_option  -- Use determined option (PK or ROWID)
-        );
-        log_step(p_task_id, v_step, 'Start online redefinition', 'REDEFINE', NULL,
-                'SUCCESS', v_start, SYSTIMESTAMP);
+        BEGIN
+            EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.START_REDEF_TABLE(' ||
+                'uname => :1, orig_table => :2, int_table => :3, options_flag => :4); END;'
+                USING v_task.source_owner, v_task.source_table, v_interim_table, v_redef_option;
 
-        IF v_has_pk THEN
-            DBMS_OUTPUT.PUT_LINE('  Started online redefinition using PRIMARY KEY (table remains accessible)');
-        ELSE
-            DBMS_OUTPUT.PUT_LINE('  Started online redefinition using ROWID (table remains accessible)');
-        END IF;
+            log_step(p_task_id, v_step, 'Start online redefinition', 'REDEFINE', NULL,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+
+            IF v_has_pk THEN
+                DBMS_OUTPUT.PUT_LINE('  Started online redefinition using PRIMARY KEY (table remains accessible)');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  Started online redefinition using ROWID (table remains accessible)');
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                    -- Insufficient privileges or PL/SQL object not found
+                    DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION.START_REDEF_TABLE');
+                    DBMS_OUTPUT.PUT_LINE('       Required: EXECUTE privilege on DBMS_REDEFINITION package');
+                    DBMS_OUTPUT.PUT_LINE('       Falling back to CTAS method...');
+                    log_step(p_task_id, v_step, 'Start online redefinition - no privileges', 'REDEFINE', NULL,
+                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                    migrate_using_ctas(p_task_id, p_simulate);
+                    RETURN;
+                ELSE
+                    RAISE;
+                END IF;
+        END;
         v_step := v_step + 10;
 
         -- Step 4: Copy dependent objects (indexes, constraints, triggers)
@@ -991,17 +1019,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DECLARE
             v_num_errors PLS_INTEGER;
         BEGIN
-            DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS(
-                uname => v_task.source_owner,
-                orig_table => v_task.source_table,
-                int_table => v_interim_table,
-                copy_indexes => DBMS_REDEFINITION.CONS_ORIG_PARAMS,
-                copy_triggers => TRUE,
-                copy_constraints => TRUE,
-                copy_privileges => TRUE,
-                ignore_errors => FALSE,
-                num_errors => v_num_errors
-            );
+            EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS(' ||
+                'uname => :1, orig_table => :2, int_table => :3, ' ||
+                'copy_indexes => DBMS_REDEFINITION.CONS_ORIG_PARAMS, ' ||
+                'copy_triggers => TRUE, copy_constraints => TRUE, copy_privileges => TRUE, ' ||
+                'ignore_errors => FALSE, num_errors => :4); END;'
+                USING v_task.source_owner, v_task.source_table, v_interim_table, OUT v_num_errors;
 
             IF v_num_errors > 0 THEN
                 DBMS_OUTPUT.PUT_LINE('  WARNING: ' || v_num_errors || ' errors copying dependents (check DBA_REDEFINITION_ERRORS)');
@@ -1011,19 +1034,36 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             log_step(p_task_id, v_step, 'Copy dependent objects', 'COPY', NULL,
                     'SUCCESS', v_start, SYSTIMESTAMP);
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS');
+                    log_step(p_task_id, v_step, 'Copy dependent objects - no privileges', 'COPY', NULL,
+                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                END IF;
+                RAISE;
         END;
         v_step := v_step + 10;
 
         -- Step 5: Synchronize interim table (captures changes during migration)
         v_start := SYSTIMESTAMP;
-        DBMS_REDEFINITION.SYNC_INTERIM_TABLE(
-            uname => v_task.source_owner,
-            orig_table => v_task.source_table,
-            int_table => v_interim_table
-        );
-        log_step(p_task_id, v_step, 'Synchronize interim table', 'SYNC', NULL,
-                'SUCCESS', v_start, SYSTIMESTAMP);
-        DBMS_OUTPUT.PUT_LINE('  Synchronized interim table with ongoing changes');
+        BEGIN
+            EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.SYNC_INTERIM_TABLE(' ||
+                'uname => :1, orig_table => :2, int_table => :3); END;'
+                USING v_task.source_owner, v_task.source_table, v_interim_table;
+
+            log_step(p_task_id, v_step, 'Synchronize interim table', 'SYNC', NULL,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+            DBMS_OUTPUT.PUT_LINE('  Synchronized interim table with ongoing changes');
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION.SYNC_INTERIM_TABLE');
+                    log_step(p_task_id, v_step, 'Sync interim table - no privileges', 'SYNC', NULL,
+                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                END IF;
+                RAISE;
+        END;
         v_step := v_step + 10;
 
         -- Step 6: Gather statistics on interim table
@@ -1041,14 +1081,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Step 7: Finish redefinition (final sync and atomic swap)
         v_start := SYSTIMESTAMP;
         DBMS_OUTPUT.PUT_LINE('  Starting final sync and swap (brief exclusive lock)...');
-        DBMS_REDEFINITION.FINISH_REDEF_TABLE(
-            uname => v_task.source_owner,
-            orig_table => v_task.source_table,
-            int_table => v_interim_table
-        );
-        log_step(p_task_id, v_step, 'Finish redefinition (atomic swap)', 'FINISH', NULL,
-                'SUCCESS', v_start, SYSTIMESTAMP);
-        DBMS_OUTPUT.PUT_LINE('  Redefinition completed - table swapped atomically');
+        BEGIN
+            EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.FINISH_REDEF_TABLE(' ||
+                'uname => :1, orig_table => :2, int_table => :3); END;'
+                USING v_task.source_owner, v_task.source_table, v_interim_table;
+
+            log_step(p_task_id, v_step, 'Finish redefinition (atomic swap)', 'FINISH', NULL,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+            DBMS_OUTPUT.PUT_LINE('  Redefinition completed - table swapped atomically');
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: No privileges to execute DBMS_REDEFINITION.FINISH_REDEF_TABLE');
+                    log_step(p_task_id, v_step, 'Finish redefinition - no privileges', 'FINISH', NULL,
+                            'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+                END IF;
+                RAISE;
+        END;
         v_step := v_step + 10;
 
         -- Update task - interim table becomes the backup
@@ -1067,14 +1116,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             ROLLBACK;
             -- Attempt to abort redefinition
             BEGIN
-                DBMS_REDEFINITION.ABORT_REDEF_TABLE(
-                    uname => v_task.source_owner,
-                    orig_table => v_task.source_table,
-                    int_table => v_interim_table
-                );
+                EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.ABORT_REDEF_TABLE(' ||
+                    'uname => :1, orig_table => :2, int_table => :3); END;'
+                    USING v_task.source_owner, v_task.source_table, v_interim_table;
                 DBMS_OUTPUT.PUT_LINE('Redefinition aborted due to error');
             EXCEPTION
                 WHEN OTHERS THEN
+                    IF SQLCODE = -1031 OR SQLCODE = -6550 THEN
+                        DBMS_OUTPUT.PUT_LINE('WARNING: No privileges to execute DBMS_REDEFINITION.ABORT_REDEF_TABLE');
+                    END IF;
                     NULL; -- Already aborted or not started
             END;
 
