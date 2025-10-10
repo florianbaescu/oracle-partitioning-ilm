@@ -55,7 +55,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- Private Helper Function - Get Config Value
     -- ==========================================================================
 
-    FUNCTION get_config(p_config_key VARCHAR2) RETURN VARCHAR2 AS
+    FUNCTION get_dwh_ilm_config(p_config_key VARCHAR2) RETURN VARCHAR2 AS
         v_value VARCHAR2(4000);
     BEGIN
         SELECT config_value INTO v_value
@@ -65,7 +65,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             RETURN NULL;
-    END get_config;
+    END get_dwh_ilm_config;
 
     -- ==========================================================================
     -- Private Logging Procedure
@@ -312,7 +312,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Add PARALLEL if not present
                 IF INSTR(UPPER(v_sql), ' PARALLEL ') = 0 THEN
                     v_sql := REPLACE(v_sql, ';',
-                            ' PARALLEL ' || get_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                            ' PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
                 END IF;
 
                 EXECUTE IMMEDIATE v_sql;
@@ -1466,7 +1466,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             COMMIT;
 
             -- Create backup if enabled
-            IF get_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
+            IF get_dwh_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
                 create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
             END IF;
         END IF;
@@ -1493,7 +1493,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END IF;
 
             -- Validate migration
-            IF get_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
+            IF get_dwh_ilm_config('MIGRATION_VALIDATE_ENABLED') = 'Y' THEN
                 validate_migration(p_task_id);
             END IF;
 
