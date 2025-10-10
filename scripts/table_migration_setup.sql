@@ -610,30 +610,32 @@ COMMENT ON VIEW cmr.dwh_v_date_column_analysis IS 'Comprehensive date column ana
 
 -- -----------------------------------------------------------------------------
 -- Add migration configuration to ILM config (using MERGE for rerunnable script)
+-- NOTE: These configurations are also defined in custom_ilm_setup.sql
+--       This section ensures they exist even if custom_ilm_setup.sql is not run
 -- -----------------------------------------------------------------------------
 
-MERGE INTO ilm_config t
+MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'MIGRATION_BACKUP_ENABLED' AS config_key FROM DUAL) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('MIGRATION_BACKUP_ENABLED', 'Y', 'Create backup tables before migration');
 
-MERGE INTO ilm_config t
+MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'MIGRATION_VALIDATE_ENABLED' AS config_key FROM DUAL) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('MIGRATION_VALIDATE_ENABLED', 'Y', 'Validate data after migration');
 
-MERGE INTO ilm_config t
+MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'MIGRATION_AUTO_ILM_ENABLED' AS config_key FROM DUAL) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('MIGRATION_AUTO_ILM_ENABLED', 'Y', 'Automatically create ILM policies after migration');
 
-MERGE INTO ilm_config t
+MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'MIGRATION_PARALLEL_DEGREE' AS config_key FROM DUAL) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
