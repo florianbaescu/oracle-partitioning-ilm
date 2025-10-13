@@ -144,8 +144,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_storage_clause VARCHAR2(500);
         v_requires_conversion CHAR(1);
         v_date_column VARCHAR2(128);
+        v_initial_partition_clause VARCHAR2(1000);
+        v_min_date DATE;
+        v_starting_boundary VARCHAR2(100);
     BEGIN
-        -- Check if date conversion is required
+        -- Check if date conversion is required and get date range info
         BEGIN
             SELECT requires_conversion, date_column_name
             INTO v_requires_conversion, v_date_column
@@ -223,11 +226,50 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         p_ddl := p_ddl || '(' || CHR(10) || v_columns || CHR(10) || ')' || CHR(10);
         p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
 
+        -- Build initial partition clause
         IF p_task.interval_clause IS NOT NULL THEN
+            -- INTERVAL partitioning: Cannot use MAXVALUE
+            -- Get minimum date from source table to create starting partition
             p_ddl := p_ddl || 'INTERVAL (' || p_task.interval_clause || ')' || CHR(10);
+
+            BEGIN
+                -- Get minimum date from source table
+                EXECUTE IMMEDIATE 'SELECT MIN(' || p_task.partition_key || ') FROM ' ||
+                    p_task.source_owner || '.' || p_task.source_table
+                    INTO v_min_date;
+
+                IF v_min_date IS NOT NULL THEN
+                    -- Round down to first day of month/year depending on interval
+                    IF UPPER(p_task.interval_clause) LIKE '%MONTH%' THEN
+                        v_min_date := TRUNC(v_min_date, 'MM');
+                    ELSIF UPPER(p_task.interval_clause) LIKE '%YEAR%' THEN
+                        v_min_date := TRUNC(v_min_date, 'YYYY');
+                    ELSIF UPPER(p_task.interval_clause) LIKE '%DAY%' THEN
+                        v_min_date := TRUNC(v_min_date);
+                    ELSE
+                        -- Default: truncate to day
+                        v_min_date := TRUNC(v_min_date);
+                    END IF;
+
+                    v_starting_boundary := 'TO_DATE(''' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')';
+                ELSE
+                    -- No data yet, use current date
+                    v_starting_boundary := 'SYSDATE';
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Fallback: use current date
+                    v_starting_boundary := 'SYSDATE';
+            END;
+
+            v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (' || v_starting_boundary || '))';
+
+        ELSE
+            -- Regular RANGE partitioning: MAXVALUE is allowed
+            v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (MAXVALUE))';
         END IF;
 
-        p_ddl := p_ddl || '(PARTITION p_initial VALUES LESS THAN (MAXVALUE))';
+        p_ddl := p_ddl || v_initial_partition_clause;
         p_ddl := p_ddl || v_storage_clause;
 
     END build_partition_ddl;
