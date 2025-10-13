@@ -3475,16 +3475,18 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         END IF;
 
         -- Check if table supports online redefinition (Enterprise Edition only)
+        -- Using EXECUTE IMMEDIATE to defer privilege check to runtime
+        -- This allows package to compile even without EXECUTE grant on DBMS_REDEFINITION
         DBMS_OUTPUT.PUT_LINE('');
         DBMS_OUTPUT.PUT_LINE('Checking online redefinition capability...');
 
         BEGIN
             -- Try CONS_USE_PK first (Primary Key-based)
-            DBMS_REDEFINITION.CAN_REDEF_TABLE(
-                uname => v_task.source_owner,
-                tname => v_task.source_table,
-                options_flag => DBMS_REDEFINITION.CONS_USE_PK
-            );
+            -- Using EXECUTE IMMEDIATE to avoid compile-time grant dependency
+            EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
+                'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_PK); END;'
+                USING v_task.source_owner, v_task.source_table;
+
             v_supports_online_redef := 'Y';
             v_online_redef_method := 'CONS_USE_PK';
             DBMS_OUTPUT.PUT_LINE('  ✓ Table supports ONLINE redefinition using PRIMARY KEY');
@@ -3492,11 +3494,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHEN OTHERS THEN
                 -- No PK or PK-based failed, try ROWID-based
                 BEGIN
-                    DBMS_REDEFINITION.CAN_REDEF_TABLE(
-                        uname => v_task.source_owner,
-                        tname => v_task.source_table,
-                        options_flag => DBMS_REDEFINITION.CONS_USE_ROWID
-                    );
+                    -- Try CONS_USE_ROWID (for tables without primary key)
+                    EXECUTE IMMEDIATE 'BEGIN DBMS_REDEFINITION.CAN_REDEF_TABLE(' ||
+                        'uname => :1, tname => :2, options_flag => DBMS_REDEFINITION.CONS_USE_ROWID); END;'
+                        USING v_task.source_owner, v_task.source_table;
+
                     v_supports_online_redef := 'Y';
                     v_online_redef_method := 'CONS_USE_ROWID';
                     DBMS_OUTPUT.PUT_LINE('  ✓ Table supports ONLINE redefinition using ROWID (no PK)');
@@ -3504,8 +3506,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     WHEN OTHERS THEN
                         v_supports_online_redef := 'N';
                         v_online_redef_method := NULL;
-                        DBMS_OUTPUT.PUT_LINE('  ✗ Table does NOT support online redefinition');
-                        DBMS_OUTPUT.PUT_LINE('    Reason: ' || SQLERRM);
+                        IF SQLCODE = -1031 THEN
+                            DBMS_OUTPUT.PUT_LINE('  ✗ Insufficient privileges to check online redefinition');
+                            DBMS_OUTPUT.PUT_LINE('    Grant needed: GRANT EXECUTE ON DBMS_REDEFINITION TO CMR;');
+                        ELSE
+                            DBMS_OUTPUT.PUT_LINE('  ✗ Table does NOT support online redefinition');
+                            DBMS_OUTPUT.PUT_LINE('    Reason: ' || SQLERRM);
+                        END IF;
                 END;
         END;
 
