@@ -339,7 +339,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 -- Generate temporary index name to avoid conflict with existing index
                 -- (Original table still exists at this point)
-                v_temp_index_name := SUBSTR(idx.index_name, 1, 124) || '_TMP';
+                v_temp_index_name := SUBSTR(idx.index_name, 1, 123) || '_MIGR';
 
                 -- Replace index name in CREATE INDEX statement
                 v_create_pos := INSTR(UPPER(v_index_ddl), 'CREATE');
@@ -606,13 +606,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         v_new_table := v_task.source_table || '_PART';
 
-        -- Drop temporary indexes (with _TMP suffix) if they exist
+        -- Drop temporary indexes (with _MIGR suffix) if they exist
         FOR idx IN (
             SELECT index_name
             FROM dba_indexes
             WHERE table_owner = v_task.source_owner
             AND table_name = v_new_table
-            AND index_name LIKE '%\_TMP' ESCAPE '\'
+            AND index_name LIKE '%\_MIGR' ESCAPE '\'
         ) LOOP
             BEGIN
                 v_sql := 'DROP INDEX ' || v_task.source_owner || '.' || idx.index_name;
@@ -917,7 +917,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('');
             DBMS_OUTPUT.PUT_LINE('Step 7: RENAME INDEXES');
             DBMS_OUTPUT.PUT_LINE('----------------------------------------');
-            DBMS_OUTPUT.PUT_LINE('(Indexes with _TMP suffix will be renamed to original names)');
+            DBMS_OUTPUT.PUT_LINE('(Indexes with _MIGR suffix will be renamed to original names)');
             DBMS_OUTPUT.PUT_LINE('');
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
@@ -948,11 +948,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('Renaming indexes to original names...');
 
             FOR idx IN (
-                SELECT index_name, REPLACE(index_name, '_TMP', '') AS original_name
+                SELECT index_name, REPLACE(index_name, '_MIGR', '') AS original_name
                 FROM dba_indexes
                 WHERE table_owner = v_task.source_owner
                 AND table_name = v_task.source_table
-                AND index_name LIKE '%\_TMP' ESCAPE '\'
+                AND index_name LIKE '%\_MIGR' ESCAPE '\'
             ) LOOP
                 BEGIN
                     v_sql := 'ALTER INDEX ' || v_task.source_owner || '.' || idx.index_name ||
