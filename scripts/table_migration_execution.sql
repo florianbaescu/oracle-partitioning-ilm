@@ -585,7 +585,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_task cmr.dwh_migration_tasks%ROWTYPE;
         v_new_table VARCHAR2(128);
         v_sql VARCHAR2(4000);
+        v_start TIMESTAMP;
+        v_cleanup_summary VARCHAR2(4000);
+        v_index_count NUMBER := 0;
+        v_table_dropped BOOLEAN := FALSE;
     BEGIN
+        v_start := SYSTIMESTAMP;
         DBMS_OUTPUT.PUT_LINE('Cleaning up failed migration...');
 
         -- Get task information
@@ -612,6 +617,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             BEGIN
                 v_sql := 'DROP INDEX ' || v_task.source_owner || '.' || idx.index_name;
                 EXECUTE IMMEDIATE v_sql;
+                v_index_count := v_index_count + 1;
                 DBMS_OUTPUT.PUT_LINE('  Dropped index: ' || idx.index_name);
             EXCEPTION
                 WHEN OTHERS THEN
@@ -623,6 +629,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         BEGIN
             v_sql := 'DROP TABLE ' || v_task.source_owner || '.' || v_new_table || ' PURGE';
             EXECUTE IMMEDIATE v_sql;
+            v_table_dropped := TRUE;
             DBMS_OUTPUT.PUT_LINE('  Dropped table: ' || v_new_table);
         EXCEPTION
             WHEN OTHERS THEN
@@ -644,6 +651,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             WHEN OTHERS THEN
                 DBMS_OUTPUT.PUT_LINE('  WARNING: Could not update task status: ' || SQLERRM);
         END;
+
+        -- Build cleanup summary
+        v_cleanup_summary := 'Cleanup completed: ';
+        IF v_table_dropped THEN
+            v_cleanup_summary := v_cleanup_summary || 'dropped table ' || v_new_table;
+        ELSE
+            v_cleanup_summary := v_cleanup_summary || 'no table to drop';
+        END IF;
+
+        IF v_index_count > 0 THEN
+            v_cleanup_summary := v_cleanup_summary || ', dropped ' || v_index_count || ' temporary index(es)';
+        ELSE
+            v_cleanup_summary := v_cleanup_summary || ', no indexes to drop';
+        END IF;
+
+        -- Log cleanup operation
+        log_step(p_task_id, 9999, 'Cleanup failed migration', 'CLEANUP',
+                v_cleanup_summary, 'SUCCESS', v_start, SYSTIMESTAMP);
 
         DBMS_OUTPUT.PUT_LINE('Cleanup completed');
     END cleanup_failed_migration;
