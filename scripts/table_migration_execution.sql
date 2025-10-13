@@ -400,8 +400,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Add PARALLEL if not present
                 IF INSTR(UPPER(v_sql), ' PARALLEL') = 0 THEN
                     v_sql := REPLACE(v_sql, ';',
-                            CHR(10) || '  PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                            CHR(10) || '  PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE'));
                 END IF;
+
+                -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
+                v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
 
                 EXECUTE IMMEDIATE v_sql;
 
@@ -501,6 +504,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 ' ' || p_source_table || ' ',
                                 ' ' || p_target_table || ' ');
 
+                -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
+                v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
+
                 EXECUTE IMMEDIATE v_sql;
 
                 log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
@@ -548,6 +554,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 ' ' || p_source_table || ' ',
                                 ' ' || p_target_table || ' ');
 
+                -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
+                v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
+
                 EXECUTE IMMEDIATE v_sql;
 
                 log_step(p_task_id, v_step, 'Recreate FK constraint: ' || con.constraint_name,
@@ -567,6 +576,77 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END;
         END LOOP;
     END recreate_constraints;
+
+
+    -- -------------------------------------------------------------------------
+    -- Cleanup Procedure - Remove Partially Created Objects on Failure
+    -- -------------------------------------------------------------------------
+    PROCEDURE cleanup_failed_migration(p_task_id NUMBER) AS
+        v_task cmr.dwh_migration_tasks%ROWTYPE;
+        v_new_table VARCHAR2(128);
+        v_sql VARCHAR2(4000);
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('Cleaning up failed migration...');
+
+        -- Get task information
+        BEGIN
+            SELECT * INTO v_task
+            FROM cmr.dwh_migration_tasks
+            WHERE task_id = p_task_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('  WARNING: Task not found, cannot cleanup');
+                RETURN;
+        END;
+
+        v_new_table := v_task.source_table || '_PART';
+
+        -- Drop temporary indexes (with _TMP suffix) if they exist
+        FOR idx IN (
+            SELECT index_name
+            FROM dba_indexes
+            WHERE table_owner = v_task.source_owner
+            AND table_name = v_new_table
+            AND index_name LIKE '%\_TMP' ESCAPE '\'
+        ) LOOP
+            BEGIN
+                v_sql := 'DROP INDEX ' || v_task.source_owner || '.' || idx.index_name;
+                EXECUTE IMMEDIATE v_sql;
+                DBMS_OUTPUT.PUT_LINE('  Dropped index: ' || idx.index_name);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Could not drop index ' || idx.index_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        -- Drop the partitioned table if it exists
+        BEGIN
+            v_sql := 'DROP TABLE ' || v_task.source_owner || '.' || v_new_table || ' PURGE';
+            EXECUTE IMMEDIATE v_sql;
+            DBMS_OUTPUT.PUT_LINE('  Dropped table: ' || v_new_table);
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- ORA-00942 means table doesn't exist, which is fine
+                IF SQLCODE != -942 THEN
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Could not drop table ' || v_new_table || ': ' || SQLERRM);
+                END IF;
+        END;
+
+        -- Update task status to FAILED
+        BEGIN
+            UPDATE cmr.dwh_migration_tasks
+            SET status = 'FAILED',
+                can_rollback = 'N'
+            WHERE task_id = p_task_id;
+            COMMIT;
+            DBMS_OUTPUT.PUT_LINE('  Task status updated to FAILED');
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('  WARNING: Could not update task status: ' || SQLERRM);
+        END;
+
+        DBMS_OUTPUT.PUT_LINE('Cleanup completed');
+    END cleanup_failed_migration;
 
 
     -- ==========================================================================
@@ -886,6 +966,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             ROLLBACK;
             log_step(p_task_id, v_step, 'Migration failed', 'ERROR', NULL,
                     'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+
+            -- Clean up partially created objects
+            BEGIN
+                cleanup_failed_migration(p_task_id);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR during cleanup: ' || SQLERRM);
+            END;
+
             RAISE;
     END migrate_using_ctas;
 
@@ -1281,6 +1370,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             log_step(p_task_id, v_step, 'Online migration failed', 'ERROR', NULL,
                     'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+
+            -- Update task status to FAILED
+            BEGIN
+                UPDATE cmr.dwh_migration_tasks
+                SET status = 'FAILED',
+                    can_rollback = 'N'
+                WHERE task_id = p_task_id;
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+
             RAISE;
     END migrate_using_online_redef;
 
@@ -1541,6 +1643,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             ROLLBACK;
             log_step(p_task_id, v_step, 'Exchange migration failed', 'ERROR', NULL,
                     'FAILED', v_start, SYSTIMESTAMP, SQLCODE, SQLERRM);
+
+            -- Update task status to FAILED
+            BEGIN
+                UPDATE cmr.dwh_migration_tasks
+                SET status = 'FAILED',
+                    can_rollback = 'N'
+                WHERE task_id = p_task_id;
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+
             RAISE;
     END migrate_using_exchange;
 
