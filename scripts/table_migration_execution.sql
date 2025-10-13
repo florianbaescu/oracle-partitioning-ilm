@@ -32,6 +32,11 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
         p_simulate BOOLEAN DEFAULT FALSE
     );
 
+    -- Post-analysis: Apply recommendations
+    PROCEDURE apply_recommendations(
+        p_task_id NUMBER
+    );
+
     -- Post-migration tasks
     PROCEDURE apply_ilm_policies(
         p_task_id NUMBER
@@ -1585,6 +1590,168 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         DBMS_OUTPUT.PUT_LINE('Migrated ' || v_count || ' table(s)');
     END execute_all_ready_tasks;
+
+
+    -- ==========================================================================
+    -- Post-Analysis: Apply Recommendations
+    -- ==========================================================================
+
+    PROCEDURE apply_recommendations(
+        p_task_id NUMBER
+    ) AS
+        v_task cmr.dwh_migration_tasks%ROWTYPE;
+        v_analysis cmr.dwh_migration_analysis%ROWTYPE;
+        v_partition_type VARCHAR2(100);
+        v_partition_key VARCHAR2(500);
+        v_interval_clause VARCHAR2(200);
+        v_recommended_method VARCHAR2(30);
+        v_strategy VARCHAR2(1000);
+        v_pos NUMBER;
+    BEGIN
+        -- Get current task
+        SELECT * INTO v_task
+        FROM cmr.dwh_migration_tasks
+        WHERE task_id = p_task_id;
+
+        -- Verify task has been analyzed
+        IF v_task.status NOT IN ('ANALYZED', 'ANALYZING') THEN
+            RAISE_APPLICATION_ERROR(-20100,
+                'Task must be analyzed before applying recommendations. Current status: ' || v_task.status);
+        END IF;
+
+        -- Get analysis results
+        BEGIN
+            SELECT * INTO v_analysis
+            FROM cmr.dwh_migration_analysis
+            WHERE task_id = p_task_id;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(-20101,
+                    'No analysis results found for task ' || p_task_id || '. Run analyze_table() first.');
+        END;
+
+        -- Check for blocking issues
+        IF v_analysis.blocking_issues IS NOT NULL AND
+           DBMS_LOB.GETLENGTH(v_analysis.blocking_issues) > 2 THEN
+            DBMS_OUTPUT.PUT_LINE('WARNING: Task has blocking issues that must be resolved:');
+            DBMS_OUTPUT.PUT_LINE(v_analysis.blocking_issues);
+            RAISE_APPLICATION_ERROR(-20102,
+                'Cannot apply recommendations: blocking issues exist. Check analysis.blocking_issues.');
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Applying analysis recommendations to task ' || p_task_id);
+        DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
+
+        -- Parse recommended_strategy
+        -- Examples:
+        --   "RANGE(sale_date) INTERVAL MONTHLY"
+        --   "RANGE(order_date)"
+        --   "HASH(customer_id) PARTITIONS 16"
+        --   "RANGE(event_date) INTERVAL DAILY SUBPARTITION BY HASH(session_id) SUBPARTITIONS 8"
+        v_strategy := v_analysis.recommended_strategy;
+
+        IF v_strategy IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20103,
+                'No partitioning strategy recommended by analysis. Manual specification required.');
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('  Recommended strategy: ' || v_strategy);
+
+        -- Extract partition type (e.g., "RANGE(sale_date)" or "HASH(customer_id) PARTITIONS 16")
+        IF INSTR(UPPER(v_strategy), 'INTERVAL') > 0 THEN
+            -- Has INTERVAL clause - extract portion before INTERVAL
+            v_pos := INSTR(UPPER(v_strategy), 'INTERVAL');
+            v_partition_type := TRIM(SUBSTR(v_strategy, 1, v_pos - 1));
+
+            -- Extract INTERVAL clause
+            v_interval_clause := TRIM(SUBSTR(v_strategy, v_pos + 8)); -- Skip "INTERVAL"
+
+            -- Remove SUBPARTITION clause from interval if present
+            IF INSTR(UPPER(v_interval_clause), 'SUBPARTITION') > 0 THEN
+                v_pos := INSTR(UPPER(v_interval_clause), 'SUBPARTITION');
+                v_interval_clause := TRIM(SUBSTR(v_interval_clause, 1, v_pos - 1));
+            END IF;
+
+            -- Parse interval keyword (MONTHLY, DAILY, etc.) to proper syntax
+            IF UPPER(v_interval_clause) = 'MONTHLY' THEN
+                v_interval_clause := 'NUMTOYMINTERVAL(1,''MONTH'')';
+            ELSIF UPPER(v_interval_clause) = 'DAILY' THEN
+                v_interval_clause := 'NUMTODSINTERVAL(1,''DAY'')';
+            ELSIF UPPER(v_interval_clause) = 'YEARLY' THEN
+                v_interval_clause := 'NUMTOYMINTERVAL(1,''YEAR'')';
+            ELSIF UPPER(v_interval_clause) = 'QUARTERLY' THEN
+                v_interval_clause := 'NUMTOYMINTERVAL(3,''MONTH'')';
+            ELSIF UPPER(v_interval_clause) = 'WEEKLY' THEN
+                v_interval_clause := 'NUMTODSINTERVAL(7,''DAY'')';
+            END IF;
+        ELSIF INSTR(UPPER(v_strategy), 'SUBPARTITION') > 0 THEN
+            -- Has SUBPARTITION but no INTERVAL
+            v_pos := INSTR(UPPER(v_strategy), 'SUBPARTITION');
+            v_partition_type := TRIM(SUBSTR(v_strategy, 1, v_pos - 1));
+            v_interval_clause := NULL;
+        ELSE
+            -- Simple partitioning (no interval, no subpartition)
+            v_partition_type := TRIM(v_strategy);
+            v_interval_clause := NULL;
+        END IF;
+
+        -- Extract partition key from date_column_name or parse from partition_type
+        IF v_analysis.date_column_name IS NOT NULL THEN
+            v_partition_key := v_analysis.date_column_name;
+
+            -- If date conversion required, use converted column name
+            IF v_analysis.requires_conversion = 'Y' THEN
+                v_partition_key := v_analysis.date_column_name || '_CONVERTED';
+            END IF;
+        ELSE
+            -- Try to extract column name from partition_type (e.g., "RANGE(column_name)")
+            v_pos := INSTR(v_partition_type, '(');
+            IF v_pos > 0 THEN
+                v_partition_key := SUBSTR(v_partition_type, v_pos + 1,
+                                         INSTR(v_partition_type, ')') - v_pos - 1);
+            END IF;
+        END IF;
+
+        -- Determine recommended migration method
+        IF v_analysis.recommended_method IS NOT NULL THEN
+            v_recommended_method := v_analysis.recommended_method;
+        ELSIF v_analysis.supports_online_redef = 'Y' AND v_task.source_rows > 10000000 THEN
+            v_recommended_method := 'ONLINE';  -- Large tables benefit from online redefinition
+        ELSE
+            v_recommended_method := 'CTAS';    -- Default to CTAS for most cases
+        END IF;
+
+        -- Apply recommendations to task
+        UPDATE cmr.dwh_migration_tasks
+        SET partition_type = v_partition_type,
+            partition_key = v_partition_key,
+            interval_clause = v_interval_clause,
+            migration_method = v_recommended_method,
+            status = 'READY',
+            validation_status = 'READY'
+        WHERE task_id = p_task_id;
+
+        COMMIT;
+
+        DBMS_OUTPUT.PUT_LINE('  Applied partition type: ' || v_partition_type);
+        IF v_partition_key IS NOT NULL THEN
+            DBMS_OUTPUT.PUT_LINE('  Applied partition key: ' || v_partition_key);
+        END IF;
+        IF v_interval_clause IS NOT NULL THEN
+            DBMS_OUTPUT.PUT_LINE('  Applied interval clause: ' || v_interval_clause);
+        END IF;
+        DBMS_OUTPUT.PUT_LINE('  Applied migration method: ' || v_recommended_method);
+        DBMS_OUTPUT.PUT_LINE('  Task status updated to: READY');
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('Task is now ready for execution. Run:');
+        DBMS_OUTPUT.PUT_LINE('  EXEC pck_dwh_table_migration_executor.execute_migration(' || p_task_id || ');');
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            DBMS_OUTPUT.PUT_LINE('ERROR applying recommendations: ' || SQLERRM);
+            RAISE;
+    END apply_recommendations;
 
 
     -- ==========================================================================

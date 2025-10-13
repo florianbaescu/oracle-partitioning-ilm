@@ -259,6 +259,71 @@ AND DBMS_LOB.GETLENGTH(a.blocking_issues) > 2;
 
 
 -- =============================================================================
+-- SECTION 4A: APPLYING ANALYSIS RECOMMENDATIONS (NEW!)
+-- =============================================================================
+-- After analyzing tables, use apply_recommendations() to copy the recommended
+-- partition strategy from dwh_migration_analysis to dwh_migration_tasks.
+-- This is the MISSING LINK between analysis and execution!
+
+-- Example 9A: Apply recommendations to a single task
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Migrate SALES_FACT';
+
+    -- This copies recommended_strategy from analysis to partition_type in task
+    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+
+    -- Task status is now 'READY' and can be executed
+END;
+/
+
+
+-- Example 9B: Apply recommendations to all analyzed tasks in a project
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    SELECT project_id INTO v_project_id
+    FROM cmr.dwh_migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
+
+    -- Apply recommendations to all analyzed tasks
+    FOR rec IN (
+        SELECT task_id, task_name
+        FROM cmr.dwh_migration_tasks
+        WHERE project_id = v_project_id
+        AND status = 'ANALYZED'
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('Applying recommendations for: ' || rec.task_name);
+        pck_dwh_table_migration_executor.apply_recommendations(rec.task_id);
+    END LOOP;
+END;
+/
+
+
+-- Example 9C: Review tasks after applying recommendations
+SELECT
+    task_id,
+    task_name,
+    source_table,
+    partition_type,          -- NOW POPULATED!
+    partition_key,           -- NOW POPULATED!
+    interval_clause,         -- NOW POPULATED!
+    migration_method,        -- NOW POPULATED!
+    status,                  -- Should be 'READY'
+    validation_status        -- Should be 'READY'
+FROM cmr.dwh_migration_tasks
+WHERE project_id = (
+    SELECT project_id FROM cmr.dwh_migration_projects
+    WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
+)
+AND status = 'READY'
+ORDER BY task_id;
+
+
+-- =============================================================================
 -- SECTION 5: EXECUTING MIGRATIONS
 -- =============================================================================
 
