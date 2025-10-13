@@ -307,6 +307,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_step NUMBER := p_step_offset;
         v_ddl_handle NUMBER;
         v_transform_handle NUMBER;
+        v_temp_index_name VARCHAR2(128);
+        v_create_pos NUMBER;
     BEGIN
         -- Configure DBMS_METADATA to get clean DDL
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'STORAGE', FALSE);
@@ -335,8 +337,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Get index DDL from DBMS_METADATA
                 v_index_ddl := DBMS_METADATA.GET_DDL('INDEX', idx.index_name, p_source_owner);
 
+                -- Generate temporary index name to avoid conflict with existing index
+                -- (Original table still exists at this point)
+                v_temp_index_name := SUBSTR(idx.index_name, 1, 124) || '_TMP';
+
+                -- Replace index name in CREATE INDEX statement
+                v_create_pos := INSTR(UPPER(v_index_ddl), 'CREATE');
+                IF v_create_pos > 0 THEN
+                    -- Find the index name after CREATE [UNIQUE] INDEX
+                    v_sql := REGEXP_REPLACE(v_index_ddl,
+                                           '"' || idx.index_name || '"',
+                                           '"' || v_temp_index_name || '"',
+                                           1, 1);  -- Replace only first occurrence
+                ELSE
+                    v_sql := v_index_ddl;
+                END IF;
+
                 -- Replace source table name with target table name
-                v_sql := REPLACE(v_index_ddl,
+                v_sql := REPLACE(v_sql,
                                 '"' || p_source_table || '"',
                                 '"' || p_target_table || '"');
                 v_sql := REPLACE(v_sql,
@@ -387,10 +405,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 EXECUTE IMMEDIATE v_sql;
 
-                log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name,
+                log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name || ' (temp: ' || v_temp_index_name || ')',
                         'INDEX', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
-                DBMS_OUTPUT.PUT_LINE('  Recreated index: ' || idx.index_name);
+                DBMS_OUTPUT.PUT_LINE('  Created index: ' || v_temp_index_name || ' (will rename to ' || idx.index_name || ' after cutover)');
             EXCEPTION
                 WHEN OTHERS THEN
                     log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name,
@@ -792,6 +810,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' RENAME TO ' || v_task.source_table;
             DBMS_OUTPUT.PUT_LINE(v_sql || ';');
             DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('Step 7: RENAME INDEXES');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('(Indexes with _TMP suffix will be renamed to original names)');
+            DBMS_OUTPUT.PUT_LINE('');
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
             DBMS_OUTPUT.PUT_LINE('========================================');
@@ -814,6 +836,38 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             log_step(p_task_id, v_step, 'Rename tables', 'RENAME', v_sql,
                     'SUCCESS', v_start, SYSTIMESTAMP);
+
+            -- Step 8: Rename indexes from temporary names back to original names
+            v_step := v_step + 10;
+            v_start := SYSTIMESTAMP;
+            DBMS_OUTPUT.PUT_LINE('Renaming indexes to original names...');
+
+            FOR idx IN (
+                SELECT index_name, REPLACE(index_name, '_TMP', '') AS original_name
+                FROM dba_indexes
+                WHERE table_owner = v_task.source_owner
+                AND table_name = v_task.source_table
+                AND index_name LIKE '%\_TMP' ESCAPE '\'
+            ) LOOP
+                BEGIN
+                    v_sql := 'ALTER INDEX ' || v_task.source_owner || '.' || idx.index_name ||
+                            ' RENAME TO ' || idx.original_name;
+                    EXECUTE IMMEDIATE v_sql;
+
+                    DBMS_OUTPUT.PUT_LINE('  Renamed: ' || idx.index_name || ' -> ' || idx.original_name);
+
+                    log_step(p_task_id, v_step, 'Rename index: ' || idx.original_name,
+                            'RENAME_INDEX', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                    v_step := v_step + 1;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to rename index ' || idx.index_name || ': ' || SQLERRM);
+                        log_step(p_task_id, v_step, 'Rename index: ' || idx.original_name,
+                                'RENAME_INDEX', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                                SQLCODE, SQLERRM);
+                        v_step := v_step + 1;
+                END;
+            END LOOP;
 
             -- Update task with backup name
             UPDATE cmr.dwh_migration_tasks
