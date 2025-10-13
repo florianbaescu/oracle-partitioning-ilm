@@ -344,22 +344,45 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 ' ' || p_target_table || ' ');
 
                 -- Make index LOCAL for partitioned table (if not already LOCAL)
-                -- Insert LOCAL keyword before TABLESPACE or before final semicolon
-                IF INSTR(UPPER(v_sql), ' LOCAL ') = 0 THEN
-                    IF INSTR(UPPER(v_sql), ' TABLESPACE ') > 0 THEN
-                        v_sql := REPLACE(v_sql, ' TABLESPACE ', ' LOCAL TABLESPACE ');
-                    ELSIF INSTR(UPPER(v_sql), ' PARALLEL ') > 0 THEN
-                        v_sql := REPLACE(v_sql, ' PARALLEL ', ' LOCAL PARALLEL ');
-                    ELSE
-                        -- Add LOCAL before semicolon
-                        v_sql := REPLACE(v_sql, ';', ' LOCAL;');
-                    END IF;
+                -- Find the position after the column list closing parenthesis
+                IF INSTR(UPPER(v_sql), ' LOCAL') = 0 THEN
+                    DECLARE
+                        v_on_pos NUMBER;
+                        v_paren_count NUMBER := 0;
+                        v_insert_pos NUMBER := 0;
+                        v_i NUMBER;
+                    BEGIN
+                        -- Find "ON table_name (" position
+                        v_on_pos := INSTR(UPPER(v_sql), ' ON ');
+
+                        IF v_on_pos > 0 THEN
+                            -- Find the matching closing parenthesis after ON clause
+                            FOR v_i IN v_on_pos..LENGTH(v_sql) LOOP
+                                IF SUBSTR(v_sql, v_i, 1) = '(' THEN
+                                    v_paren_count := v_paren_count + 1;
+                                ELSIF SUBSTR(v_sql, v_i, 1) = ')' THEN
+                                    v_paren_count := v_paren_count - 1;
+                                    IF v_paren_count = 0 THEN
+                                        v_insert_pos := v_i + 1;
+                                        EXIT;
+                                    END IF;
+                                END IF;
+                            END LOOP;
+
+                            -- Insert LOCAL after the column list
+                            IF v_insert_pos > 0 THEN
+                                v_sql := SUBSTR(v_sql, 1, v_insert_pos - 1) ||
+                                        CHR(10) || '  LOCAL' ||
+                                        SUBSTR(v_sql, v_insert_pos);
+                            END IF;
+                        END IF;
+                    END;
                 END IF;
 
                 -- Add PARALLEL if not present
-                IF INSTR(UPPER(v_sql), ' PARALLEL ') = 0 THEN
+                IF INSTR(UPPER(v_sql), ' PARALLEL') = 0 THEN
                     v_sql := REPLACE(v_sql, ';',
-                            ' PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
+                            CHR(10) || '  PARALLEL ' || get_dwh_ilm_config('MIGRATION_PARALLEL_DEGREE') || ';');
                 END IF;
 
                 EXECUTE IMMEDIATE v_sql;
@@ -373,7 +396,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name,
                             'INDEX', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
                             SQLCODE, SQLERRM);
-                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to recreate index ' || idx.index_name || ': ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to recreate index ' || idx.index_name);
+                    DBMS_OUTPUT.PUT_LINE('  ' || SQLERRM);
+
+                    -- Re-raise exception to fail the migration
+                    RAISE_APPLICATION_ERROR(-20500,
+                        'Index recreation failed: ' || idx.index_name || ' - ' || SQLERRM);
             END;
         END LOOP;
     END recreate_indexes;
@@ -467,8 +495,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
                             'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
                             SQLCODE, SQLERRM);
-                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to recreate constraint ' ||
-                                        con.constraint_name || ': ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to recreate constraint ' || con.constraint_name);
+                    DBMS_OUTPUT.PUT_LINE('  ' || SQLERRM);
+
+                    -- Re-raise exception to fail the migration (constraints are critical)
+                    RAISE_APPLICATION_ERROR(-20501,
+                        'Constraint recreation failed: ' || con.constraint_name || ' - ' || SQLERRM);
             END;
         END LOOP;
 
