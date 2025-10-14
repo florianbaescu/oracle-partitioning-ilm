@@ -98,6 +98,7 @@ CREATE TABLE cmr.dwh_migration_tasks (
     compression_type    VARCHAR2(50) DEFAULT 'QUERY HIGH',
     target_tablespace   VARCHAR2(30),
     parallel_degree     NUMBER DEFAULT 4,
+    enable_row_movement CHAR(1) DEFAULT 'Y',   -- Enable row movement for partitioned table
 
     -- ILM integration
     apply_ilm_policies  CHAR(1) DEFAULT 'Y',
@@ -137,6 +138,7 @@ CREATE INDEX idx_mig_task_source ON cmr.dwh_migration_tasks(source_owner, source
 CREATE INDEX idx_mig_task_status ON cmr.dwh_migration_tasks(status);
 
 COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
+COMMENT ON COLUMN cmr.dwh_migration_tasks.enable_row_movement IS 'Enable row movement for partitioned table - allows Oracle to move rows between partitions when partition key values change (recommended for partitioned tables)';
 
 
 -- -----------------------------------------------------------------------------

@@ -272,6 +272,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         p_ddl := p_ddl || v_initial_partition_clause;
         p_ddl := p_ddl || v_storage_clause;
 
+        -- Add row movement clause
+        IF p_task.enable_row_movement = 'Y' THEN
+            p_ddl := p_ddl || CHR(10) || 'ENABLE ROW MOVEMENT';
+        END IF;
+
     END build_partition_ddl;
 
 
