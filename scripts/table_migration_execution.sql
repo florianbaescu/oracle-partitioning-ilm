@@ -51,6 +51,17 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
         p_task_id NUMBER
     );
 
+    -- AUTOMATIC LIST Partitioning helper functions
+    FUNCTION generate_partition_name_from_value(
+        p_high_value VARCHAR2
+    ) RETURN VARCHAR2;
+
+    PROCEDURE rename_list_partitions(
+        p_task_id NUMBER,
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2
+    );
+
 END pck_dwh_table_migration_executor;
 /
 
@@ -224,10 +235,44 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Build DDL
         p_ddl := 'CREATE TABLE ' || p_task.source_owner || '.' || p_task.source_table || '_PART' || CHR(10);
         p_ddl := p_ddl || '(' || CHR(10) || v_columns || CHR(10) || ')' || CHR(10);
-        p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
 
-        -- Build initial partition clause
-        IF p_task.interval_clause IS NOT NULL THEN
+        -- Build partition clause based on type
+        IF p_task.automatic_list = 'Y' THEN
+            -- AUTOMATIC LIST partitioning
+            DECLARE
+                v_default_values VARCHAR2(4000);
+            BEGIN
+                -- Get default values (user-provided or type-based)
+                v_default_values := pck_dwh_table_migration_analyzer.get_list_default_values(
+                    p_owner => p_task.source_owner,
+                    p_table_name => p_task.source_table,
+                    p_partition_key => p_task.partition_key,
+                    p_user_defaults => p_task.list_default_values
+                );
+
+                -- Validate if user provided custom defaults
+                IF p_task.list_default_values IS NOT NULL THEN
+                    IF NOT pck_dwh_table_migration_analyzer.validate_list_defaults(
+                        p_owner => p_task.source_owner,
+                        p_table_name => p_task.source_table,
+                        p_partition_key => p_task.partition_key,
+                        p_user_defaults => p_task.list_default_values
+                    ) THEN
+                        RAISE_APPLICATION_ERROR(-20616,
+                            'Invalid list_default_values: ' || p_task.list_default_values);
+                    END IF;
+                END IF;
+
+                -- Build AUTOMATIC LIST partition clause
+                p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || ' AUTOMATIC' || CHR(10);
+                p_ddl := p_ddl || '(' || CHR(10);
+                p_ddl := p_ddl || '    PARTITION p_xdef VALUES (' || v_default_values || ')' || CHR(10);
+                p_ddl := p_ddl || ')';
+
+                DBMS_OUTPUT.PUT_LINE('Using AUTOMATIC LIST with default partition values: ' || v_default_values);
+            END;
+
+        ELSIF p_task.interval_clause IS NOT NULL THEN
             -- INTERVAL partitioning: Cannot use MAXVALUE
             -- Get minimum date from source table to create starting partition
             p_ddl := p_ddl || 'INTERVAL (' || p_task.interval_clause || ')' || CHR(10);
@@ -269,7 +314,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (MAXVALUE))';
         END IF;
 
-        p_ddl := p_ddl || v_initial_partition_clause;
+        -- Add initial partition clause (not needed for AUTOMATIC LIST)
+        IF p_task.automatic_list != 'Y' THEN
+            p_ddl := p_ddl || v_initial_partition_clause;
+        END IF;
+
+        -- Add storage clause
         p_ddl := p_ddl || v_storage_clause;
 
         -- Add row movement clause
@@ -1176,6 +1226,18 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 can_rollback = 'Y'
             WHERE task_id = p_task_id;
             COMMIT;
+
+            -- Step 10: Rename AUTOMATIC LIST partitions (if applicable)
+            IF v_task.automatic_list = 'Y' THEN
+                v_step := v_step + 10;
+                DBMS_OUTPUT.PUT_LINE('Renaming AUTOMATIC LIST partitions...');
+
+                rename_list_partitions(
+                    p_task_id => p_task_id,
+                    p_owner => v_task.source_owner,
+                    p_table_name => v_task.source_table  -- Already renamed to final name
+                );
+            END IF;
 
             DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
             DBMS_OUTPUT.PUT_LINE('  Original table renamed to: ' || v_old_table);
@@ -2330,6 +2392,160 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         DBMS_OUTPUT.PUT_LINE('Rollback completed successfully');
     END rollback_migration;
+
+
+    -- =========================================================================
+    -- AUTOMATIC LIST Partitioning Helper Functions
+    -- =========================================================================
+
+    FUNCTION generate_partition_name_from_value(
+        p_high_value VARCHAR2
+    ) RETURN VARCHAR2
+    AS
+        v_partition_name VARCHAR2(128);
+        v_value_clean VARCHAR2(200);
+        v_values SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();
+        v_name_parts VARCHAR2(200) := '';
+        v_max_length NUMBER := 30;  -- Oracle partition name limit
+    BEGIN
+        -- Parse high_value to extract actual values
+        -- Example formats:
+        -- Single: 'NORTH'
+        -- Multiple: 'NORTH', 'USA'
+        -- Number: 1
+        -- Multiple numbers: 1, 2
+
+        -- Remove leading/trailing whitespace and quotes
+        v_value_clean := TRIM(p_high_value);
+
+        -- Extract values (handle single or multiple)
+        FOR val IN (
+            SELECT TRIM(BOTH '''' FROM TRIM(REGEXP_SUBSTR(v_value_clean, '[^,]+', 1, LEVEL))) AS value_part
+            FROM DUAL
+            CONNECT BY LEVEL <= REGEXP_COUNT(v_value_clean, ',') + 1
+        ) LOOP
+            IF val.value_part IS NOT NULL AND val.value_part != 'NULL' THEN
+                v_values.EXTEND;
+                v_values(v_values.COUNT) := val.value_part;
+            END IF;
+        END LOOP;
+
+        -- Build partition name from values
+        IF v_values.COUNT = 0 THEN
+            -- No values found, keep original name
+            RETURN NULL;
+        ELSIF v_values.COUNT = 1 THEN
+            -- Single value: P_<VALUE>
+            v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(1), '[^A-Z0-9_]', '_'));
+        ELSE
+            -- Multiple values: P_<VALUE1>_<VALUE2>
+            FOR i IN 1..LEAST(v_values.COUNT, 3) LOOP  -- Limit to 3 values
+                IF i = 1 THEN
+                    v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
+                ELSE
+                    v_name_parts := v_name_parts || '_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
+                END IF;
+            END LOOP;
+
+            -- If more than 3 values, add suffix
+            IF v_values.COUNT > 3 THEN
+                v_name_parts := v_name_parts || '_ETC';
+            END IF;
+        END IF;
+
+        -- Truncate to Oracle's partition name limit
+        IF LENGTH(v_name_parts) > v_max_length THEN
+            v_name_parts := SUBSTR(v_name_parts, 1, v_max_length);
+        END IF;
+
+        RETURN v_name_parts;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- If name generation fails, return NULL (keep original name)
+            DBMS_OUTPUT.PUT_LINE('  WARNING: Could not generate partition name from: ' || p_high_value);
+            RETURN NULL;
+    END generate_partition_name_from_value;
+
+
+    PROCEDURE rename_list_partitions(
+        p_task_id NUMBER,
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2
+    ) AS
+        v_partition_name VARCHAR2(128);
+        v_high_value LONG;
+        v_high_value_str VARCHAR2(4000);
+        v_new_partition_name VARCHAR2(128);
+        v_sql VARCHAR2(1000);
+        v_step NUMBER := 1000;  -- High step number for post-cutover operations
+        v_start TIMESTAMP;
+        v_renamed_count NUMBER := 0;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('Renaming AUTOMATIC LIST partitions to human-readable names...');
+
+        -- Get all partitions except P_XDEF
+        FOR part IN (
+            SELECT partition_name, high_value
+            FROM dba_tab_partitions
+            WHERE table_owner = p_owner
+            AND table_name = p_table_name
+            AND partition_name != 'P_XDEF'
+            AND partition_name LIKE 'SYS_P%'  -- Only system-generated names
+            ORDER BY partition_position
+        ) LOOP
+            v_start := SYSTIMESTAMP;
+
+            -- Get high_value as string (LONG datatype requires special handling)
+            BEGIN
+                SELECT high_value INTO v_high_value
+                FROM dba_tab_partitions
+                WHERE table_owner = p_owner
+                AND table_name = p_table_name
+                AND partition_name = part.partition_name;
+
+                -- Convert LONG to VARCHAR2
+                v_high_value_str := SUBSTR(part.high_value, 1, 4000);
+
+                -- Generate human-readable partition name from high_value
+                v_new_partition_name := generate_partition_name_from_value(v_high_value_str);
+
+                -- Only rename if we generated a valid name
+                IF v_new_partition_name IS NOT NULL THEN
+                    -- Rename partition
+                    v_sql := 'ALTER TABLE ' || p_owner || '.' || p_table_name ||
+                            ' RENAME PARTITION ' || part.partition_name ||
+                            ' TO ' || v_new_partition_name;
+
+                    EXECUTE IMMEDIATE v_sql;
+
+                    log_step(p_task_id, v_step, 'Rename partition: ' || part.partition_name || ' -> ' || v_new_partition_name,
+                            'RENAME_PARTITION', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+
+                    DBMS_OUTPUT.PUT_LINE('  Renamed: ' || part.partition_name || ' -> ' || v_new_partition_name ||
+                                        ' (value: ' || SUBSTR(v_high_value_str, 1, 50) || ')');
+
+                    v_renamed_count := v_renamed_count + 1;
+                ELSE
+                    DBMS_OUTPUT.PUT_LINE('  SKIPPED: Could not generate name for partition ' || part.partition_name);
+                END IF;
+
+                v_step := v_step + 1;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Log error but continue with other partitions
+                    log_step(p_task_id, v_step, 'Rename partition: ' || part.partition_name,
+                            'RENAME_PARTITION', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                            SQLCODE, SQLERRM);
+
+                    DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to rename partition ' || part.partition_name || ': ' || SQLERRM);
+                    v_step := v_step + 1;
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Partition renaming complete: ' || v_renamed_count || ' partitions renamed');
+    END rename_list_partitions;
 
 END pck_dwh_table_migration_executor;
 /

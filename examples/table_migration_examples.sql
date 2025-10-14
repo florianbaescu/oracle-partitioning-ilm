@@ -803,6 +803,211 @@ END;
 
 
 -- =============================================================================
+-- SECTION 14: AUTOMATIC LIST PARTITIONING (Oracle 12.2+)
+-- =============================================================================
+-- AUTOMATIC LIST partitioning automatically creates new partitions when new
+-- distinct values are inserted. Ideal for multi-tenant, regional, or
+-- status-based partitioning scenarios.
+-- =============================================================================
+
+-- Example 1: Single column AUTOMATIC LIST (multi-tenant)
+-- Framework will automatically determine default value based on column type
+INSERT INTO cmr.dwh_migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    automatic_list,
+    migration_method,
+    use_compression,
+    enable_row_movement,
+    status
+) VALUES (
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate TENANT_DATA with AUTOMATIC LIST',
+    USER,
+    'TENANT_DATA',
+    'LIST(tenant_id)',
+    'tenant_id',
+    'Y',  -- Enable AUTOMATIC LIST
+    'CTAS',
+    'Y',
+    'Y',  -- Required for AUTOMATIC LIST
+    'PENDING'
+);
+
+-- Resulting DDL (if tenant_id is VARCHAR2):
+-- CREATE TABLE tenant_data_part (...)
+-- PARTITION BY LIST (tenant_id) AUTOMATIC
+-- (
+--     PARTITION p_xdef VALUES ('NAV')
+-- )
+-- COMPRESS FOR QUERY HIGH
+-- ENABLE ROW MOVEMENT;
+
+
+-- Example 2: Multi-column AUTOMATIC LIST (region + country)
+INSERT INTO cmr.dwh_migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    automatic_list,
+    migration_method,
+    use_compression,
+    enable_row_movement,
+    status
+) VALUES (
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate SALES_REGIONAL with multi-column AUTOMATIC LIST',
+    USER,
+    'SALES_REGIONAL',
+    'LIST(region, country)',
+    'region, country',
+    'Y',
+    'CTAS',
+    'Y',
+    'Y',
+    'PENDING'
+);
+
+-- Resulting DDL:
+-- CREATE TABLE sales_regional_part (...)
+-- PARTITION BY LIST (region, country) AUTOMATIC
+-- (
+--     PARTITION p_xdef VALUES ('NAV')
+-- )
+-- COMPRESS FOR QUERY HIGH
+-- ENABLE ROW MOVEMENT;
+
+
+-- Example 3: Custom default values for P_XDEF partition
+-- Override framework-generated defaults with your own values
+INSERT INTO cmr.dwh_migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    automatic_list,
+    list_default_values,  -- Custom defaults
+    migration_method,
+    use_compression,
+    enable_row_movement,
+    status
+) VALUES (
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate ORDERS with custom default values',
+    USER,
+    'ORDERS',
+    'LIST(order_status)',
+    'order_status',
+    'Y',
+    '''UNKNOWN'',''NOT_SET''',  -- Custom default values (must be properly quoted strings)
+    'CTAS',
+    'Y',
+    'Y',
+    'PENDING'
+);
+
+-- Resulting DDL:
+-- CREATE TABLE orders_part (...)
+-- PARTITION BY LIST (order_status) AUTOMATIC
+-- (
+--     PARTITION p_xdef VALUES ('UNKNOWN','NOT_SET')
+-- )
+-- COMPRESS FOR QUERY HIGH
+-- ENABLE ROW MOVEMENT;
+
+
+-- Example 4: Number-based LIST partitioning
+-- Framework will use -1 as default for numeric columns
+INSERT INTO cmr.dwh_migration_tasks (
+    project_id,
+    task_name,
+    source_owner,
+    source_table,
+    partition_type,
+    partition_key,
+    automatic_list,
+    migration_method,
+    use_compression,
+    enable_row_movement,
+    status
+) VALUES (
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    'Migrate PRODUCT_CATEGORIES',
+    USER,
+    'PRODUCT_CATEGORIES',
+    'LIST(category_id)',
+    'category_id',
+    'Y',
+    'CTAS',
+    'Y',
+    'Y',
+    'PENDING'
+);
+
+-- Resulting DDL (if category_id is NUMBER):
+-- CREATE TABLE product_categories_part (...)
+-- PARTITION BY LIST (category_id) AUTOMATIC
+-- (
+--     PARTITION p_xdef VALUES (-1)
+-- )
+-- COMPRESS FOR QUERY HIGH
+-- ENABLE ROW MOVEMENT;
+
+
+-- Execute AUTOMATIC LIST migration example
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    -- Get task ID
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Migrate TENANT_DATA with AUTOMATIC LIST';
+
+    -- Analyze table (optional but recommended)
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+
+    -- Execute migration
+    pck_dwh_table_migration_executor.execute_migration(v_task_id);
+
+    -- After migration, Oracle will automatically create partitions for each new distinct value
+    -- Example: INSERT INTO tenant_data VALUES (1, 'TENANT_001', ...)
+    --          → Oracle creates partition for 'TENANT_001' automatically
+END;
+/
+
+
+-- Query partition information after AUTOMATIC LIST migration
+SELECT partition_name, high_value, num_rows, blocks
+FROM dba_tab_partitions
+WHERE table_owner = USER
+AND table_name = 'TENANT_DATA'
+ORDER BY partition_position;
+
+-- Example output:
+-- PARTITION_NAME  HIGH_VALUE             NUM_ROWS  BLOCKS
+-- P_XDEF          'NAV'                  0         0
+-- P_TENANT_001    'TENANT_001'          1250      15
+-- P_TENANT_002    'TENANT_002'          890       10
+-- P_TENANT_003    'TENANT_003'          1560      18
+
+
+-- Drop specific partition (e.g., after tenant removal)
+-- ALTER TABLE tenant_data DROP PARTITION p_tenant_001;
+
+-- Truncate specific partition (clear tenant data)
+-- ALTER TABLE tenant_data TRUNCATE PARTITION p_tenant_002;
+
+
+-- =============================================================================
 -- CLEANUP EXAMPLES
 -- =============================================================================
 

@@ -101,6 +101,27 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_compression_type VARCHAR2
     ) RETURN NUMBER;
 
+    -- ==========================================================================
+    -- AUTOMATIC LIST Partitioning helper functions
+    -- ==========================================================================
+
+    -- Get default values for P_XDEF partition based on data type
+    -- Returns user-provided defaults or auto-generated type-aware defaults
+    FUNCTION get_list_default_values(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_key VARCHAR2,
+        p_user_defaults VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2;
+
+    -- Validate user-provided default values against column data types
+    FUNCTION validate_list_defaults(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_key VARCHAR2,
+        p_user_defaults VARCHAR2
+    ) RETURN BOOLEAN;
+
 END pck_dwh_table_migration_analyzer;
 /
 
@@ -3825,6 +3846,173 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         RETURN v_ratio;
     END get_compression_ratio;
+
+    -- ==========================================================================
+    -- AUTOMATIC LIST Partitioning Helper Functions
+    -- ==========================================================================
+
+    FUNCTION get_list_default_values(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_key VARCHAR2,
+        p_user_defaults VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2
+    AS
+        -- Constants for default partition values
+        C_DEFAULT_VARCHAR   CONSTANT VARCHAR2(100) := '''NAV''';
+        C_DEFAULT_CHAR      CONSTANT VARCHAR2(100) := '''NAV''';
+        C_DEFAULT_NUMBER    CONSTANT VARCHAR2(100) := '-1';
+        C_DEFAULT_DATE      CONSTANT VARCHAR2(100) := 'DATE ''5999-12-31''';
+        C_DEFAULT_TIMESTAMP CONSTANT VARCHAR2(100) := 'TO_TIMESTAMP(''5999-12-31 23:59:59'',''YYYY-MM-DD HH24:MI:SS'')';
+
+        v_columns SYS.ODCIVARCHAR2LIST;
+        v_column_name VARCHAR2(128);
+        v_data_type VARCHAR2(128);
+        v_default_values VARCHAR2(4000);
+        v_values_list VARCHAR2(4000) := '';
+    BEGIN
+        -- If user provided defaults, validate and return them
+        IF p_user_defaults IS NOT NULL THEN
+            -- Validation happens in validate_list_defaults function
+            RETURN p_user_defaults;
+        END IF;
+
+        -- Parse partition key (handle single or multiple columns)
+        v_columns := SYS.ODCIVARCHAR2LIST();
+        FOR col IN (
+            SELECT TRIM(REGEXP_SUBSTR(p_partition_key, '[^,]+', 1, LEVEL)) AS column_name
+            FROM DUAL
+            CONNECT BY LEVEL <= REGEXP_COUNT(p_partition_key, ',') + 1
+        ) LOOP
+            v_columns.EXTEND;
+            v_columns(v_columns.COUNT) := col.column_name;
+        END LOOP;
+
+        -- Get data types and build default values for each column
+        FOR i IN 1..v_columns.COUNT LOOP
+            v_column_name := v_columns(i);
+
+            -- Get data type
+            BEGIN
+                SELECT data_type INTO v_data_type
+                FROM dba_tab_columns
+                WHERE owner = p_owner
+                AND table_name = p_table_name
+                AND column_name = v_column_name;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    RAISE_APPLICATION_ERROR(-20610,
+                        'Column ' || v_column_name || ' not found in table ' || p_owner || '.' || p_table_name);
+            END;
+
+            -- Determine default based on data type
+            IF v_data_type IN ('VARCHAR2', 'VARCHAR', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
+                v_default_values := C_DEFAULT_VARCHAR;
+            ELSIF v_data_type IN ('NUMBER', 'INTEGER', 'FLOAT', 'BINARY_INTEGER') THEN
+                v_default_values := C_DEFAULT_NUMBER;
+            ELSIF v_data_type = 'DATE' THEN
+                v_default_values := C_DEFAULT_DATE;
+            ELSIF v_data_type LIKE 'TIMESTAMP%' THEN
+                v_default_values := C_DEFAULT_TIMESTAMP;
+            ELSE
+                RAISE_APPLICATION_ERROR(-20611,
+                    'Unsupported data type for LIST partitioning: ' || v_data_type || ' (column: ' || v_column_name || ')');
+            END IF;
+
+            -- For multi-column, we need to create tuples
+            -- For now, use first column's defaults
+            -- TODO: Enhancement for multi-column tuple defaults
+            IF i = 1 THEN
+                v_values_list := v_default_values;
+            END IF;
+        END LOOP;
+
+        RETURN v_values_list;
+    END get_list_default_values;
+
+
+    FUNCTION validate_list_defaults(
+        p_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_key VARCHAR2,
+        p_user_defaults VARCHAR2
+    ) RETURN BOOLEAN
+    AS
+        v_columns SYS.ODCIVARCHAR2LIST;
+        v_column_name VARCHAR2(128);
+        v_data_type VARCHAR2(128);
+        v_test_sql VARCHAR2(4000);
+        v_dummy NUMBER;
+    BEGIN
+        -- Parse partition key columns
+        v_columns := SYS.ODCIVARCHAR2LIST();
+        FOR col IN (
+            SELECT TRIM(REGEXP_SUBSTR(p_partition_key, '[^,]+', 1, LEVEL)) AS column_name
+            FROM DUAL
+            CONNECT BY LEVEL <= REGEXP_COUNT(p_partition_key, ',') + 1
+        ) LOOP
+            v_columns.EXTEND;
+            v_columns(v_columns.COUNT) := col.column_name;
+        END LOOP;
+
+        -- Get data type of first column (primary validation)
+        SELECT data_type INTO v_data_type
+        FROM dba_tab_columns
+        WHERE owner = p_owner
+        AND table_name = p_table_name
+        AND column_name = v_columns(1);
+
+        -- Parse each default value and validate against data type
+        FOR val IN (
+            SELECT TRIM(REGEXP_SUBSTR(p_user_defaults, '[^,]+', 1, LEVEL)) AS default_value
+            FROM DUAL
+            CONNECT BY LEVEL <= REGEXP_COUNT(p_user_defaults, ',') + 1
+        ) LOOP
+            -- Build test SQL to validate the value can be used in LIST VALUES clause
+            BEGIN
+                IF UPPER(val.default_value) = 'NULL' THEN
+                    -- NULL is always valid
+                    CONTINUE;
+                END IF;
+
+                -- Test if value is compatible with data type
+                IF v_data_type IN ('VARCHAR2', 'VARCHAR', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
+                    -- Check if value is a valid string literal (should be quoted)
+                    IF val.default_value NOT LIKE '''%''' THEN
+                        RAISE_APPLICATION_ERROR(-20612,
+                            'String values must be quoted: ' || val.default_value || '. Example: ''NAV''');
+                    END IF;
+                ELSIF v_data_type IN ('NUMBER', 'INTEGER', 'FLOAT') THEN
+                    -- Try to convert to number
+                    v_test_sql := 'SELECT TO_NUMBER(' || val.default_value || ') FROM DUAL';
+                    EXECUTE IMMEDIATE v_test_sql INTO v_dummy;
+                ELSIF v_data_type = 'DATE' THEN
+                    -- Should be a valid DATE expression or literal
+                    IF val.default_value NOT LIKE 'TO_DATE(%' AND val.default_value NOT LIKE 'DATE%' THEN
+                        RAISE_APPLICATION_ERROR(-20613,
+                            'DATE values must use TO_DATE() or DATE literal: ' || val.default_value);
+                    END IF;
+                ELSIF v_data_type LIKE 'TIMESTAMP%' THEN
+                    -- Should be a valid TIMESTAMP expression
+                    IF val.default_value NOT LIKE 'TO_TIMESTAMP(%' AND val.default_value NOT LIKE 'TIMESTAMP%' THEN
+                        RAISE_APPLICATION_ERROR(-20614,
+                            'TIMESTAMP values must use TO_TIMESTAMP() or TIMESTAMP literal: ' || val.default_value);
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF SQLCODE BETWEEN -20620 AND -20610 THEN
+                        -- Re-raise our custom errors
+                        RAISE;
+                    ELSE
+                        RAISE_APPLICATION_ERROR(-20615,
+                            'Invalid default value (' || val.default_value || ') for data type ' || v_data_type || ': ' || SQLERRM);
+                    END IF;
+            END;
+        END LOOP;
+
+        RETURN TRUE;
+    END validate_list_defaults;
 
 END pck_dwh_table_migration_analyzer;
 /

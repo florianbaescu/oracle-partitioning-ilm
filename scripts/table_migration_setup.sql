@@ -99,6 +99,8 @@ CREATE TABLE cmr.dwh_migration_tasks (
     target_tablespace   VARCHAR2(30),
     parallel_degree     NUMBER DEFAULT 4,
     enable_row_movement CHAR(1) DEFAULT 'Y',   -- Enable row movement for partitioned table
+    automatic_list      CHAR(1) DEFAULT 'N',   -- Enable AUTOMATIC LIST partitioning (Oracle 12.2+)
+    list_default_values VARCHAR2(4000),        -- Default values for P_XDEF partition
 
     -- ILM integration
     apply_ilm_policies  CHAR(1) DEFAULT 'Y',
@@ -130,7 +132,8 @@ CREATE TABLE cmr.dwh_migration_tasks (
 
     CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
     CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'ANALYZING', 'ANALYZED', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')),
-    CONSTRAINT chk_mig_method CHECK (migration_method IN ('CTAS', 'ONLINE', 'EXCHANGE'))
+    CONSTRAINT chk_mig_method CHECK (migration_method IN ('CTAS', 'ONLINE', 'EXCHANGE')),
+    CONSTRAINT chk_automatic_list CHECK (automatic_list IN ('Y', 'N'))
 );
 
 CREATE INDEX idx_mig_task_project ON cmr.dwh_migration_tasks(project_id);
@@ -139,6 +142,8 @@ CREATE INDEX idx_mig_task_status ON cmr.dwh_migration_tasks(status);
 
 COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.enable_row_movement IS 'Enable row movement for partitioned table - allows Oracle to move rows between partitions when partition key values change (recommended for partitioned tables)';
+COMMENT ON COLUMN cmr.dwh_migration_tasks.automatic_list IS 'Enable AUTOMATIC LIST partitioning (Oracle 12.2+). Creates partitions automatically for new values.';
+COMMENT ON COLUMN cmr.dwh_migration_tasks.list_default_values IS 'Default values for P_XDEF partition (e.g., ''NAV'' for VARCHAR, -1 for NUMBER, DATE ''5999-12-31'' for DATE). If NULL, framework determines based on data type.';
 
 
 -- -----------------------------------------------------------------------------
