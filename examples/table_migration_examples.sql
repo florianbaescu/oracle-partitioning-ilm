@@ -8,7 +8,7 @@
 -- =============================================================================
 
 -- View all non-partitioned tables that are good candidates
-SELECT * FROM v_migration_candidates
+SELECT * FROM cmr.dwh_v_migration_candidates
 WHERE migration_priority IN ('HIGH PRIORITY', 'MEDIUM PRIORITY')
 ORDER BY size_mb DESC;
 
@@ -21,7 +21,7 @@ SELECT
     num_constraints,
     migration_priority,
     recommendation_reason
-FROM v_migration_candidates
+FROM cmr.dwh_v_migration_candidates
 WHERE table_name = 'SALES_FACT_STAGING';
 
 
@@ -30,7 +30,7 @@ WHERE table_name = 'SALES_FACT_STAGING';
 -- =============================================================================
 
 -- Example 1: Create a migration project
-INSERT INTO migration_projects (project_name, description, status)
+INSERT INTO cmr.dwh_migration_projects (project_name, description, status)
 VALUES (
     'Q1_2024_TABLE_PARTITIONING',
     'Migrate key fact tables to partitioned structures for Q1 2024',
@@ -43,7 +43,7 @@ DECLARE
     v_project_id NUMBER;
 BEGIN
     SELECT project_id INTO v_project_id
-    FROM migration_projects
+    FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
     DBMS_OUTPUT.PUT_LINE('Project ID: ' || v_project_id);
@@ -56,7 +56,7 @@ END;
 -- =============================================================================
 
 -- Example 2: Create migration task with automatic strategy recommendation
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_owner,
@@ -79,14 +79,14 @@ SELECT
     'Y',
     'FACT_TABLE_STANDARD',
     'PENDING'
-FROM migration_projects
+FROM cmr.dwh_migration_projects
 WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
 COMMIT;
 
 
 -- Example 3: Create migration task with explicit partition strategy
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_owner,
@@ -119,14 +119,14 @@ SELECT
     'Y',
     'FACT_TABLE_STANDARD',
     'PENDING'
-FROM migration_projects
+FROM cmr.dwh_migration_projects
 WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
 COMMIT;
 
 
 -- Example 4: Composite partitioning (Range-Hash)
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_owner,
@@ -142,7 +142,7 @@ INSERT INTO migration_tasks (
     status
 )
 VALUES (
-    (SELECT project_id FROM migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
     'Migrate WEB_EVENTS',
     USER,
     'WEB_EVENTS',
@@ -161,7 +161,7 @@ COMMIT;
 
 
 -- Example 5: Large dimension table with hash partitioning
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_owner,
@@ -176,7 +176,7 @@ INSERT INTO migration_tasks (
     status
 )
 VALUES (
-    (SELECT project_id FROM migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'),
     'Migrate CUSTOMER_DIM',
     USER,
     'CUSTOMER_DIM',
@@ -202,10 +202,10 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     SELECT task_id INTO v_task_id
-    FROM migration_tasks
+    FROM cmr.dwh_migration_tasks
     WHERE task_name = 'Migrate SALES_FACT';
 
-    table_migration_analyzer.analyze_table(v_task_id);
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
 END;
 /
 
@@ -215,10 +215,10 @@ DECLARE
     v_project_id NUMBER;
 BEGIN
     SELECT project_id INTO v_project_id
-    FROM migration_projects
+    FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
-    table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+    pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
 END;
 /
 
@@ -237,10 +237,10 @@ SELECT
     ROUND(a.estimated_space_savings_mb, 2) AS estimated_savings_mb,
     a.complexity_score,
     a.estimated_downtime_minutes
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE t.project_id = (
-    SELECT project_id FROM migration_projects
+    SELECT project_id FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
 )
 ORDER BY t.task_id;
@@ -252,8 +252,8 @@ SELECT
     t.source_table,
     t.validation_status,
     a.blocking_issues
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE a.blocking_issues IS NOT NULL
 AND DBMS_LOB.GETLENGTH(a.blocking_issues) > 2;
 
@@ -332,10 +332,10 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     SELECT task_id INTO v_task_id
-    FROM migration_tasks
+    FROM cmr.dwh_migration_tasks
     WHERE task_name = 'Migrate SALES_FACT';
 
-    table_migration_executor.execute_migration(v_task_id);
+    pck_dwh_table_migration_executor.execute_migration(v_task_id);
 END;
 /
 
@@ -345,10 +345,10 @@ DECLARE
     v_project_id NUMBER;
 BEGIN
     SELECT project_id INTO v_project_id
-    FROM migration_projects
+    FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
-    table_migration_executor.execute_all_ready_tasks(
+    pck_dwh_table_migration_executor.execute_all_ready_tasks(
         p_project_id => v_project_id,
         p_max_tasks => 1  -- Limit to 1 for safety
     );
@@ -366,9 +366,9 @@ SELECT
     migration_method,
     status,
     validation_status
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 WHERE project_id = (
-    SELECT project_id FROM migration_projects
+    SELECT project_id FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
 )
 AND status IN ('READY', 'ANALYZED')
@@ -376,7 +376,7 @@ AND validation_status = 'READY'
 ORDER BY task_id;
 
 -- Step 2: Execute specific task
-EXEC table_migration_executor.execute_migration(1);  -- Replace 1 with actual task_id
+EXEC pck_dwh_table_migration_executor.execute_migration(1);  -- Replace 1 with actual task_id
 
 
 -- =============================================================================
@@ -384,12 +384,12 @@ EXEC table_migration_executor.execute_migration(1);  -- Replace 1 with actual ta
 -- =============================================================================
 
 -- Example 13: View project dashboard
-SELECT * FROM v_migration_dashboard
+SELECT * FROM cmr.dwh_v_migration_dashboard
 ORDER BY created_date DESC;
 
 
 -- Example 14: View task status
-SELECT * FROM v_migration_task_status
+SELECT * FROM cmr.dwh_v_migration_task_status
 WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
 ORDER BY task_id;
 
@@ -402,7 +402,7 @@ SELECT
     status,
     duration_seconds,
     error_message
-FROM migration_execution_log
+FROM cmr.dwh_migration_execution_log
 WHERE task_id = 1  -- Replace with actual task_id
 ORDER BY step_number;
 
@@ -418,13 +418,13 @@ SELECT
     l.step_number,
     l.step_name,
     l.status AS step_status
-FROM migration_tasks t
+FROM cmr.dwh_migration_tasks t
 LEFT JOIN (
     SELECT task_id, MAX(step_number) AS step_number
-    FROM migration_execution_log
+    FROM cmr.dwh_migration_execution_log
     GROUP BY task_id
 ) ls ON ls.task_id = t.task_id
-LEFT JOIN migration_execution_log l
+LEFT JOIN cmr.dwh_migration_execution_log l
     ON l.task_id = t.task_id
     AND l.step_number = ls.step_number
 WHERE t.status = 'RUNNING';
@@ -458,7 +458,7 @@ SELECT
     ROUND(space_saved_mb, 2) AS saved_mb,
     ROUND((space_saved_mb / NULLIF(source_size_mb, 0)) * 100, 1) AS savings_pct,
     ROUND(duration_seconds / 60, 1) AS duration_min
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 WHERE status = 'COMPLETED'
 ORDER BY space_saved_mb DESC;
 
@@ -467,7 +467,7 @@ ORDER BY space_saved_mb DESC;
 DECLARE
     v_task_id NUMBER := 1;  -- Replace with actual task_id
 BEGIN
-    table_migration_executor.validate_migration(v_task_id);
+    pck_dwh_table_migration_executor.validate_migration(v_task_id);
 END;
 /
 
@@ -477,7 +477,7 @@ END;
 -- =============================================================================
 
 -- Example 20: Check ILM policies created for migrated table
-SELECT * FROM ilm_policies
+SELECT * FROM cmr.dwh_ilm_policies
 WHERE table_name = 'SALES_FACT'
 ORDER BY priority;
 
@@ -486,7 +486,7 @@ ORDER BY priority;
 DECLARE
     v_task_id NUMBER := 1;  -- Replace with actual task_id
 BEGIN
-    table_migration_executor.apply_ilm_policies(v_task_id);
+    pck_dwh_table_migration_executor.apply_ilm_policies(v_task_id);
 END;
 /
 
@@ -503,7 +503,7 @@ SELECT
     backup_table_name,
     can_rollback,
     status
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 WHERE can_rollback = 'Y';
 
 
@@ -512,7 +512,7 @@ DECLARE
     v_task_id NUMBER := 1;  -- Replace with actual task_id
 BEGIN
     -- WARNING: This will revert to the old non-partitioned table
-    table_migration_executor.rollback_migration(v_task_id);
+    pck_dwh_table_migration_executor.rollback_migration(v_task_id);
 END;
 /
 
@@ -523,7 +523,7 @@ DECLARE
 BEGIN
     FOR rec IN (
         SELECT source_owner, backup_table_name
-        FROM migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE status = 'COMPLETED'
         AND backup_table_name IS NOT NULL
         AND execution_end < SYSDATE - 30  -- Older than 30 days
@@ -532,7 +532,7 @@ BEGIN
         DBMS_OUTPUT.PUT_LINE('Dropping: ' || rec.backup_table_name);
         EXECUTE IMMEDIATE v_sql;
 
-        UPDATE migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET can_rollback = 'N', backup_table_name = NULL
         WHERE backup_table_name = rec.backup_table_name;
     END LOOP;
@@ -552,12 +552,12 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     -- Step 1: Create project
-    INSERT INTO migration_projects (project_name, description, status)
+    INSERT INTO cmr.dwh_migration_projects (project_name, description, status)
     VALUES ('SINGLE_TABLE_MIGRATION', 'Migrate SALES_FACT_2023', 'PLANNING')
     RETURNING project_id INTO v_project_id;
 
     -- Step 2: Create task
-    INSERT INTO migration_tasks (
+    INSERT INTO cmr.dwh_migration_tasks (
         project_id, task_name, source_owner, source_table,
         partition_type, partition_key, interval_clause,
         migration_method, use_compression, compression_type,
@@ -573,12 +573,12 @@ BEGIN
 
     -- Step 3: Analyze
     DBMS_OUTPUT.PUT_LINE('Analyzing table...');
-    table_migration_analyzer.analyze_table(v_task_id);
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
 
     -- Step 4: Review analysis
     FOR rec IN (
         SELECT recommended_strategy, complexity_score, estimated_downtime_minutes
-        FROM migration_analysis WHERE task_id = v_task_id
+        FROM cmr.dwh_migration_analysis WHERE task_id = v_task_id
     ) LOOP
         DBMS_OUTPUT.PUT_LINE('Strategy: ' || rec.recommended_strategy);
         DBMS_OUTPUT.PUT_LINE('Complexity: ' || rec.complexity_score || '/10');
@@ -587,10 +587,10 @@ BEGIN
 
     -- Step 5: Execute (comment out until ready)
     -- DBMS_OUTPUT.PUT_LINE('Executing migration...');
-    -- table_migration_executor.execute_migration(v_task_id);
+    -- pck_dwh_table_migration_executor.execute_migration(v_task_id);
 
     -- Step 6: Validate (after execution)
-    -- table_migration_executor.validate_migration(v_task_id);
+    -- pck_dwh_table_migration_executor.validate_migration(v_task_id);
 
     DBMS_OUTPUT.PUT_LINE('Workflow complete - review and execute when ready');
 END;
@@ -610,13 +610,13 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     -- Create project
-    INSERT INTO migration_projects (project_name, description, status)
+    INSERT INTO cmr.dwh_migration_projects (project_name, description, status)
     VALUES ('BATCH_FACT_MIGRATION', 'Migrate all fact tables', 'PLANNING')
     RETURNING project_id INTO v_project_id;
 
     -- Create tasks for each table
     FOR i IN 1..v_tables.COUNT LOOP
-        INSERT INTO migration_tasks (
+        INSERT INTO cmr.dwh_migration_tasks (
             project_id, task_name, source_owner, source_table,
             migration_method, use_compression, compression_type,
             apply_ilm_policies, ilm_policy_template, status
@@ -631,13 +631,13 @@ BEGIN
 
     -- Analyze all
     DBMS_OUTPUT.PUT_LINE('Analyzing tables...');
-    table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+    pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
 
     -- Review results
     FOR rec IN (
         SELECT t.task_name, t.validation_status, a.complexity_score
-        FROM migration_tasks t
-        JOIN migration_analysis a ON a.task_id = t.task_id
+        FROM cmr.dwh_migration_tasks t
+        JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
         WHERE t.project_id = v_project_id
     ) LOOP
         DBMS_OUTPUT.PUT_LINE(rec.task_name || ' - ' ||
@@ -646,7 +646,7 @@ BEGIN
     END LOOP;
 
     -- Execute all ready tasks (one at a time)
-    -- table_migration_executor.execute_all_ready_tasks(v_project_id, 3);
+    -- pck_dwh_table_migration_executor.execute_all_ready_tasks(v_project_id, 3);
 
 END;
 /
@@ -657,7 +657,7 @@ END;
 -- =============================================================================
 
 -- Example 27: View all date columns analyzed for a table
-SELECT * FROM dwh_v_date_column_analysis
+SELECT * FROM cmr.dwh_v_date_column_analysis
 WHERE source_table = 'SALES_FACT';
 
 -- Example 28: Parse JSON to see all date columns for a specific task
@@ -667,7 +667,7 @@ SELECT
     primary_date_column,
     date_format_detected,
     JSON_QUERY(all_date_columns_analysis, '$[*]' WITH WRAPPER) AS all_columns_json
-FROM dwh_v_date_column_analysis
+FROM cmr.dwh_v_date_column_analysis
 WHERE task_id = 1;
 
 -- Example 29: Extract detailed date column info from JSON
@@ -676,7 +676,7 @@ SELECT
     a.task_name,
     a.source_table,
     jt.*
-FROM dwh_v_date_column_analysis a,
+FROM cmr.dwh_v_date_column_analysis a,
 JSON_TABLE(
     a.all_date_columns_analysis, '$[*]'
     COLUMNS (
@@ -699,7 +699,7 @@ SELECT
     primary_date_column,
     JSON_VALUE(all_date_columns_analysis, '$.size()') AS num_date_columns,
     all_date_columns_analysis
-FROM dwh_v_date_column_analysis
+FROM cmr.dwh_v_date_column_analysis
 WHERE JSON_VALUE(all_date_columns_analysis, '$.size()') > 1
 ORDER BY num_date_columns DESC;
 
@@ -709,7 +709,7 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     -- Create task for a table with custom date columns
-    INSERT INTO dwh_migration_tasks (
+    INSERT INTO cmr.dwh_migration_tasks (
         task_name, source_owner, source_table, status
     ) VALUES (
         'Analyze Custom Date Table', USER, 'MY_CUSTOM_TABLE', 'PENDING'
@@ -723,7 +723,7 @@ BEGIN
 
     FOR col IN (
         SELECT jt.*
-        FROM dwh_migration_analysis a,
+        FROM cmr.dwh_migration_analysis a,
         JSON_TABLE(
             a.all_date_columns_analysis, '$[*]'
             COLUMNS (
@@ -763,12 +763,12 @@ SELECT
     error_message,
     execution_start,
     execution_end
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 WHERE status = 'FAILED'
 ORDER BY execution_start DESC;
 
 
--- Example 28: Find failed steps in migration
+-- Example 33: Find failed steps in migration
 SELECT
     l.task_id,
     t.task_name,
@@ -776,18 +776,18 @@ SELECT
     l.step_name,
     l.error_code,
     l.error_message
-FROM migration_execution_log l
-JOIN migration_tasks t ON t.task_id = l.task_id
+FROM cmr.dwh_migration_execution_log l
+JOIN cmr.dwh_migration_tasks t ON t.task_id = l.task_id
 WHERE l.status = 'FAILED'
 ORDER BY l.start_time DESC;
 
 
--- Example 29: Retry failed migration (after fixing issues)
+-- Example 34: Retry failed migration (after fixing issues)
 DECLARE
     v_task_id NUMBER := 1;  -- Replace with failed task_id
 BEGIN
     -- Reset task status
-    UPDATE migration_tasks
+    UPDATE cmr.dwh_migration_tasks
     SET status = 'READY',
         error_message = NULL,
         execution_start = NULL,
@@ -797,7 +797,7 @@ BEGIN
     COMMIT;
 
     -- Retry
-    table_migration_executor.execute_migration(v_task_id);
+    pck_dwh_table_migration_executor.execute_migration(v_task_id);
 END;
 /
 
@@ -807,14 +807,14 @@ END;
 -- =============================================================================
 
 -- Remove all tasks from a project
-DELETE FROM migration_tasks
+DELETE FROM cmr.dwh_migration_tasks
 WHERE project_id = (
-    SELECT project_id FROM migration_projects
+    SELECT project_id FROM cmr.dwh_migration_projects
     WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
 );
 
 -- Remove a project
-DELETE FROM migration_projects
+DELETE FROM cmr.dwh_migration_projects
 WHERE project_name = 'Q1_2024_TABLE_PARTITIONING';
 
 COMMIT;
