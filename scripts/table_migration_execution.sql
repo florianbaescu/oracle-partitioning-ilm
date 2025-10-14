@@ -2537,8 +2537,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_sql VARCHAR2(1000);
         v_step NUMBER := 1000;  -- High step number for post-cutover operations
         v_start TIMESTAMP;
+        v_overall_start TIMESTAMP;
         v_renamed_count NUMBER := 0;
+        v_skipped_count NUMBER := 0;
+        v_failed_count NUMBER := 0;
+        v_total_count NUMBER := 0;
     BEGIN
+        v_overall_start := SYSTIMESTAMP;
         DBMS_OUTPUT.PUT_LINE('Renaming system-generated partitions to human-readable names...');
 
         -- Get all system-generated partitions (skip named partitions like P_XDEF, P_INITIAL)
@@ -2551,7 +2556,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             AND partition_name LIKE 'SYS_P%'  -- Only system-generated names
             ORDER BY partition_position
         ) LOOP
-            v_start := SYSTIMESTAMP;
+            v_total_count := v_total_count + 1;
 
             -- Get high_value as string (LONG datatype requires special handling)
             BEGIN
@@ -2576,32 +2581,34 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                     EXECUTE IMMEDIATE v_sql;
 
-                    log_step(p_task_id, v_step, 'Rename partition: ' || part.partition_name || ' -> ' || v_new_partition_name,
-                            'RENAME_PARTITION', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
-
                     DBMS_OUTPUT.PUT_LINE('  Renamed: ' || part.partition_name || ' -> ' || v_new_partition_name ||
                                         ' (value: ' || SUBSTR(v_high_value_str, 1, 50) || ')');
 
                     v_renamed_count := v_renamed_count + 1;
                 ELSE
                     DBMS_OUTPUT.PUT_LINE('  SKIPPED: Could not generate name for partition ' || part.partition_name);
+                    v_skipped_count := v_skipped_count + 1;
                 END IF;
-
-                v_step := v_step + 1;
 
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- Log error but continue with other partitions
-                    log_step(p_task_id, v_step, 'Rename partition: ' || part.partition_name,
-                            'RENAME_PARTITION', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
-                            SQLCODE, SQLERRM);
-
+                    -- Continue with other partitions
                     DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to rename partition ' || part.partition_name || ': ' || SQLERRM);
-                    v_step := v_step + 1;
+                    v_failed_count := v_failed_count + 1;
             END;
         END LOOP;
 
-        DBMS_OUTPUT.PUT_LINE('Partition renaming complete: ' || v_renamed_count || ' partitions renamed');
+        -- Log single summary entry
+        IF v_total_count > 0 THEN
+            log_step(p_task_id, v_step,
+                    'Renamed ' || v_renamed_count || ' partitions (skipped: ' || v_skipped_count || ', failed: ' || v_failed_count || ')',
+                    'RENAME_PARTITIONS_SUMMARY',
+                    'Processed ' || v_total_count || ' system-generated partitions for ' || p_owner || '.' || p_table_name,
+                    'SUCCESS', v_overall_start, SYSTIMESTAMP);
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Partition renaming complete: ' || v_renamed_count || ' renamed, ' ||
+                            v_skipped_count || ' skipped, ' || v_failed_count || ' failed (total: ' || v_total_count || ')');
     END rename_system_partitions;
 
 END pck_dwh_table_migration_executor;
