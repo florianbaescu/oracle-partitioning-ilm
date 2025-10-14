@@ -506,8 +506,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Get constraint DDL from DBMS_METADATA
                 v_constraint_ddl := DBMS_METADATA.GET_DDL('CONSTRAINT', con.constraint_name, p_source_owner);
 
+                -- Replace constraint name with temporary _MIGR suffix to avoid ORA-02264
+                -- (Constraint names are schema-level unique, unlike indexes)
+                v_sql := REGEXP_REPLACE(v_constraint_ddl,
+                                       'CONSTRAINT\s+"' || con.constraint_name || '"',
+                                       'CONSTRAINT "' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR"',
+                                       1, 1, 'i');
+
                 -- Replace source table name with target table name
-                v_sql := REPLACE(v_constraint_ddl,
+                v_sql := REPLACE(v_sql,
                                 '"' || p_source_table || '"',
                                 '"' || p_target_table || '"');
                 v_sql := REPLACE(v_sql,
@@ -519,10 +526,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 EXECUTE IMMEDIATE v_sql;
 
-                log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name,
+                log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
                         'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
-                DBMS_OUTPUT.PUT_LINE('  Recreated PRIMARY KEY: ' || con.constraint_name);
+                DBMS_OUTPUT.PUT_LINE('  Created PRIMARY KEY: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR (will rename to ' || con.constraint_name || ' after cutover)');
             EXCEPTION
                 WHEN OTHERS THEN
                     log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name,
@@ -563,8 +570,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Get constraint DDL from DBMS_METADATA
                 v_constraint_ddl := DBMS_METADATA.GET_DDL('CONSTRAINT', con.constraint_name, p_source_owner);
 
+                -- Replace constraint name with temporary _MIGR suffix to avoid ORA-02264
+                -- (Constraint names are schema-level unique, unlike indexes)
+                v_sql := REGEXP_REPLACE(v_constraint_ddl,
+                                       'CONSTRAINT\s+"' || con.constraint_name || '"',
+                                       'CONSTRAINT "' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR"',
+                                       1, 1, 'i');
+
                 -- Replace source table name with target table name
-                v_sql := REPLACE(v_constraint_ddl,
+                v_sql := REPLACE(v_sql,
                                 '"' || p_source_table || '"',
                                 '"' || p_target_table || '"');
                 v_sql := REPLACE(v_sql,
@@ -576,11 +590,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 EXECUTE IMMEDIATE v_sql;
 
-                log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
+                log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
                         'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
-                DBMS_OUTPUT.PUT_LINE('  Recreated constraint: ' || con.constraint_name ||
-                                    ' (' || con.constraint_type || ')');
+                DBMS_OUTPUT.PUT_LINE('  Created constraint: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR' ||
+                                    ' (' || con.constraint_type || ') (will rename to ' || con.constraint_name || ' after cutover)');
             EXCEPTION
                 WHEN OTHERS THEN
                     log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name,
@@ -1075,6 +1089,79 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         -- Re-raise exception to fail the migration
                         RAISE_APPLICATION_ERROR(-20501,
                             'Index rename failed: ' || idx.index_name || ' -> ' || idx.original_name || ' - ' || SQLERRM);
+                END;
+            END LOOP;
+
+            -- Step 8.5: Rename old table's constraints to _OLD suffix
+            v_step := v_step + 5;
+            v_start := SYSTIMESTAMP;
+            DBMS_OUTPUT.PUT_LINE('Renaming old table constraints to _OLD suffix...');
+
+            FOR old_con IN (
+                SELECT constraint_name, constraint_type
+                FROM dba_constraints
+                WHERE owner = v_task.source_owner
+                AND table_name = v_old_table
+                AND constraint_name NOT LIKE '%\_OLD' ESCAPE '\'
+                ORDER BY constraint_type  -- P, U, C, R order
+            ) LOOP
+                BEGIN
+                    v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_old_table ||
+                            ' RENAME CONSTRAINT ' || old_con.constraint_name ||
+                            ' TO ' || old_con.constraint_name || '_OLD';
+                    EXECUTE IMMEDIATE v_sql;
+
+                    DBMS_OUTPUT.PUT_LINE('  Renamed old constraint: ' || old_con.constraint_name || ' -> ' || old_con.constraint_name || '_OLD');
+
+                    log_step(p_task_id, v_step, 'Rename old constraint: ' || old_con.constraint_name,
+                            'RENAME_CONSTRAINT', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to rename old constraint ' || old_con.constraint_name || ': ' || SQLERRM);
+                        log_step(p_task_id, v_step, 'Rename old constraint: ' || old_con.constraint_name,
+                                'RENAME_CONSTRAINT', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                                SQLCODE, SQLERRM);
+
+                        -- Re-raise exception to fail the migration
+                        RAISE_APPLICATION_ERROR(-20504,
+                            'Old constraint rename failed: ' || old_con.constraint_name || ' - ' || SQLERRM);
+                END;
+            END LOOP;
+
+            -- Step 9: Rename constraints from temporary names back to original names
+            v_step := v_step + 5;
+            v_start := SYSTIMESTAMP;
+            DBMS_OUTPUT.PUT_LINE('Renaming constraints to original names...');
+
+            FOR con IN (
+                SELECT constraint_name, REPLACE(constraint_name, '_MIGR', '') AS original_name, constraint_type
+                FROM dba_constraints
+                WHERE owner = v_task.source_owner
+                AND table_name = v_task.source_table
+                AND constraint_name LIKE '%\_MIGR' ESCAPE '\'
+                ORDER BY DECODE(constraint_type, 'R', 3, 'U', 2, 'C', 2, 'P', 1)  -- FK last
+            ) LOOP
+                BEGIN
+                    v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_task.source_table ||
+                            ' RENAME CONSTRAINT ' || con.constraint_name ||
+                            ' TO ' || con.original_name;
+                    EXECUTE IMMEDIATE v_sql;
+
+                    DBMS_OUTPUT.PUT_LINE('  Renamed: ' || con.constraint_name || ' -> ' || con.original_name);
+
+                    log_step(p_task_id, v_step, 'Rename constraint: ' || con.original_name,
+                            'RENAME_CONSTRAINT', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                    v_step := v_step + 1;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to rename constraint ' || con.constraint_name || ': ' || SQLERRM);
+                        log_step(p_task_id, v_step, 'Rename constraint: ' || con.original_name,
+                                'RENAME_CONSTRAINT', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                                SQLCODE, SQLERRM);
+
+                        -- Re-raise exception to fail the migration
+                        RAISE_APPLICATION_ERROR(-20505,
+                            'Constraint rename failed: ' || con.constraint_name || ' -> ' || con.original_name || ' - ' || SQLERRM);
                 END;
             END LOOP;
 
