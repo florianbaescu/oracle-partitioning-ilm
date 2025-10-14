@@ -961,8 +961,42 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             log_step(p_task_id, v_step, 'Rename tables', 'RENAME', v_sql,
                     'SUCCESS', v_start, SYSTIMESTAMP);
 
+            -- Step 7.5: Rename old table's indexes to avoid naming conflicts
+            v_step := v_step + 5;
+            v_start := SYSTIMESTAMP;
+            DBMS_OUTPUT.PUT_LINE('Renaming old table indexes to _OLD suffix...');
+
+            FOR old_idx IN (
+                SELECT index_name
+                FROM dba_indexes
+                WHERE table_owner = v_task.source_owner
+                AND table_name = v_old_table
+                AND index_name NOT LIKE '%\_OLD' ESCAPE '\'
+            ) LOOP
+                BEGIN
+                    v_sql := 'ALTER INDEX ' || v_task.source_owner || '.' || old_idx.index_name ||
+                            ' RENAME TO ' || old_idx.index_name || '_OLD';
+                    EXECUTE IMMEDIATE v_sql;
+
+                    DBMS_OUTPUT.PUT_LINE('  Renamed old index: ' || old_idx.index_name || ' -> ' || old_idx.index_name || '_OLD');
+
+                    log_step(p_task_id, v_step, 'Rename old index: ' || old_idx.index_name,
+                            'RENAME_INDEX', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to rename old index ' || old_idx.index_name || ': ' || SQLERRM);
+                        log_step(p_task_id, v_step, 'Rename old index: ' || old_idx.index_name,
+                                'RENAME_INDEX', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
+                                SQLCODE, SQLERRM);
+
+                        -- Re-raise exception to fail the migration
+                        RAISE_APPLICATION_ERROR(-20502,
+                            'Old index rename failed: ' || old_idx.index_name || ' - ' || SQLERRM);
+                END;
+            END LOOP;
+
             -- Step 8: Rename indexes from temporary names back to original names
-            v_step := v_step + 10;
+            v_step := v_step + 5;
             v_start := SYSTIMESTAMP;
             DBMS_OUTPUT.PUT_LINE('Renaming indexes to original names...');
 
