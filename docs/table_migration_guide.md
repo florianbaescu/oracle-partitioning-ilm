@@ -293,6 +293,99 @@ INSERT INTO migration_tasks (
 );
 ```
 
+#### Row Movement Configuration
+
+The `enable_row_movement` option controls whether Oracle can physically move rows between partitions when partition key values change.
+
+**What is Row Movement?**
+
+Row movement allows Oracle to:
+- Move rows from one partition to another when partition key values are updated
+- Automatically redistribute data for optimal partition placement
+- Execute ILM policies that move data between partitions
+- Handle interval partition expansion efficiently
+
+**Why Enable Row Movement?**
+
+| Scenario | Without Row Movement | With Row Movement |
+|----------|---------------------|-------------------|
+| Update partition key | ❌ ORA-14402 error | ✅ Row moves to correct partition |
+| ILM data movement | ❌ Policies fail | ✅ Data moves automatically |
+| Interval partitioning | ⚠️ Limited functionality | ✅ Full functionality |
+| Partition maintenance | ⚠️ Manual splits needed | ✅ Automatic handling |
+
+**Configuration:**
+
+```sql
+-- Default (enabled - recommended):
+INSERT INTO cmr.dwh_migration_tasks (
+    source_table,
+    migration_method,
+    use_compression
+) VALUES (
+    'SALES_FACT',
+    'CTAS',
+    'Y'
+);  -- enable_row_movement defaults to 'Y'
+
+-- Explicitly enable:
+INSERT INTO cmr.dwh_migration_tasks (
+    source_table,
+    migration_method,
+    enable_row_movement
+) VALUES (
+    'SALES_FACT',
+    'CTAS',
+    'Y'
+);
+
+-- Disable (not recommended):
+INSERT INTO cmr.dwh_migration_tasks (
+    source_table,
+    migration_method,
+    enable_row_movement
+) VALUES (
+    'REFERENCE_DATA',
+    'CTAS',
+    'N'  -- Only if partition keys never change
+);
+```
+
+**When to Disable:**
+
+Consider disabling row movement only when:
+- Partition key columns are **never** updated
+- Performance is critical and you can guarantee no partition key changes
+- Legacy applications with strict partition placement requirements
+- Reference/lookup tables with immutable partition keys
+
+**Common Errors Without Row Movement:**
+
+```sql
+-- Example: Attempting to update partition key without row movement
+UPDATE sales_fact
+SET sale_date = sale_date + 365  -- Move to different partition
+WHERE sale_id = 12345;
+
+-- Error without row movement:
+-- ORA-14402: updating partition key column would cause a partition change
+```
+
+**Best Practice:**
+
+✅ **Always enable row movement** unless you have a specific reason not to. It's required for:
+- Interval partitioned tables
+- ILM policies (compression, tiering, archival)
+- Applications that may update partition key values
+- Future-proofing against schema changes
+
+**Applied Across All Methods:**
+
+Row movement is automatically configured for all migration methods:
+- ✅ CTAS (Create Table As Select)
+- ✅ ONLINE (DBMS_REDEFINITION)
+- ✅ EXCHANGE (Partition Exchange)
+
 ### Analysis
 
 The analysis engine examines tables and recommends strategies:
@@ -681,6 +774,24 @@ COMMIT;
 - Wait 30+ days before dropping backup tables
 - Verify application compatibility
 - Confirm performance improvements
+
+### 9. Enable Row Movement
+
+- **Always enable row movement** for partitioned tables (default: 'Y')
+- Required for ILM policies to work correctly
+- Prevents ORA-14402 errors when updating partition keys
+- Essential for interval partitioning
+- Only disable if partition key columns are guaranteed immutable
+
+```sql
+-- Verify row movement is enabled after migration
+SELECT table_name, row_movement
+FROM dba_tables
+WHERE table_name = 'SALES_FACT';
+
+-- Enable manually if needed
+ALTER TABLE sales_fact ENABLE ROW MOVEMENT;
+```
 
 ## Non-Standard Date Column Handling
 
