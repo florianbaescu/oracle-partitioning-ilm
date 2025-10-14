@@ -316,6 +316,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE);
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
 
+        -- Clean up stale _MIGR indexes from previous failed migrations
+        DBMS_OUTPUT.PUT_LINE('Checking for stale _MIGR indexes from previous migrations...');
+        FOR stale_idx IN (
+            SELECT index_name
+            FROM dba_indexes
+            WHERE table_owner = p_source_owner
+            AND table_name = p_target_table
+            AND index_name LIKE '%\_MIGR' ESCAPE '\'
+        ) LOOP
+            BEGIN
+                v_sql := 'DROP INDEX ' || p_source_owner || '.' || stale_idx.index_name;
+                EXECUTE IMMEDIATE v_sql;
+                DBMS_OUTPUT.PUT_LINE('  Dropped stale index: ' || stale_idx.index_name);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('  Warning: Could not drop stale index ' || stale_idx.index_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
         -- Get all indexes (excluding PK indexes)
         FOR idx IN (
             SELECT index_name
@@ -966,11 +985,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     v_step := v_step + 1;
                 EXCEPTION
                     WHEN OTHERS THEN
-                        DBMS_OUTPUT.PUT_LINE('  WARNING: Failed to rename index ' || idx.index_name || ': ' || SQLERRM);
+                        DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to rename index ' || idx.index_name || ': ' || SQLERRM);
                         log_step(p_task_id, v_step, 'Rename index: ' || idx.original_name,
                                 'RENAME_INDEX', v_sql, 'FAILED', v_start, SYSTIMESTAMP,
                                 SQLCODE, SQLERRM);
-                        v_step := v_step + 1;
+
+                        -- Re-raise exception to fail the migration
+                        RAISE_APPLICATION_ERROR(-20501,
+                            'Index rename failed: ' || idx.index_name || ' -> ' || idx.original_name || ' - ' || SQLERRM);
                 END;
             END LOOP;
 
