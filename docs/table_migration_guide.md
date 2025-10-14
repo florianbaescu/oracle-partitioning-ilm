@@ -33,17 +33,23 @@ This framework provides end-to-end support for converting non-partitioned tables
 │     ├─> Estimate complexity & downtime       │
 │     └─> Identify blocking issues             │
 │                                               │
-│  4. Execution Engine                          │
+│  4. Apply Recommendations                     │
+│     ├─> Copy recommended strategy to task    │
+│     ├─> Set partition_type & partition_key   │
+│     ├─> Set interval_clause & method         │
+│     └─> Update task status to READY          │
+│                                               │
+│  5. Execution Engine                          │
 │     ├─> Create backup                        │
 │     ├─> Build partitioned table              │
 │     ├─> Copy data                            │
 │     ├─> Recreate indexes & constraints       │
 │     └─> Swap tables                          │
 │                                               │
-│  5. ILM Integration                           │
+│  6. ILM Integration                           │
 │     └─> Apply policy templates               │
 │                                               │
-│  6. Validation & Rollback                     │
+│  7. Validation & Rollback                     │
 │     ├─> Verify row counts                    │
 │     └─> Rollback if needed                   │
 │                                               │
@@ -85,7 +91,7 @@ AND object_type = 'PACKAGE';
 
 ```sql
 -- View tables suitable for partitioning
-SELECT * FROM v_migration_candidates
+SELECT * FROM cmr.dwh_v_migration_candidates
 WHERE migration_priority IN ('HIGH PRIORITY', 'MEDIUM PRIORITY')
 ORDER BY size_mb DESC;
 ```
@@ -93,7 +99,7 @@ ORDER BY size_mb DESC;
 ### 2. Create Project
 
 ```sql
-INSERT INTO migration_projects (project_name, description)
+INSERT INTO cmr.dwh_migration_projects (project_name, description)
 VALUES ('Q1_MIGRATION', 'Partition fact tables for Q1');
 COMMIT;
 ```
@@ -101,22 +107,26 @@ COMMIT;
 ### 3. Create Migration Task
 
 ```sql
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
+    source_owner,
     source_table,
     migration_method,
     use_compression,
     apply_ilm_policies,
-    ilm_policy_template
+    ilm_policy_template,
+    status
 ) VALUES (
-    (SELECT project_id FROM migration_projects WHERE project_name = 'Q1_MIGRATION'),
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'Q1_MIGRATION'),
     'Migrate SALES_FACT',
+    USER,
     'SALES_FACT',
     'CTAS',
     'Y',
     'Y',
-    'FACT_TABLE_STANDARD'
+    'FACT_TABLE_STANDARD',
+    'PENDING'
 );
 COMMIT;
 ```
@@ -128,10 +138,10 @@ DECLARE
     v_task_id NUMBER;
 BEGIN
     SELECT task_id INTO v_task_id
-    FROM migration_tasks
+    FROM cmr.dwh_migration_tasks
     WHERE task_name = 'Migrate SALES_FACT';
 
-    table_migration_analyzer.analyze_table(v_task_id);
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
 END;
 /
 ```
@@ -145,22 +155,40 @@ SELECT
     a.complexity_score,
     a.estimated_partitions,
     a.estimated_downtime_minutes
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE t.task_name = 'Migrate SALES_FACT';
 ```
 
-### 6. Execute Migration
+### 6. Apply Recommendations
 
 ```sql
 DECLARE
     v_task_id NUMBER;
 BEGIN
     SELECT task_id INTO v_task_id
-    FROM migration_tasks
+    FROM cmr.dwh_migration_tasks
     WHERE task_name = 'Migrate SALES_FACT';
 
-    table_migration_executor.execute_migration(v_task_id);
+    -- Copy recommended strategy from analysis to task
+    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+
+    -- Task is now READY for execution
+END;
+/
+```
+
+### 7. Execute Migration
+
+```sql
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Migrate SALES_FACT';
+
+    pck_dwh_table_migration_executor.execute_migration(v_task_id);
 END;
 /
 ```
