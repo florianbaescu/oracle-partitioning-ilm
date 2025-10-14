@@ -62,16 +62,17 @@ IS 'Default values for P_XDEF partition (e.g., ''NAV'' for VARCHAR, -1 for NUMBE
 **Default Value Constants by Data Type:**
 
 ```plsql
--- Constants for default partition values
-C_DEFAULT_VARCHAR   CONSTANT VARCHAR2(100) := '''NAV''';
-C_DEFAULT_CHAR      CONSTANT VARCHAR2(100) := '''NAV''';
+-- Constants for default partition values (length-aware for strings)
 C_DEFAULT_NUMBER    CONSTANT VARCHAR2(100) := '-1';
 C_DEFAULT_DATE      CONSTANT VARCHAR2(100) := 'DATE ''5999-12-31''';
 C_DEFAULT_TIMESTAMP CONSTANT VARCHAR2(100) := 'TO_TIMESTAMP(''5999-12-31 23:59:59'',''YYYY-MM-DD HH24:MI:SS'')';
 ```
 
 **Rationale:**
-- **VARCHAR2/CHAR:** `'NAV'` - standard "Not Available" placeholder for missing categorical data
+- **VARCHAR2/CHAR (Length-Aware):**
+  - Length >= 3: `'NAV'` - "Not Available" placeholder
+  - Length = 2: `'NA'` - "Not Available" (abbreviated)
+  - Length = 1: `'X'` - Unknown/Default marker
 - **NUMBER:** `-1` - sentinel value for missing/unknown numeric categories
 - **DATE:** `DATE '5999-12-31'` - far future date to represent "no expiry" or "permanent" data
 - **TIMESTAMP:** `TIMESTAMP '5999-12-31 23:59:59'` - far future timestamp for similar use cases
@@ -89,9 +90,9 @@ AS
     v_columns SYS.ODCIVARCHAR2LIST;
     v_column_name VARCHAR2(128);
     v_data_type VARCHAR2(128);
+    v_data_length NUMBER;
     v_default_values VARCHAR2(4000);
     v_values_list VARCHAR2(4000) := '';
-    v_pos NUMBER;
 BEGIN
     -- If user provided defaults, validate and return them
     IF p_user_defaults IS NOT NULL THEN
@@ -114,9 +115,9 @@ BEGIN
     FOR i IN 1..v_columns.COUNT LOOP
         v_column_name := v_columns(i);
 
-        -- Get data type
+        -- Get data type and length
         BEGIN
-            SELECT data_type INTO v_data_type
+            SELECT data_type, data_length INTO v_data_type, v_data_length
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
@@ -127,9 +128,19 @@ BEGIN
                     'Column ' || v_column_name || ' not found in table ' || p_owner || '.' || p_table_name);
         END;
 
-        -- Determine default based on data type
+        -- Determine default based on data type and length
         IF v_data_type IN ('VARCHAR2', 'VARCHAR', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN
-            v_default_values := C_DEFAULT_VARCHAR;
+            -- Length-aware default values for string types
+            IF v_data_length >= 3 THEN
+                v_default_values := '''NAV''';  -- Not Available
+            ELSIF v_data_length = 2 THEN
+                v_default_values := '''NA''';   -- Not Available (abbreviated)
+            ELSIF v_data_length = 1 THEN
+                v_default_values := '''X''';    -- Unknown/Default marker
+            ELSE
+                RAISE_APPLICATION_ERROR(-20617,
+                    'Column ' || v_column_name || ' has invalid length: ' || v_data_length);
+            END IF;
         ELSIF v_data_type IN ('NUMBER', 'INTEGER', 'FLOAT', 'BINARY_INTEGER') THEN
             v_default_values := C_DEFAULT_NUMBER;
         ELSIF v_data_type = 'DATE' THEN
