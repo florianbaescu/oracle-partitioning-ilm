@@ -451,8 +451,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     -- Recreate Constraints Using DBMS_METADATA
     -- -------------------------------------------------------------------------
     -- DESCRIPTION:
-    --   Recreates all constraints (CHECK, UNIQUE, FK) from source table on target
-    --   table using Oracle's DBMS_METADATA.GET_DEPENDENT_DDL for accurate extraction.
+    --   Recreates all constraints (PRIMARY KEY, CHECK, UNIQUE, FK) from source table
+    --   on target table using Oracle's DBMS_METADATA.GET_DDL for accurate extraction.
     --
     -- BENEFITS:
     --   - Captures ALL constraint features: deferred, ENABLE/DISABLE, RELY/NORELY
@@ -461,13 +461,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     --   - More maintainable than manual DDL construction
     --
     -- PROCESS:
-    --   1. Get constraint DDL using DBMS_METADATA
-    --   2. Parse and extract individual constraint statements
-    --   3. Replace table references
-    --   4. Execute modified DDL
+    --   1. Recreate PRIMARY KEY constraint first (highest priority)
+    --   2. Recreate CHECK and UNIQUE constraints (no dependencies)
+    --   3. Recreate FOREIGN KEY constraints last (depends on PKs)
+    --   4. Get constraint DDL using DBMS_METADATA.GET_DDL
+    --   5. Replace table references
+    --   6. Execute modified DDL
     --
     -- NOTE:
-    --   - PRIMARY KEY constraints are handled separately (not recreated here)
     --   - Foreign key constraints may need to be recreated after all tables migrated
     -- -------------------------------------------------------------------------
     PROCEDURE recreate_constraints(
@@ -489,7 +490,54 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);
         DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'REF_CONSTRAINTS', FALSE);
 
-        -- Get CHECK and UNIQUE constraints first (no dependencies)
+        -- Get PRIMARY KEY constraint first (highest priority)
+        FOR con IN (
+            SELECT c.constraint_name, c.constraint_type
+            FROM dba_constraints c
+            WHERE c.owner = p_source_owner
+            AND c.table_name = p_source_table
+            AND c.constraint_type = 'P'
+            ORDER BY c.constraint_name
+        ) LOOP
+            v_step := v_step + 1;
+            v_start := SYSTIMESTAMP;
+
+            BEGIN
+                -- Get constraint DDL from DBMS_METADATA
+                v_constraint_ddl := DBMS_METADATA.GET_DDL('CONSTRAINT', con.constraint_name, p_source_owner);
+
+                -- Replace source table name with target table name
+                v_sql := REPLACE(v_constraint_ddl,
+                                '"' || p_source_table || '"',
+                                '"' || p_target_table || '"');
+                v_sql := REPLACE(v_sql,
+                                ' ' || p_source_table || ' ',
+                                ' ' || p_target_table || ' ');
+
+                -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
+                v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
+
+                EXECUTE IMMEDIATE v_sql;
+
+                log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name,
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
+
+                DBMS_OUTPUT.PUT_LINE('  Recreated PRIMARY KEY: ' || con.constraint_name);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name,
+                            'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'FAILED', v_start, SYSTIMESTAMP,
+                            SQLCODE, SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  ERROR: Failed to recreate PRIMARY KEY ' || con.constraint_name);
+                    DBMS_OUTPUT.PUT_LINE('  ' || SQLERRM);
+
+                    -- Re-raise exception to fail the migration (PRIMARY KEY is critical)
+                    RAISE_APPLICATION_ERROR(-20503,
+                        'PRIMARY KEY recreation failed: ' || con.constraint_name || ' - ' || SQLERRM);
+            END;
+        END LOOP;
+
+        -- Get CHECK and UNIQUE constraints (no dependencies)
         -- NOTE: Include ALL constraints including SYS_% names, as these may be:
         --   1. NOT NULL constraints (already in build_partition_ddl - will skip)
         --   2. User-created CHECK constraints without explicit names (IMPORTANT!)
