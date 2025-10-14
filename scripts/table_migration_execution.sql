@@ -51,15 +51,17 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
         p_task_id NUMBER
     );
 
-    -- AUTOMATIC LIST Partitioning helper functions
+    -- Partition renaming helper functions (all partition types)
     FUNCTION generate_partition_name_from_value(
-        p_high_value VARCHAR2
+        p_high_value VARCHAR2,
+        p_partition_type VARCHAR2  -- 'LIST' or 'RANGE' or 'HASH'
     ) RETURN VARCHAR2;
 
-    PROCEDURE rename_list_partitions(
+    PROCEDURE rename_system_partitions(
         p_task_id NUMBER,
         p_owner VARCHAR2,
-        p_table_name VARCHAR2
+        p_table_name VARCHAR2,
+        p_partition_type VARCHAR2  -- Used to determine naming strategy
     );
 
 END pck_dwh_table_migration_executor;
@@ -1227,17 +1229,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             WHERE task_id = p_task_id;
             COMMIT;
 
-            -- Step 10: Rename AUTOMATIC LIST partitions (if applicable)
-            IF v_task.automatic_list = 'Y' THEN
-                v_step := v_step + 10;
-                DBMS_OUTPUT.PUT_LINE('Renaming AUTOMATIC LIST partitions...');
+            -- Step 10: Rename system-generated partitions (all partition types)
+            v_step := v_step + 10;
+            DBMS_OUTPUT.PUT_LINE('Renaming system-generated partitions...');
 
-                rename_list_partitions(
-                    p_task_id => p_task_id,
-                    p_owner => v_task.source_owner,
-                    p_table_name => v_task.source_table  -- Already renamed to final name
-                );
-            END IF;
+            rename_system_partitions(
+                p_task_id => p_task_id,
+                p_owner => v_task.source_owner,
+                p_table_name => v_task.source_table,  -- Already renamed to final name
+                p_partition_type => v_task.partition_type
+            );
 
             DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
             DBMS_OUTPUT.PUT_LINE('  Original table renamed to: ' || v_old_table);
@@ -2395,11 +2396,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
 
     -- =========================================================================
-    -- AUTOMATIC LIST Partitioning Helper Functions
+    -- Partition Renaming Helper Functions (All Partition Types)
     -- =========================================================================
 
     FUNCTION generate_partition_name_from_value(
-        p_high_value VARCHAR2
+        p_high_value VARCHAR2,
+        p_partition_type VARCHAR2
     ) RETURN VARCHAR2
     AS
         v_partition_name VARCHAR2(128);
@@ -2407,71 +2409,126 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_values SYS.ODCIVARCHAR2LIST := SYS.ODCIVARCHAR2LIST();
         v_name_parts VARCHAR2(200) := '';
         v_max_length NUMBER := 30;  -- Oracle partition name limit
+        v_date_value DATE;
+        v_year NUMBER;
+        v_month NUMBER;
+        v_day NUMBER;
     BEGIN
-        -- Parse high_value to extract actual values
-        -- Example formats:
-        -- Single: 'NORTH'
-        -- Multiple: 'NORTH', 'USA'
-        -- Number: 1
-        -- Multiple numbers: 1, 2
+        -- Detect partition type and generate appropriate name
+        IF UPPER(p_partition_type) LIKE '%RANGE%' OR UPPER(p_partition_type) LIKE 'DATE%' THEN
+            -- RANGE partition with date - extract date from HIGH_VALUE
+            -- Example HIGH_VALUE: TO_DATE(' 2025-08-01 00:00:00', 'SYYYY-MM-DD HH24:MI:SS', 'NLS_CALENDAR=GREGORIAN')
+            BEGIN
+                -- Try to extract date string from TO_DATE function
+                -- Pattern: TO_DATE(' YYYY-MM-DD ...
+                v_value_clean := REGEXP_SUBSTR(p_high_value, '''[^'']+''', 1, 1);
+                IF v_value_clean IS NOT NULL THEN
+                    -- Remove quotes
+                    v_value_clean := TRIM('''' FROM v_value_clean);
+                    v_value_clean := TRIM(v_value_clean);
 
-        -- Remove leading/trailing whitespace and quotes
-        v_value_clean := TRIM(p_high_value);
+                    -- Extract date components from string like '2025-08-01 00:00:00'
+                    v_year := TO_NUMBER(SUBSTR(v_value_clean, 1, 4));
+                    v_month := TO_NUMBER(SUBSTR(v_value_clean, 6, 2));
+                    v_day := TO_NUMBER(SUBSTR(v_value_clean, 9, 2));
 
-        -- Extract values (handle single or multiple)
-        FOR val IN (
-            SELECT TRIM(BOTH '''' FROM TRIM(REGEXP_SUBSTR(v_value_clean, '[^,]+', 1, LEVEL))) AS value_part
-            FROM DUAL
-            CONNECT BY LEVEL <= REGEXP_COUNT(v_value_clean, ',') + 1
-        ) LOOP
-            IF val.value_part IS NOT NULL AND val.value_part != 'NULL' THEN
-                v_values.EXTEND;
-                v_values(v_values.COUNT) := val.value_part;
-            END IF;
-        END LOOP;
+                    -- Generate name based on granularity
+                    IF v_day = 1 AND v_month IN (1, 4, 7, 10) THEN
+                        -- Quarterly partition (first day of quarter)
+                        v_name_parts := 'P_' || v_year || 'Q' || CEIL(v_month / 3);
+                    ELSIF v_day = 1 THEN
+                        -- Monthly partition (first day of month)
+                        v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0');
+                    ELSIF v_month = 1 AND v_day = 1 THEN
+                        -- Yearly partition (first day of year)
+                        v_name_parts := 'P_' || v_year;
+                    ELSE
+                        -- Daily partition or other
+                        v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0') || LPAD(v_day, 2, '0');
+                    END IF;
 
-        -- Build partition name from values
-        IF v_values.COUNT = 0 THEN
-            -- No values found, keep original name
-            RETURN NULL;
-        ELSIF v_values.COUNT = 1 THEN
-            -- Single value: P_<VALUE>
-            v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(1), '[^A-Z0-9_]', '_'));
-        ELSE
-            -- Multiple values: P_<VALUE1>_<VALUE2>
-            FOR i IN 1..LEAST(v_values.COUNT, 3) LOOP  -- Limit to 3 values
-                IF i = 1 THEN
-                    v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
-                ELSE
-                    v_name_parts := v_name_parts || '_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
+                    RETURN v_name_parts;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Fall through to default handling
+                    NULL;
+            END;
+
+        ELSIF UPPER(p_partition_type) LIKE '%LIST%' THEN
+            -- LIST partition - extract literal values
+            -- Example formats:
+            -- Single: 'NORTH'
+            -- Multiple: 'NORTH', 'USA'
+            -- Number: 1
+            -- Multiple numbers: 1, 2
+
+            -- Remove leading/trailing whitespace and quotes
+            v_value_clean := TRIM(p_high_value);
+
+            -- Extract values (handle single or multiple)
+            FOR val IN (
+                SELECT TRIM(BOTH '''' FROM TRIM(REGEXP_SUBSTR(v_value_clean, '[^,]+', 1, LEVEL))) AS value_part
+                FROM DUAL
+                CONNECT BY LEVEL <= REGEXP_COUNT(v_value_clean, ',') + 1
+            ) LOOP
+                IF val.value_part IS NOT NULL AND val.value_part != 'NULL' THEN
+                    v_values.EXTEND;
+                    v_values(v_values.COUNT) := val.value_part;
                 END IF;
             END LOOP;
 
-            -- If more than 3 values, add suffix
-            IF v_values.COUNT > 3 THEN
-                v_name_parts := v_name_parts || '_ETC';
+            -- Build partition name from values
+            IF v_values.COUNT = 0 THEN
+                -- No values found, keep original name
+                RETURN NULL;
+            ELSIF v_values.COUNT = 1 THEN
+                -- Single value: P_<VALUE>
+                v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(1), '[^A-Z0-9_]', '_'));
+            ELSE
+                -- Multiple values: P_<VALUE1>_<VALUE2>
+                FOR i IN 1..LEAST(v_values.COUNT, 3) LOOP  -- Limit to 3 values
+                    IF i = 1 THEN
+                        v_name_parts := 'P_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
+                    ELSE
+                        v_name_parts := v_name_parts || '_' || UPPER(REGEXP_REPLACE(v_values(i), '[^A-Z0-9_]', '_'));
+                    END IF;
+                END LOOP;
+
+                -- If more than 3 values, add suffix
+                IF v_values.COUNT > 3 THEN
+                    v_name_parts := v_name_parts || '_ETC';
+                END IF;
             END IF;
+
+            -- Truncate to Oracle's partition name limit
+            IF LENGTH(v_name_parts) > v_max_length THEN
+                v_name_parts := SUBSTR(v_name_parts, 1, v_max_length);
+            END IF;
+
+            RETURN v_name_parts;
+
+        ELSE
+            -- HASH or other - keep system-generated name
+            RETURN NULL;
         END IF;
 
-        -- Truncate to Oracle's partition name limit
-        IF LENGTH(v_name_parts) > v_max_length THEN
-            v_name_parts := SUBSTR(v_name_parts, 1, v_max_length);
-        END IF;
-
-        RETURN v_name_parts;
+        -- Default: return NULL (keep original name)
+        RETURN NULL;
 
     EXCEPTION
         WHEN OTHERS THEN
             -- If name generation fails, return NULL (keep original name)
-            DBMS_OUTPUT.PUT_LINE('  WARNING: Could not generate partition name from: ' || p_high_value);
+            DBMS_OUTPUT.PUT_LINE('  WARNING: Could not generate partition name from: ' || p_high_value || ' (' || SQLERRM || ')');
             RETURN NULL;
     END generate_partition_name_from_value;
 
 
-    PROCEDURE rename_list_partitions(
+    PROCEDURE rename_system_partitions(
         p_task_id NUMBER,
         p_owner VARCHAR2,
-        p_table_name VARCHAR2
+        p_table_name VARCHAR2,
+        p_partition_type VARCHAR2
     ) AS
         v_partition_name VARCHAR2(128);
         v_high_value LONG;
@@ -2482,15 +2539,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_start TIMESTAMP;
         v_renamed_count NUMBER := 0;
     BEGIN
-        DBMS_OUTPUT.PUT_LINE('Renaming AUTOMATIC LIST partitions to human-readable names...');
+        DBMS_OUTPUT.PUT_LINE('Renaming system-generated partitions to human-readable names...');
 
-        -- Get all partitions except P_XDEF
+        -- Get all system-generated partitions (skip named partitions like P_XDEF, P_INITIAL)
         FOR part IN (
             SELECT partition_name, high_value
             FROM dba_tab_partitions
             WHERE table_owner = p_owner
             AND table_name = p_table_name
-            AND partition_name != 'P_XDEF'
+            AND partition_name NOT IN ('P_XDEF', 'P_INITIAL')
             AND partition_name LIKE 'SYS_P%'  -- Only system-generated names
             ORDER BY partition_position
         ) LOOP
@@ -2508,7 +2565,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_high_value_str := SUBSTR(part.high_value, 1, 4000);
 
                 -- Generate human-readable partition name from high_value
-                v_new_partition_name := generate_partition_name_from_value(v_high_value_str);
+                v_new_partition_name := generate_partition_name_from_value(v_high_value_str, p_partition_type);
 
                 -- Only rename if we generated a valid name
                 IF v_new_partition_name IS NOT NULL THEN
@@ -2545,7 +2602,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END LOOP;
 
         DBMS_OUTPUT.PUT_LINE('Partition renaming complete: ' || v_renamed_count || ' partitions renamed');
-    END rename_list_partitions;
+    END rename_system_partitions;
 
 END pck_dwh_table_migration_executor;
 /
