@@ -355,6 +355,97 @@ The executor performs these steps:
 9. **ILM** - Apply ILM policies (if enabled)
 10. **Validate** - Verify row counts match
 
+#### Constraint Recreation Behavior
+
+The framework recreates all constraints from the source table in a specific order to ensure dependencies are met:
+
+##### Order of Recreation
+
+1. **PRIMARY KEY Constraints** (Highest Priority)
+   - Created first
+   - **CRITICAL**: Migration fails if PK creation fails
+   - Uses `DBMS_METADATA.GET_DDL` for accurate extraction
+   - Preserves all PK features: deferrable, enable/disable, etc.
+
+2. **CHECK & UNIQUE Constraints**
+   - Created after PRIMARY KEY
+   - **CRITICAL**: Migration fails if creation fails
+   - Skips NOT NULL constraints (already in column definitions)
+   - Includes user-created CHECK constraints
+
+3. **FOREIGN KEY Constraints** (Lowest Priority)
+   - Created last (depends on PKs existing)
+   - **NON-CRITICAL**: Migration continues with WARNING if FK creation fails
+   - Uses `DBMS_METADATA.GET_DDL('REF_CONSTRAINT', ...)`
+
+##### Foreign Key Special Handling
+
+FOREIGN KEY constraints receive special treatment because they reference other tables:
+
+**Behavior:**
+- FK creation failures produce **WARNING** (not ERROR)
+- Migration continues even if FK creation fails
+- Failure logged to `dwh_migration_execution_log`
+
+**Why FKs May Fail:**
+- Referenced table hasn't been migrated yet
+- Referenced table is in a different schema
+- Referenced table is being migrated in parallel
+
+**Best Practice for Batch Migrations:**
+
+When migrating multiple related tables:
+
+```sql
+-- Step 1: Migrate all tables (FKs will fail with warnings)
+BEGIN
+    FOR task IN (
+        SELECT task_id FROM cmr.dwh_migration_tasks
+        WHERE project_id = 123
+        AND status = 'READY'
+    ) LOOP
+        pck_dwh_table_migration_executor.execute_migration(task.task_id);
+    END LOOP;
+END;
+/
+
+-- Step 2: Check which FK constraints failed
+SELECT
+    t.task_name,
+    t.source_table,
+    l.step_name,
+    l.error_message
+FROM cmr.dwh_migration_execution_log l
+JOIN cmr.dwh_migration_tasks t ON t.task_id = l.task_id
+WHERE l.step_name LIKE 'Recreate FK constraint:%'
+AND l.status = 'FAILED'
+ORDER BY t.task_id, l.step_number;
+
+-- Step 3: Manually recreate failed FK constraints
+-- After all referenced tables are migrated, use DBMS_METADATA to get FK DDL
+-- from source table and execute on migrated table
+```
+
+**Example: Manual FK Recreation**
+
+```sql
+-- Get FK constraint DDL from source table
+SELECT DBMS_METADATA.GET_DDL('REF_CONSTRAINT', 'FK_ORDER_CUSTOMER', 'SCHEMA_NAME')
+FROM DUAL;
+
+-- Replace source table name with migrated table name
+-- Execute the modified DDL on the migrated table
+```
+
+##### Error Handling Summary
+
+| Constraint Type | Error Behavior | Migration Continues? |
+|----------------|----------------|---------------------|
+| PRIMARY KEY | FAIL with `-20503` | ❌ No - Critical |
+| CHECK | FAIL with `-20501` | ❌ No - Critical |
+| UNIQUE | FAIL with `-20501` | ❌ No - Critical |
+| FOREIGN KEY | WARN (logged) | ✅ Yes - Manual fix |
+
 ### Monitoring
 
 #### Project Dashboard
