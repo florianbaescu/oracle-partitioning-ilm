@@ -277,6 +277,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         ELSIF p_task.interval_clause IS NOT NULL THEN
             -- INTERVAL partitioning: Cannot use MAXVALUE
             -- Get minimum date from source table to create starting partition
+            p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
             p_ddl := p_ddl || 'INTERVAL (' || p_task.interval_clause || ')' || CHR(10);
 
             BEGIN
@@ -313,6 +314,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         ELSE
             -- Regular RANGE partitioning: MAXVALUE is allowed
+            p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
             v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (MAXVALUE))';
         END IF;
 
