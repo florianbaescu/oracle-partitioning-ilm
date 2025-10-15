@@ -216,6 +216,7 @@ COMMENT ON TABLE cmr.dwh_migration_analysis IS 'Analysis results and recommendat
 
 CREATE TABLE cmr.dwh_migration_execution_log (
     log_id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    execution_id        NUMBER NOT NULL,       -- Groups all steps from one migration execution
     task_id             NUMBER NOT NULL,
 
     step_number         NUMBER,
@@ -236,8 +237,13 @@ CREATE TABLE cmr.dwh_migration_execution_log (
 );
 
 CREATE INDEX idx_mig_log_task ON cmr.dwh_migration_execution_log(task_id, step_number);
+CREATE INDEX idx_mig_log_execution ON cmr.dwh_migration_execution_log(execution_id);
+
+-- Create sequence for execution IDs
+CREATE SEQUENCE cmr.dwh_mig_execution_seq START WITH 1 INCREMENT BY 1 NOCACHE;
 
 COMMENT ON TABLE cmr.dwh_migration_execution_log IS 'Detailed execution log for migrations';
+COMMENT ON COLUMN cmr.dwh_migration_execution_log.execution_id IS 'Groups all log entries from a single migration execution. All steps in one run share the same execution_id.';
 
 
 -- -----------------------------------------------------------------------------

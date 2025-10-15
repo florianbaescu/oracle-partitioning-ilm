@@ -69,6 +69,10 @@ END pck_dwh_table_migration_executor;
 
 CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
+    -- Package variable to track current execution ID
+    -- All log entries from a single migration run share the same execution_id
+    g_execution_id NUMBER;
+
     -- ==========================================================================
     -- Private Helper Function - Get Config Value
     -- ==========================================================================
@@ -108,11 +112,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                      EXTRACT(HOUR FROM (p_end_time - p_start_time)) * 3600;
 
         INSERT INTO cmr.dwh_migration_execution_log (
-            task_id, step_number, step_name, step_type, sql_statement,
+            execution_id, task_id, step_number, step_name, step_type, sql_statement,
             start_time, end_time, duration_seconds, status,
             error_code, error_message
         ) VALUES (
-            p_task_id, p_step_number, p_step_name, p_step_type, p_sql,
+            g_execution_id, p_task_id, p_step_number, p_step_name, p_step_type, p_sql,
             p_start_time, p_end_time, v_duration, p_status,
             p_error_code, p_error_message
         );
@@ -1990,6 +1994,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         IF NOT p_simulate THEN
             v_start_time := SYSTIMESTAMP;
+
+            -- Generate unique execution ID for this migration run
+            -- All log entries will share this execution_id
+            SELECT cmr.dwh_mig_execution_seq.NEXTVAL INTO g_execution_id FROM dual;
+
             v_source_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
             -- Update status and reset error message from previous attempts
