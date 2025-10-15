@@ -172,9 +172,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             SELECT requires_conversion, date_column_name
             INTO v_requires_conversion, v_date_column
             FROM cmr.dwh_migration_analysis
-            WHERE task_id = (SELECT task_id FROM cmr.dwh_migration_tasks
-                            WHERE source_owner = p_task.source_owner
-                            AND source_table = p_task.source_table);
+            WHERE task_id = p_task.task_id;  -- Use task_id directly from p_task parameter
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 v_requires_conversion := 'N';
@@ -916,6 +914,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         -- Step 1: Build partition DDL
         v_start := SYSTIMESTAMP;
+
+        IF NOT p_simulate THEN
+            -- Log step start
+            log_step(p_task_id, v_step, 'Build partition DDL', 'PREPARE', NULL,
+                    'RUNNING', v_start, v_start);
+        END IF;
+
         build_partition_ddl(v_task, v_ddl);
 
         IF p_simulate THEN
@@ -924,7 +929,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE(v_ddl);
             DBMS_OUTPUT.PUT_LINE('');
         ELSE
-            log_step(p_task_id, v_step, 'Build DDL', 'PREPARE', v_ddl,
+            -- Log successful completion with DDL
+            log_step(p_task_id, v_step, 'Build partition DDL', 'PREPARE', v_ddl,
                     'SUCCESS', v_start, SYSTIMESTAMP);
         END IF;
         v_step := v_step + 10;
