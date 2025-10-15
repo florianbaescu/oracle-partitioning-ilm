@@ -490,8 +490,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
                 v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
 
+                -- Log step start
+                log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name || ' (temp: ' || v_temp_index_name || ')',
+                        'INDEX', SUBSTR(v_sql, 1, 4000), 'RUNNING', v_start, v_start);
+
                 EXECUTE IMMEDIATE v_sql;
 
+                -- Log successful completion
                 log_step(p_task_id, v_step, 'Recreate index: ' || idx.index_name || ' (temp: ' || v_temp_index_name || ')',
                         'INDEX', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
@@ -589,8 +594,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
                 v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
 
+                -- Log step start
+                log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'RUNNING', v_start, v_start);
+
                 EXECUTE IMMEDIATE v_sql;
 
+                -- Log successful completion
                 log_step(p_task_id, v_step, 'Recreate PRIMARY KEY: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
                         'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
@@ -653,8 +663,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
                 v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
 
+                -- Log step start
+                log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'RUNNING', v_start, v_start);
+
                 EXECUTE IMMEDIATE v_sql;
 
+                -- Log successful completion
                 log_step(p_task_id, v_step, 'Recreate constraint: ' || con.constraint_name || ' (temp: ' || SUBSTR(con.constraint_name, 1, 123) || '_MIGR)',
                         'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
@@ -703,8 +718,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Strip trailing semicolon (EXECUTE IMMEDIATE doesn't accept it)
                 v_sql := RTRIM(v_sql, '; ' || CHR(10) || CHR(13));
 
+                -- Log step start
+                log_step(p_task_id, v_step, 'Recreate FK constraint: ' || con.constraint_name,
+                        'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'RUNNING', v_start, v_start);
+
                 EXECUTE IMMEDIATE v_sql;
 
+                -- Log successful completion
                 log_step(p_task_id, v_step, 'Recreate FK constraint: ' || con.constraint_name,
                         'CONSTRAINT', SUBSTR(v_sql, 1, 4000), 'SUCCESS', v_start, SYSTIMESTAMP);
 
@@ -912,7 +932,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Step 2: Create partitioned table
         IF NOT p_simulate THEN
             v_start := SYSTIMESTAMP;
+
+            -- Log step start so we know where failure occurs
+            log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
+                    'RUNNING', v_start, v_start);
+
             EXECUTE IMMEDIATE v_ddl;
+
+            -- Log successful completion
             log_step(p_task_id, v_step, 'Create partitioned table', 'CREATE', v_ddl,
                     'SUCCESS', v_start, SYSTIMESTAMP);
         END IF;
@@ -961,6 +988,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('');
                 ELSE
                     DBMS_OUTPUT.PUT_LINE('  Converting date column ' || v_date_column || ' during copy');
+
+                    -- Log step start
+                    log_step(p_task_id, v_step, 'Copy data (with date conversion)', 'COPY', v_sql,
+                            'RUNNING', v_start, v_start);
                 END IF;
             ELSE
                 -- Standard SELECT *
@@ -973,12 +1004,18 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
                     DBMS_OUTPUT.PUT_LINE(v_sql);
                     DBMS_OUTPUT.PUT_LINE('');
+                ELSE
+                    -- Log step start
+                    log_step(p_task_id, v_step, 'Copy data', 'COPY', v_sql,
+                            'RUNNING', v_start, v_start);
                 END IF;
             END IF;
 
             IF NOT p_simulate THEN
                 EXECUTE IMMEDIATE v_sql;
                 COMMIT;
+
+                -- Log successful completion
                 log_step(p_task_id, v_step, 'Copy data' ||
                         CASE WHEN v_requires_conversion = 'Y' THEN ' (with date conversion)' ELSE '' END,
                         'COPY', v_sql, 'SUCCESS', v_start, SYSTIMESTAMP);
@@ -996,8 +1033,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE(v_sql);
                     DBMS_OUTPUT.PUT_LINE('');
                 ELSE
+                    -- Log step start
+                    log_step(p_task_id, v_step, 'Copy data', 'COPY', v_sql,
+                            'RUNNING', v_start, v_start);
+
                     EXECUTE IMMEDIATE v_sql;
                     COMMIT;
+
+                    -- Log successful completion
                     log_step(p_task_id, v_step, 'Copy data', 'COPY', v_sql,
                             'SUCCESS', v_start, SYSTIMESTAMP);
                 END IF;
@@ -1038,12 +1081,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('');
         ELSE
             v_start := SYSTIMESTAMP;
+
+            -- Log step start
+            log_step(p_task_id, v_step, 'Gather statistics', 'STATS', NULL,
+                    'RUNNING', v_start, v_start);
+
             DBMS_STATS.GATHER_TABLE_STATS(
                 ownname => v_task.source_owner,
                 tabname => v_new_table,
                 cascade => TRUE,
                 degree => v_task.parallel_degree
             );
+
+            -- Log successful completion
             log_step(p_task_id, v_step, 'Gather statistics', 'STATS', NULL,
                     'SUCCESS', v_start, SYSTIMESTAMP);
         END IF;
@@ -1079,13 +1129,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('');
         ELSE
             v_start := SYSTIMESTAMP;
+
+            -- Log step start
+            log_step(p_task_id, v_step, 'Rename tables (cutover)', 'RENAME', v_sql,
+                    'RUNNING', v_start, v_start);
+
             EXECUTE IMMEDIATE v_sql;
 
             v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
                     ' RENAME TO ' || v_task.source_table;
             EXECUTE IMMEDIATE v_sql;
 
-            log_step(p_task_id, v_step, 'Rename tables', 'RENAME', v_sql,
+            -- Log successful completion
+            log_step(p_task_id, v_step, 'Rename tables (cutover)', 'RENAME', v_sql,
                     'SUCCESS', v_start, SYSTIMESTAMP);
 
             -- Step 7.5: Rename old table's indexes to avoid naming conflicts
