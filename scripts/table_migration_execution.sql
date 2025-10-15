@@ -54,14 +54,16 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
     -- Partition renaming helper functions (all partition types)
     FUNCTION generate_partition_name_from_value(
         p_high_value VARCHAR2,
-        p_partition_type VARCHAR2  -- 'LIST' or 'RANGE' or 'HASH'
+        p_partition_type VARCHAR2,  -- 'LIST' or 'RANGE' or 'HASH'
+        p_interval_clause VARCHAR2 DEFAULT NULL  -- For RANGE: determines granularity (monthly/quarterly/yearly)
     ) RETURN VARCHAR2;
 
     PROCEDURE rename_system_partitions(
         p_task_id NUMBER,
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_type VARCHAR2  -- Used to determine naming strategy
+        p_partition_type VARCHAR2,  -- Used to determine naming strategy
+        p_interval_clause VARCHAR2 DEFAULT NULL  -- For RANGE: interval definition
     );
 
 END pck_dwh_table_migration_executor;
@@ -1243,7 +1245,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 p_task_id => p_task_id,
                 p_owner => v_task.source_owner,
                 p_table_name => v_task.source_table,  -- Already renamed to final name
-                p_partition_type => v_task.partition_type
+                p_partition_type => v_task.partition_type,
+                p_interval_clause => v_task.interval_clause
             );
 
             DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
@@ -2414,7 +2417,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
     FUNCTION generate_partition_name_from_value(
         p_high_value VARCHAR2,
-        p_partition_type VARCHAR2
+        p_partition_type VARCHAR2,
+        p_interval_clause VARCHAR2 DEFAULT NULL
     ) RETURN VARCHAR2
     AS
         v_partition_name VARCHAR2(128);
@@ -2426,6 +2430,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_year NUMBER;
         v_month NUMBER;
         v_day NUMBER;
+        v_interval_number NUMBER;
+        v_interval_unit VARCHAR2(20);
+        v_partition_date DATE;  -- The actual partition period (high_value - interval)
     BEGIN
         -- Detect partition type and generate appropriate name
         IF UPPER(p_partition_type) LIKE '%RANGE%' OR UPPER(p_partition_type) LIKE 'DATE%' THEN
@@ -2436,28 +2443,68 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- Pattern: TO_DATE(' YYYY-MM-DD ...
                 v_value_clean := REGEXP_SUBSTR(p_high_value, '''[^'']+''', 1, 1);
                 IF v_value_clean IS NOT NULL THEN
-                    -- Remove quotes
+                    -- Remove quotes and parse to DATE
                     v_value_clean := TRIM('''' FROM v_value_clean);
                     v_value_clean := TRIM(v_value_clean);
+                    v_date_value := TO_DATE(SUBSTR(v_value_clean, 1, 19), 'YYYY-MM-DD HH24:MI:SS');
 
-                    -- Extract date components from string like '2025-08-01 00:00:00'
-                    v_year := TO_NUMBER(SUBSTR(v_value_clean, 1, 4));
-                    v_month := TO_NUMBER(SUBSTR(v_value_clean, 6, 2));
-                    v_day := TO_NUMBER(SUBSTR(v_value_clean, 9, 2));
+                    -- Parse interval_clause to determine actual partition granularity
+                    -- Examples: NUMTOYMINTERVAL(1,'MONTH'), NUMTOYMINTERVAL(3,'MONTH'), NUMTOYMINTERVAL(1,'YEAR')
+                    IF p_interval_clause IS NOT NULL THEN
+                        -- Extract interval number and unit
+                        -- Pattern: NUMTOYMINTERVAL(N,'UNIT') or NUMTODSINTERVAL(N,'UNIT')
+                        v_interval_number := TO_NUMBER(REGEXP_SUBSTR(p_interval_clause, '\d+'));
+                        v_interval_unit := REGEXP_SUBSTR(p_interval_clause, '''(\w+)''', 1, 1, NULL, 1);
 
-                    -- Generate name based on granularity
-                    IF v_day = 1 AND v_month IN (1, 4, 7, 10) THEN
-                        -- Quarterly partition (first day of quarter)
-                        v_name_parts := 'P_' || v_year || 'Q' || CEIL(v_month / 3);
-                    ELSIF v_day = 1 THEN
-                        -- Monthly partition (first day of month)
-                        v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0');
-                    ELSIF v_month = 1 AND v_day = 1 THEN
-                        -- Yearly partition (first day of year)
-                        v_name_parts := 'P_' || v_year;
+                        -- Calculate actual partition period by subtracting interval from high_value
+                        -- High_value is exclusive (VALUES LESS THAN), so partition represents the period BEFORE it
+                        IF UPPER(v_interval_unit) = 'MONTH' THEN
+                            v_partition_date := ADD_MONTHS(v_date_value, -v_interval_number);
+
+                            -- Format based on interval size
+                            IF v_interval_number = 1 THEN
+                                -- Monthly: P_YYYYMM
+                                v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYYMM');
+                            ELSIF v_interval_number = 3 THEN
+                                -- Quarterly: P_YYYYQN
+                                v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYY') ||
+                                               'Q' || TO_CHAR(CEIL(TO_NUMBER(TO_CHAR(v_partition_date, 'MM')) / 3));
+                            ELSIF v_interval_number = 12 THEN
+                                -- Yearly: P_YYYY
+                                v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+                            ELSE
+                                -- Other month intervals: P_YYYYMM (use start month)
+                                v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYYMM');
+                            END IF;
+                        ELSIF UPPER(v_interval_unit) = 'YEAR' THEN
+                            v_partition_date := ADD_MONTHS(v_date_value, -12 * v_interval_number);
+                            v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+                        ELSIF UPPER(v_interval_unit) = 'DAY' THEN
+                            v_partition_date := v_date_value - v_interval_number;
+                            v_name_parts := 'P_' || TO_CHAR(v_partition_date, 'YYYYMMDD');
+                        ELSE
+                            -- Unknown interval unit, fall back to simple date extraction
+                            v_name_parts := 'P_' || TO_CHAR(v_date_value, 'YYYYMMDD');
+                        END IF;
                     ELSE
-                        -- Daily partition or other
-                        v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0') || LPAD(v_day, 2, '0');
+                        -- No interval_clause provided, use old heuristic approach
+                        v_year := TO_NUMBER(SUBSTR(v_value_clean, 1, 4));
+                        v_month := TO_NUMBER(SUBSTR(v_value_clean, 6, 2));
+                        v_day := TO_NUMBER(SUBSTR(v_value_clean, 9, 2));
+
+                        IF v_day = 1 AND v_month IN (1, 4, 7, 10) THEN
+                            -- Quarterly partition (first day of quarter)
+                            v_name_parts := 'P_' || v_year || 'Q' || CEIL(v_month / 3);
+                        ELSIF v_day = 1 THEN
+                            -- Monthly partition (first day of month)
+                            v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0');
+                        ELSIF v_month = 1 AND v_day = 1 THEN
+                            -- Yearly partition (first day of year)
+                            v_name_parts := 'P_' || v_year;
+                        ELSE
+                            -- Daily partition or other
+                            v_name_parts := 'P_' || v_year || LPAD(v_month, 2, '0') || LPAD(v_day, 2, '0');
+                        END IF;
                     END IF;
 
                     RETURN v_name_parts;
@@ -2541,7 +2588,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         p_task_id NUMBER,
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_type VARCHAR2
+        p_partition_type VARCHAR2,
+        p_interval_clause VARCHAR2 DEFAULT NULL
     ) AS
         v_partition_name VARCHAR2(128);
         v_high_value LONG;
@@ -2558,6 +2606,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     BEGIN
         v_overall_start := SYSTIMESTAMP;
         DBMS_OUTPUT.PUT_LINE('Renaming system-generated partitions to human-readable names...');
+
+        IF p_interval_clause IS NOT NULL THEN
+            DBMS_OUTPUT.PUT_LINE('  Using interval clause: ' || p_interval_clause);
+        END IF;
 
         -- Get all system-generated partitions (skip named partitions like P_XDEF, P_INITIAL)
         FOR part IN (
@@ -2583,7 +2635,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_high_value_str := SUBSTR(part.high_value, 1, 4000);
 
                 -- Generate human-readable partition name from high_value
-                v_new_partition_name := generate_partition_name_from_value(v_high_value_str, p_partition_type);
+                v_new_partition_name := generate_partition_name_from_value(
+                    v_high_value_str,
+                    p_partition_type,
+                    p_interval_clause
+                );
 
                 -- Only rename if we generated a valid name
                 IF v_new_partition_name IS NOT NULL THEN
