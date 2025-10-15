@@ -1990,10 +1990,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             v_start_time := SYSTIMESTAMP;
             v_source_size := pck_dwh_table_migration_analyzer.get_table_size_mb(v_task.source_owner, v_task.source_table);
 
-            -- Update status
+            -- Update status and reset error message from previous attempts
             UPDATE cmr.dwh_migration_tasks
             SET status = 'RUNNING',
-                execution_start = v_start_time
+                execution_start = v_start_time,
+                error_message = NULL  -- Clear any previous error messages
             WHERE task_id = p_task_id;
             COMMIT;
 
@@ -2037,7 +2038,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                  EXTRACT(MINUTE FROM (v_end_time - v_start_time)) * 60 +
                                  EXTRACT(HOUR FROM (v_end_time - v_start_time)) * 3600,
                 target_size_mb = v_target_size,
-                space_saved_mb = v_source_size - v_target_size
+                space_saved_mb = v_source_size - v_target_size,
+                error_message = NULL  -- Clear any errors on successful completion
             WHERE task_id = p_task_id;
             COMMIT;
 
