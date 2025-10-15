@@ -231,6 +231,21 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         IF p_task.target_tablespace IS NOT NULL THEN
             v_storage_clause := v_storage_clause || ' TABLESPACE ' || p_task.target_tablespace;
         END IF;
+
+        -- Add STORAGE clause with extent sizes from global config
+        DECLARE
+            v_initial_extent VARCHAR2(20);
+            v_next_extent VARCHAR2(20);
+        BEGIN
+            v_initial_extent := get_dwh_ilm_config('STORAGE_INITIAL_EXTENT');
+            v_next_extent := get_dwh_ilm_config('STORAGE_NEXT_EXTENT');
+
+            IF v_initial_extent IS NOT NULL AND v_next_extent IS NOT NULL THEN
+                v_storage_clause := v_storage_clause || CHR(10) ||
+                    'STORAGE (INITIAL ' || v_initial_extent || ' NEXT ' || v_next_extent || ')';
+            END IF;
+        END;
+
         IF p_task.use_compression = 'Y' THEN
             v_storage_clause := v_storage_clause || ' COMPRESS FOR ' || p_task.compression_type;
         END IF;

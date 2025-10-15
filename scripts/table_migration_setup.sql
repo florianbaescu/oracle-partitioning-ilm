@@ -655,6 +655,20 @@ WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('MIGRATION_PARALLEL_DEGREE', '4', 'Default parallel degree for migration operations');
 
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'STORAGE_INITIAL_EXTENT' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('STORAGE_INITIAL_EXTENT', '81920', 'Initial extent size in bytes for tables and partitions (80KB)');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'STORAGE_NEXT_EXTENT' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('STORAGE_NEXT_EXTENT', '1048576', 'Next extent size in bytes for tables and partitions (1MB)');
+
 COMMIT;
 
 
