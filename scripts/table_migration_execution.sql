@@ -384,15 +384,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     v_starting_boundary := 'TO_DATE(''' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')';
                     DBMS_OUTPUT.PUT_LINE('Initial partition boundary: ' || v_starting_boundary || ' (from analysis, excludes NULLs)');
                 ELSE
-                    -- No data yet, use current date
-                    v_starting_boundary := 'SYSDATE';
-                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: SYSDATE (no data found)');
+                    -- No data detected, use safe historical date
+                    v_starting_boundary := 'TO_DATE(''1900-01-01'', ''YYYY-MM-DD'')';
+                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: 1900-01-01 (no data found, using safe historical date)');
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- Fallback: use current date
-                    v_starting_boundary := 'SYSDATE';
-                    DBMS_OUTPUT.PUT_LINE('WARNING: Could not determine initial partition boundary - using SYSDATE');
+                    -- Fallback: use safe historical date
+                    v_starting_boundary := 'TO_DATE(''1900-01-01'', ''YYYY-MM-DD'')';
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Could not determine initial partition boundary - using 1900-01-01');
             END;
 
             v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (' || v_starting_boundary || '))';
