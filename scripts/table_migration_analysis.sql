@@ -59,7 +59,8 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
         p_partition_key VARCHAR2,
-        p_partition_type VARCHAR2
+        p_partition_type VARCHAR2,
+        p_interval_clause VARCHAR2 DEFAULT NULL
     ) RETURN NUMBER;
 
     FUNCTION calculate_complexity_score(
@@ -2246,36 +2247,88 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_owner VARCHAR2,
         p_table_name VARCHAR2,
         p_partition_key VARCHAR2,
-        p_partition_type VARCHAR2
+        p_partition_type VARCHAR2,
+        p_interval_clause VARCHAR2 DEFAULT NULL  -- NEW: Determines granularity
     ) RETURN NUMBER
     AS
         v_sql VARCHAR2(4000);
-        v_distinct_values NUMBER;
-        v_min_date DATE;
-        v_max_date DATE;
-        v_months NUMBER;
+        v_distinct_count NUMBER;
+        v_interval_unit VARCHAR2(20);
+        v_interval_number NUMBER;
     BEGIN
         IF p_partition_type LIKE 'RANGE%' THEN
-            -- For range partitioning on dates
-            v_sql := 'SELECT MIN(' || p_partition_key || '), MAX(' || p_partition_key || ')' ||
-                    ' FROM ' || p_owner || '.' || p_table_name;
+            -- For range partitioning on dates: Count DISTINCT periods with actual data
 
-            EXECUTE IMMEDIATE v_sql INTO v_min_date, v_max_date;
+            -- Parse interval_clause to determine granularity
+            IF p_interval_clause IS NOT NULL THEN
+                -- Extract unit from NUMTOYMINTERVAL(N,'MONTH') or NUMTODSINTERVAL(N,'DAY')
+                v_interval_number := TO_NUMBER(REGEXP_SUBSTR(p_interval_clause, '\d+'));
+                v_interval_unit := REGEXP_SUBSTR(p_interval_clause, '''(\w+)''', 1, 1, NULL, 1);
 
-            v_months := MONTHS_BETWEEN(v_max_date, v_min_date);
-            RETURN CEIL(v_months);
+                -- Count DISTINCT periods based on granularity
+                IF UPPER(v_interval_unit) = 'MONTH' THEN
+                    IF v_interval_number = 1 THEN
+                        -- Monthly: Count distinct YYYYMM
+                        v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYYMM'')) ' ||
+                                'FROM ' || p_owner || '.' || p_table_name ||
+                                ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                    ELSIF v_interval_number = 3 THEN
+                        -- Quarterly: Count distinct YYYYQ
+                        v_sql := 'SELECT COUNT(DISTINCT (TO_CHAR(' || p_partition_key || ', ''YYYY'') || ' ||
+                                '''Q'' || TO_CHAR(CEIL(TO_NUMBER(TO_CHAR(' || p_partition_key || ', ''MM'')) / 3)))) ' ||
+                                'FROM ' || p_owner || '.' || p_table_name ||
+                                ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                    ELSIF v_interval_number = 12 THEN
+                        -- Yearly: Count distinct YYYY
+                        v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYY'')) ' ||
+                                'FROM ' || p_owner || '.' || p_table_name ||
+                                ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                    ELSE
+                        -- Other month intervals: Count distinct YYYYMM (start month of each period)
+                        v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYYMM'')) ' ||
+                                'FROM ' || p_owner || '.' || p_table_name ||
+                                ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                    END IF;
+                ELSIF UPPER(v_interval_unit) = 'YEAR' THEN
+                    -- Yearly: Count distinct YYYY
+                    v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYY'')) ' ||
+                            'FROM ' || p_owner || '.' || p_table_name ||
+                            ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                ELSIF UPPER(v_interval_unit) = 'DAY' THEN
+                    -- Daily: Count distinct YYYYMMDD
+                    v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYYMMDD'')) ' ||
+                            'FROM ' || p_owner || '.' || p_table_name ||
+                            ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                ELSE
+                    -- Unknown interval: Fallback to monthly
+                    v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYYMM'')) ' ||
+                            'FROM ' || p_owner || '.' || p_table_name ||
+                            ' WHERE ' || p_partition_key || ' IS NOT NULL';
+                END IF;
+            ELSE
+                -- No interval_clause: Assume monthly partitioning
+                v_sql := 'SELECT COUNT(DISTINCT TO_CHAR(' || p_partition_key || ', ''YYYYMM'')) ' ||
+                        'FROM ' || p_owner || '.' || p_table_name ||
+                        ' WHERE ' || p_partition_key || ' IS NOT NULL';
+            END IF;
+
+            EXECUTE IMMEDIATE v_sql INTO v_distinct_count;
+            RETURN v_distinct_count;
 
         ELSIF p_partition_type LIKE 'HASH%' THEN
             -- For hash partitioning, return recommended partition count
             RETURN 16;
 
-        ELSIF p_partition_type LIKE 'LIST%' THEN
-            -- For list partitioning, return distinct values
-            v_sql := 'SELECT COUNT(DISTINCT ' || p_partition_key || ')' ||
-                    ' FROM ' || p_owner || '.' || p_table_name;
+        ELSIF p_partition_type LIKE 'LIST%' OR p_partition_type LIKE '%AUTOMATIC%' THEN
+            -- For list partitioning (including AUTOMATIC LIST): Count distinct values
+            v_sql := 'SELECT COUNT(DISTINCT ' || p_partition_key || ') ' ||
+                    'FROM ' || p_owner || '.' || p_table_name ||
+                    ' WHERE ' || p_partition_key || ' IS NOT NULL';
 
-            EXECUTE IMMEDIATE v_sql INTO v_distinct_values;
-            RETURN LEAST(v_distinct_values, 100);  -- Cap at 100 partitions
+            EXECUTE IMMEDIATE v_sql INTO v_distinct_count;
+
+            -- Add 1 for DEFAULT partition (p_xdef in AUTOMATIC LIST, or manually defined)
+            RETURN LEAST(v_distinct_count + 1, 101);  -- Cap at 101 (100 value partitions + 1 default)
 
         ELSE
             RETURN 1;
@@ -2283,6 +2336,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
     EXCEPTION
         WHEN OTHERS THEN
+            -- Log error but return 0 instead of failing
+            DBMS_OUTPUT.PUT_LINE('WARNING: Failed to estimate partition count: ' || SQLERRM);
             RETURN 0;
     END estimate_partition_count;
 
@@ -3467,14 +3522,39 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_estimated_downtime := ROUND(v_base_time, 2);
         END;
 
-        -- Estimate partition count
-        IF v_task.partition_key IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
+        -- Estimate partition count using the analyzed date column
+        -- No REGEXP parsing needed - v_date_column is already available from analysis
+        IF v_date_column IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
             v_partition_count := estimate_partition_count(
-                v_task.source_owner,
-                v_task.source_table,
-                v_task.partition_key,
-                v_recommended_strategy
+                p_owner => v_task.source_owner,
+                p_table_name => v_task.source_table,
+                p_partition_key => v_date_column,
+                p_partition_type => v_recommended_strategy,
+                p_interval_clause => v_task.interval_clause  -- Pass interval for accurate granularity
             );
+
+            IF v_partition_count > 0 THEN
+                DBMS_OUTPUT.PUT_LINE('Estimated partitions: ' || v_partition_count ||
+                                    ' (column: ' || v_date_column ||
+                                    ', granularity: ' || NVL(v_task.interval_clause, 'monthly (default)') || ')');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('WARNING: Could not estimate partition count for column ' || v_date_column);
+            END IF;
+        ELSIF v_task.partition_key IS NOT NULL AND v_recommended_strategy IS NOT NULL THEN
+            -- Fallback: Use explicit partition_key if no date column was analyzed
+            v_partition_count := estimate_partition_count(
+                p_owner => v_task.source_owner,
+                p_table_name => v_task.source_table,
+                p_partition_key => v_task.partition_key,
+                p_partition_type => v_recommended_strategy,
+                p_interval_clause => v_task.interval_clause
+            );
+
+            DBMS_OUTPUT.PUT_LINE('Estimated partitions: ' || NVL(TO_CHAR(v_partition_count), 'N/A') ||
+                                ' (using explicit partition_key: ' || v_task.partition_key || ')');
+        ELSE
+            v_partition_count := NULL;
+            DBMS_OUTPUT.PUT_LINE('Cannot estimate partition count - no partition column available');
         END IF;
 
         -- Get dependencies (include partition column and all analyzed columns)
