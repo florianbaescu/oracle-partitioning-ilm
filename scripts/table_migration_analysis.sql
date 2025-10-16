@@ -107,6 +107,10 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_total_table_mb NUMBER
     ) RETURN NUMBER;
 
+    FUNCTION get_dwh_ilm_config(
+        p_config_key VARCHAR2
+    ) RETURN VARCHAR2;
+
     -- ==========================================================================
     -- AUTOMATIC LIST Partitioning helper functions
     -- ==========================================================================
@@ -4276,6 +4280,22 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         RETURN v_ratio;
     END get_compression_ratio;
+
+    FUNCTION get_dwh_ilm_config(
+        p_config_key VARCHAR2
+    ) RETURN VARCHAR2
+    AS
+        v_value VARCHAR2(4000);
+    BEGIN
+        SELECT config_value INTO v_value
+        FROM cmr.dwh_ilm_config
+        WHERE config_key = p_config_key;
+
+        RETURN v_value;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+    END get_dwh_ilm_config;
 
     FUNCTION calculate_optimal_initial_extent(
         p_avg_partition_mb NUMBER,
