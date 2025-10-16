@@ -212,6 +212,19 @@ CREATE TABLE cmr.dwh_migration_analysis (
     recommended_storage_clause  VARCHAR2(500),  -- Complete STORAGE(...) or NULL
     storage_recommendation_reason VARCHAR2(1000), -- Why this was recommended
 
+    -- NULL handling for partition key
+    partition_key_null_count    NUMBER,         -- Count of NULL values in partition key column
+    partition_key_null_percentage NUMBER(5,2),  -- Percentage of NULLs (0-100)
+    null_handling_strategy      VARCHAR2(30),   -- UPDATE (update NULLs to default) or ALLOW_NULLS (allow in first/default partition)
+    null_default_value          VARCHAR2(100),  -- Default value for NULLs (if UPDATE strategy selected)
+    null_handling_reason        VARCHAR2(1000), -- Explanation of strategy choice
+
+    -- Partition boundary dates (actual data range for initial partition)
+    partition_boundary_min_date DATE,           -- Earliest non-NULL date in data
+    partition_boundary_max_date DATE,           -- Latest non-NULL date in data
+    partition_range_years       NUMBER,         -- Date range in years (max - min)
+    partition_boundary_recommendation VARCHAR2(1000), -- How to set initial partition to avoid ORA-14300
+
     analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
     analysis_duration_seconds NUMBER,          -- Duration of analysis in seconds
 
@@ -688,6 +701,34 @@ ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('STORAGE_EXTENT_MODE', 'AUTO', 'Storage extent mode: AUTO (use analysis recommendations), FORCED (always use fixed config), NONE (never use STORAGE clause)');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'NULL_HANDLING_STRATEGY' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('NULL_HANDLING_STRATEGY', 'AUTO', 'NULL handling strategy: AUTO (analyze and recommend), UPDATE (update NULLs before migration), ALLOW_NULLS (allow in first/default partition)');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'NULL_DEFAULT_DATE' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('NULL_DEFAULT_DATE', '5999-12-31', 'Default date value for NULL date columns (YYYY-MM-DD format). Used with UPDATE strategy.');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'NULL_DEFAULT_NUMBER' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('NULL_DEFAULT_NUMBER', '-1', 'Default number value for NULL number columns. Used with UPDATE strategy.');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'NULL_DEFAULT_VARCHAR' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('NULL_DEFAULT_VARCHAR', 'nav', 'Default varchar value for NULL varchar columns. Used with UPDATE strategy.');
 
 COMMIT;
 

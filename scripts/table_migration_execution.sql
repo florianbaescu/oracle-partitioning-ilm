@@ -342,18 +342,34 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         ELSIF p_task.interval_clause IS NOT NULL THEN
             -- INTERVAL partitioning: Cannot use MAXVALUE
-            -- Get minimum date from source table to create starting partition
+            -- Get minimum date from analysis table (excludes NULLs, uses proper conversion) to avoid ORA-14300
             p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
             p_ddl := p_ddl || 'INTERVAL (' || p_task.interval_clause || ')' || CHR(10);
 
             BEGIN
-                -- Get minimum date from source table
-                EXECUTE IMMEDIATE 'SELECT MIN(' || p_task.partition_key || ') FROM ' ||
-                    p_task.source_owner || '.' || p_task.source_table
-                    INTO v_min_date;
+                -- First, try to get minimum date from analysis table
+                -- Analysis excludes NULLs and applies proper date conversion
+                BEGIN
+                    SELECT partition_boundary_min_date
+                    INTO v_min_date
+                    FROM cmr.dwh_migration_analysis
+                    WHERE task_id = p_task.task_id;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_min_date := NULL;
+                END;
+
+                -- Fallback: Query source table directly if analysis not available
+                IF v_min_date IS NULL THEN
+                    EXECUTE IMMEDIATE 'SELECT MIN(' || p_task.partition_key || ') FROM ' ||
+                        p_task.source_owner || '.' || p_task.source_table ||
+                        ' WHERE ' || p_task.partition_key || ' IS NOT NULL'
+                        INTO v_min_date;
+                END IF;
 
                 IF v_min_date IS NOT NULL THEN
                     -- Round down to first day of month/year depending on interval
+                    -- This ensures initial partition is BEFORE the earliest data
                     IF UPPER(p_task.interval_clause) LIKE '%MONTH%' THEN
                         v_min_date := TRUNC(v_min_date, 'MM');
                     ELSIF UPPER(p_task.interval_clause) LIKE '%YEAR%' THEN
@@ -366,14 +382,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     END IF;
 
                     v_starting_boundary := 'TO_DATE(''' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')';
+                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: ' || v_starting_boundary || ' (from analysis, excludes NULLs)');
                 ELSE
                     -- No data yet, use current date
                     v_starting_boundary := 'SYSDATE';
+                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: SYSDATE (no data found)');
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
                     -- Fallback: use current date
                     v_starting_boundary := 'SYSDATE';
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Could not determine initial partition boundary - using SYSDATE');
             END;
 
             v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (' || v_starting_boundary || '))';
@@ -2140,6 +2159,81 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             IF get_dwh_ilm_config('MIGRATION_BACKUP_ENABLED') = 'Y' THEN
                 create_backup_table(p_task_id, v_task.source_owner, v_task.source_table, v_backup_name);
             END IF;
+
+            -- Handle NULLs in partition key column before migration
+            DECLARE
+                v_null_strategy VARCHAR2(30);
+                v_null_default_value VARCHAR2(100);
+                v_partition_column VARCHAR2(128);
+                v_update_sql VARCHAR2(4000);
+                v_rows_updated NUMBER;
+            BEGIN
+                -- Get NULL handling strategy from analysis
+                BEGIN
+                    SELECT null_handling_strategy, null_default_value, date_column_name
+                    INTO v_null_strategy, v_null_default_value, v_partition_column
+                    FROM cmr.dwh_migration_analysis
+                    WHERE task_id = p_task_id;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_null_strategy := NULL;
+                END;
+
+                -- Use explicit partition_key if date_column_name not available
+                IF v_partition_column IS NULL THEN
+                    v_partition_column := v_task.partition_key;
+                END IF;
+
+                -- Execute UPDATE strategy if configured
+                IF v_null_strategy = 'UPDATE' AND v_null_default_value IS NOT NULL AND v_partition_column IS NOT NULL THEN
+                    log_migration_step(p_task_id, 50, 'Handle NULL values',
+                        'UPDATE NULLs in partition key column to default value: ' || v_null_default_value, 'RUNNING');
+
+                    DBMS_OUTPUT.PUT_LINE('');
+                    DBMS_OUTPUT.PUT_LINE('Handling NULL values in partition key column: ' || v_partition_column);
+                    DBMS_OUTPUT.PUT_LINE('  Strategy: UPDATE to default value');
+                    DBMS_OUTPUT.PUT_LINE('  Default value: ' || v_null_default_value);
+
+                    -- Build and execute UPDATE statement
+                    v_update_sql := 'UPDATE ' || v_task.source_owner || '.' || v_task.source_table ||
+                                  ' SET ' || v_partition_column || ' = ';
+
+                    -- Add appropriate type conversion based on default value format
+                    IF v_null_default_value LIKE '%-%-%' THEN
+                        -- Date format (YYYY-MM-DD)
+                        v_update_sql := v_update_sql || 'TO_DATE(''' || v_null_default_value || ''', ''YYYY-MM-DD'')';
+                    ELSIF v_null_default_value IN ('-1', '0', '1') OR REGEXP_LIKE(v_null_default_value, '^\-?\d+$') THEN
+                        -- Number
+                        v_update_sql := v_update_sql || v_null_default_value;
+                    ELSE
+                        -- String
+                        v_update_sql := v_update_sql || '''' || v_null_default_value || '''';
+                    END IF;
+
+                    v_update_sql := v_update_sql || ' WHERE ' || v_partition_column || ' IS NULL';
+
+                    DBMS_OUTPUT.PUT_LINE('  SQL: ' || v_update_sql);
+
+                    EXECUTE IMMEDIATE v_update_sql;
+                    v_rows_updated := SQL%ROWCOUNT;
+                    COMMIT;
+
+                    DBMS_OUTPUT.PUT_LINE('  Updated ' || v_rows_updated || ' rows');
+                    log_migration_step(p_task_id, 50, 'Handle NULL values',
+                        'Updated ' || v_rows_updated || ' NULL values to ' || v_null_default_value, 'COMPLETED');
+                ELSIF v_null_strategy = 'ALLOW_NULLS' AND v_partition_column IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('');
+                    DBMS_OUTPUT.PUT_LINE('NULL handling strategy: ALLOW_NULLS - NULLs will go to first/default partition');
+                ELSIF v_null_strategy IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('');
+                    DBMS_OUTPUT.PUT_LINE('NULL handling: No action needed (strategy: ' || NVL(v_null_strategy, 'NONE') || ')');
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    log_migration_step(p_task_id, 50, 'Handle NULL values',
+                        'Failed to handle NULL values: ' || SQLERRM, 'FAILED');
+                    RAISE;
+            END;
         END IF;
 
         -- Execute migration based on method

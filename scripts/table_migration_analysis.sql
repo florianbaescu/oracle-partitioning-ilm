@@ -2894,6 +2894,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_recommended_next NUMBER;
         v_storage_clause VARCHAR2(500);
         v_storage_reason VARCHAR2(1000);
+
+        -- NULL handling variables
+        v_null_count NUMBER;
+        v_null_percentage NUMBER;
+        v_null_strategy VARCHAR2(30);
+        v_null_default_value VARCHAR2(100);
+        v_null_reason VARCHAR2(1000);
+
+        -- Partition boundary variables
+        v_boundary_min_date DATE;
+        v_boundary_max_date DATE;
+        v_boundary_range_years NUMBER;
+        v_boundary_recommendation VARCHAR2(1000);
     BEGIN
         v_start_time := SYSTIMESTAMP;
         -- Get task details
@@ -3583,6 +3596,156 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             DBMS_OUTPUT.PUT_LINE('Cannot estimate partition count - no partition column available');
         END IF;
 
+        -- Analyze NULLs in partition key column and recommend handling strategy
+        DECLARE
+            v_partition_column VARCHAR2(128);
+            v_total_rows NUMBER;
+            v_config_strategy VARCHAR2(30);
+            v_sql VARCHAR2(4000);
+        BEGIN
+            -- Determine which column to analyze (prefer analyzed date column, fallback to explicit partition_key)
+            v_partition_column := COALESCE(v_date_column, v_task.partition_key);
+
+            IF v_partition_column IS NOT NULL THEN
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('Analyzing NULL values in partition key column: ' || v_partition_column);
+
+                -- Get NULL count and total rows
+                v_sql := 'SELECT COUNT(*) - COUNT(' || v_partition_column || '), COUNT(*) ' ||
+                        'FROM ' || v_task.source_owner || '.' || v_task.source_table;
+
+                EXECUTE IMMEDIATE v_sql INTO v_null_count, v_total_rows;
+
+                IF v_total_rows > 0 THEN
+                    v_null_percentage := ROUND((v_null_count / v_total_rows) * 100, 2);
+                ELSE
+                    v_null_percentage := 0;
+                END IF;
+
+                DBMS_OUTPUT.PUT_LINE('  NULL count: ' || v_null_count || ' (' || v_null_percentage || '%)');
+
+                -- Get configured NULL handling strategy
+                v_config_strategy := get_dwh_ilm_config('NULL_HANDLING_STRATEGY');
+
+                -- Recommend strategy based on NULL percentage
+                IF UPPER(v_config_strategy) = 'AUTO' THEN
+                    IF v_null_percentage = 0 THEN
+                        v_null_strategy := 'ALLOW_NULLS';
+                        v_null_reason := 'No NULL values detected - no action needed';
+                        v_null_default_value := NULL;
+                    ELSIF v_null_percentage <= 5 THEN
+                        v_null_strategy := 'UPDATE';
+                        v_null_reason := 'Low NULL percentage (<= 5%) - recommend updating to default value for data quality';
+                        -- Get appropriate default value based on column type
+                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL THEN
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_DATE');
+                        ELSIF v_date_type LIKE 'VARCHAR%' OR v_date_type LIKE 'CHAR%' THEN
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_VARCHAR');
+                        ELSE
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_NUMBER');
+                        END IF;
+                    ELSIF v_null_percentage <= 25 THEN
+                        v_null_strategy := 'ALLOW_NULLS';
+                        v_null_reason := 'Moderate NULL percentage (5-25%) - allow NULLs in first/default partition. Consider UPDATE strategy if data quality is critical.';
+                        v_null_default_value := NULL;
+                    ELSE
+                        v_null_strategy := 'ALLOW_NULLS';
+                        v_null_reason := 'High NULL percentage (> 25%) - allow NULLs in first/default partition. Updating this many rows may be expensive.';
+                        v_null_default_value := NULL;
+                    END IF;
+                ELSE
+                    -- Use configured strategy
+                    v_null_strategy := UPPER(v_config_strategy);
+                    IF v_null_strategy = 'UPDATE' THEN
+                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL THEN
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_DATE');
+                        ELSIF v_date_type LIKE 'VARCHAR%' OR v_date_type LIKE 'CHAR%' THEN
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_VARCHAR');
+                        ELSE
+                            v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_NUMBER');
+                        END IF;
+                        v_null_reason := 'Configured strategy: UPDATE to default value ' || v_null_default_value;
+                    ELSE
+                        v_null_default_value := NULL;
+                        v_null_reason := 'Configured strategy: ALLOW_NULLS in first/default partition';
+                    END IF;
+                END IF;
+
+                DBMS_OUTPUT.PUT_LINE('  Strategy: ' || v_null_strategy);
+                DBMS_OUTPUT.PUT_LINE('  Reason: ' || v_null_reason);
+                IF v_null_default_value IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('  Default value: ' || v_null_default_value);
+                END IF;
+
+                -- Query actual MIN/MAX dates (excluding NULLs) for partition boundary calculation
+                -- This prevents ORA-14300 when initial partition is set incorrectly
+                IF (v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL) THEN
+                    DECLARE
+                        v_conversion_column VARCHAR2(500);
+                    BEGIN
+                        -- Use conversion expression if needed, otherwise raw column
+                        IF v_requires_conversion = 'Y' AND v_conversion_expr IS NOT NULL THEN
+                            v_conversion_column := v_conversion_expr;
+                        ELSE
+                            v_conversion_column := v_partition_column;
+                        END IF;
+
+                        v_sql := 'SELECT MIN(' || v_conversion_column || '), MAX(' || v_conversion_column || ') ' ||
+                                'FROM ' || v_task.source_owner || '.' || v_task.source_table ||
+                                ' WHERE ' || v_partition_column || ' IS NOT NULL';
+
+                        EXECUTE IMMEDIATE v_sql INTO v_boundary_min_date, v_boundary_max_date;
+
+                        IF v_boundary_min_date IS NOT NULL AND v_boundary_max_date IS NOT NULL THEN
+                            v_boundary_range_years := ROUND(MONTHS_BETWEEN(v_boundary_max_date, v_boundary_min_date) / 12, 1);
+
+                            DBMS_OUTPUT.PUT_LINE('');
+                            DBMS_OUTPUT.PUT_LINE('Partition boundary analysis (excludes NULLs):');
+                            DBMS_OUTPUT.PUT_LINE('  MIN date: ' || TO_CHAR(v_boundary_min_date, 'YYYY-MM-DD'));
+                            DBMS_OUTPUT.PUT_LINE('  MAX date: ' || TO_CHAR(v_boundary_max_date, 'YYYY-MM-DD'));
+                            DBMS_OUTPUT.PUT_LINE('  Range: ' || v_boundary_range_years || ' years');
+
+                            -- Provide recommendation for initial partition
+                            IF v_recommended_strategy LIKE 'RANGE%' THEN
+                                -- For RANGE partitioning with interval, set initial partition BEFORE min date
+                                v_boundary_recommendation := 'For interval partitioning, set initial partition VALUES LESS THAN (TO_DATE(''' ||
+                                    TO_CHAR(v_boundary_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')) to avoid ORA-14300. ' ||
+                                    'Oracle will create interval partitions FORWARD from this boundary.';
+                                DBMS_OUTPUT.PUT_LINE('  Recommendation: Set initial partition < ' || TO_CHAR(v_boundary_min_date, 'YYYY-MM-DD'));
+                            ELSE
+                                v_boundary_recommendation := 'Partition boundaries should cover the range from ' ||
+                                    TO_CHAR(v_boundary_min_date, 'YYYY-MM-DD') || ' to ' ||
+                                    TO_CHAR(v_boundary_max_date, 'YYYY-MM-DD');
+                            END IF;
+
+                            -- Warn if date range is suspicious (might indicate bad defaults like 5999-12-31 in data)
+                            IF v_boundary_range_years > 100 THEN
+                                DBMS_OUTPUT.PUT_LINE('  WARNING: Date range > 100 years - check for placeholder dates like 5999-12-31 in data');
+                            END IF;
+                        END IF;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            DBMS_OUTPUT.PUT_LINE('  WARNING: Could not calculate partition boundaries - ' || SQLERRM);
+                            v_boundary_min_date := NULL;
+                            v_boundary_max_date := NULL;
+                            v_boundary_range_years := NULL;
+                            v_boundary_recommendation := 'Could not calculate - check data type compatibility';
+                    END;
+                END IF;
+            ELSE
+                -- No partition column available
+                v_null_count := NULL;
+                v_null_percentage := NULL;
+                v_null_strategy := NULL;
+                v_null_default_value := NULL;
+                v_null_reason := 'No partition column available for NULL analysis';
+                v_boundary_min_date := NULL;
+                v_boundary_max_date := NULL;
+                v_boundary_range_years := NULL;
+                v_boundary_recommendation := NULL;
+            END IF;
+        END;
+
         -- Get dependencies (include partition column and all analyzed columns)
         v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column, v_date_columns);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
@@ -3819,6 +3982,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 recommended_next_extent = v_recommended_next,
                 recommended_storage_clause = v_storage_clause,
                 storage_recommendation_reason = v_storage_reason,
+                partition_key_null_count = v_null_count,
+                partition_key_null_percentage = v_null_percentage,
+                null_handling_strategy = v_null_strategy,
+                null_default_value = v_null_default_value,
+                null_handling_reason = v_null_reason,
+                partition_boundary_min_date = v_boundary_min_date,
+                partition_boundary_max_date = v_boundary_max_date,
+                partition_range_years = v_boundary_range_years,
+                partition_boundary_recommendation = v_boundary_recommendation,
                 analysis_date = SYSTIMESTAMP,
                 analysis_duration_seconds = v_duration_seconds
         WHEN NOT MATCHED THEN
@@ -3862,6 +4034,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 recommended_next_extent,
                 recommended_storage_clause,
                 storage_recommendation_reason,
+                partition_key_null_count,
+                partition_key_null_percentage,
+                null_handling_strategy,
+                null_default_value,
+                null_handling_reason,
+                partition_boundary_min_date,
+                partition_boundary_max_date,
+                partition_range_years,
+                partition_boundary_recommendation,
                 analysis_date,
                 analysis_duration_seconds
             ) VALUES (
@@ -3904,6 +4085,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_recommended_next,
                 v_storage_clause,
                 v_storage_reason,
+                v_null_count,
+                v_null_percentage,
+                v_null_strategy,
+                v_null_default_value,
+                v_null_reason,
+                v_boundary_min_date,
+                v_boundary_max_date,
+                v_boundary_range_years,
+                v_boundary_recommendation,
                 SYSTIMESTAMP,
                 v_duration_seconds
             );
