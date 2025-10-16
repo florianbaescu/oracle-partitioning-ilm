@@ -2222,9 +2222,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                 -- Execute UPDATE strategy if configured
                 IF v_null_strategy = 'UPDATE' AND v_null_default_value IS NOT NULL AND v_partition_column IS NOT NULL THEN
-                    log_migration_step(p_task_id, 50, 'Handle NULL values',
-                        'UPDATE NULLs in partition key column to default value: ' || v_null_default_value, 'RUNNING');
-
                     DBMS_OUTPUT.PUT_LINE('');
                     DBMS_OUTPUT.PUT_LINE('Handling NULL values in partition key column: ' || v_partition_column);
                     DBMS_OUTPUT.PUT_LINE('  Strategy: UPDATE to default value');
@@ -2255,8 +2252,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     COMMIT;
 
                     DBMS_OUTPUT.PUT_LINE('  Updated ' || v_rows_updated || ' rows');
-                    log_migration_step(p_task_id, 50, 'Handle NULL values',
-                        'Updated ' || v_rows_updated || ' NULL values to ' || v_null_default_value, 'COMPLETED');
                 ELSIF v_null_strategy = 'ALLOW_NULLS' AND v_partition_column IS NOT NULL THEN
                     DBMS_OUTPUT.PUT_LINE('');
                     DBMS_OUTPUT.PUT_LINE('NULL handling strategy: ALLOW_NULLS - NULLs will go to first/default partition');
@@ -2266,8 +2261,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
-                    log_migration_step(p_task_id, 50, 'Handle NULL values',
-                        'Failed to handle NULL values: ' || SQLERRM, 'FAILED');
+                    DBMS_OUTPUT.PUT_LINE('ERROR: Failed to handle NULL values - ' || SQLERRM);
                     RAISE;
             END;
         END IF;
