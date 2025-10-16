@@ -373,12 +373,245 @@ FROM cmr.dwh_ilm_partition_access a
 ORDER BY a.days_since_write DESC;
 
 
+-- -----------------------------------------------------------------------------
+-- ILM Policy Summary Dashboard View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_policy_summary AS
+SELECT
+    p.table_owner,
+    p.table_name,
+    COUNT(DISTINCT p.policy_id) AS total_policies,
+    SUM(CASE WHEN p.enabled = 'Y' THEN 1 ELSE 0 END) AS active_policies,
+    SUM(CASE WHEN p.policy_type = 'COMPRESSION' THEN 1 ELSE 0 END) AS compression_policies,
+    SUM(CASE WHEN p.policy_type = 'TIERING' THEN 1 ELSE 0 END) AS tiering_policies,
+    SUM(CASE WHEN p.policy_type = 'ARCHIVAL' THEN 1 ELSE 0 END) AS archival_policies,
+    SUM(CASE WHEN p.policy_type = 'PURGE' THEN 1 ELSE 0 END) AS purge_policies,
+    COUNT(DISTINCT q.queue_id) AS pending_actions,
+    COUNT(DISTINCT CASE WHEN q.eligible = 'Y' THEN q.partition_name END) AS eligible_partitions,
+    MAX(e.execution_end) AS last_execution_time,
+    SUM(CASE WHEN e.status = 'SUCCESS' AND e.execution_end > SYSTIMESTAMP - 7 THEN 1 ELSE 0 END) AS executions_last_7days,
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END), 2) AS total_space_saved_mb
+FROM cmr.dwh_ilm_policies p
+LEFT JOIN cmr.dwh_ilm_evaluation_queue q
+    ON q.policy_id = p.policy_id
+    AND q.execution_status IN ('PENDING', 'SCHEDULED')
+LEFT JOIN cmr.dwh_ilm_execution_log e
+    ON e.policy_id = p.policy_id
+GROUP BY p.table_owner, p.table_name
+ORDER BY pending_actions DESC, total_space_saved_mb DESC;
+
+COMMENT ON VIEW dwh_v_ilm_policy_summary IS 'Summary of ILM policies per table for dashboard';
+
+
+-- -----------------------------------------------------------------------------
+-- Upcoming ILM Actions View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_upcoming_actions AS
+SELECT
+    q.queue_id,
+    q.policy_id,
+    p.policy_name,
+    p.table_owner,
+    p.table_name,
+    q.partition_name,
+    p.action_type,
+    p.policy_type,
+    q.evaluation_date,
+    q.reason,
+    q.scheduled_date,
+    q.execution_status,
+    a.size_mb AS partition_size_mb,
+    a.num_rows AS partition_rows,
+    a.days_since_write AS partition_age_days,
+    a.temperature AS partition_temperature,
+    a.compression AS current_compression,
+    p.compression_type AS target_compression,
+    p.target_tablespace,
+    p.priority,
+    CASE
+        WHEN q.scheduled_date < SYSTIMESTAMP THEN 'Overdue'
+        WHEN q.scheduled_date < SYSTIMESTAMP + INTERVAL '1' DAY THEN 'Today'
+        WHEN q.scheduled_date < SYSTIMESTAMP + INTERVAL '7' DAY THEN 'This Week'
+        WHEN q.scheduled_date < SYSTIMESTAMP + INTERVAL '30' DAY THEN 'This Month'
+        ELSE 'Future'
+    END AS urgency
+FROM cmr.dwh_ilm_evaluation_queue q
+JOIN cmr.dwh_ilm_policies p ON p.policy_id = q.policy_id
+LEFT JOIN cmr.dwh_ilm_partition_access a
+    ON a.table_owner = q.table_owner
+    AND a.table_name = q.table_name
+    AND a.partition_name = q.partition_name
+WHERE q.eligible = 'Y'
+AND q.execution_status IN ('PENDING', 'SCHEDULED')
+AND q.scheduled_date < SYSTIMESTAMP + INTERVAL '30' DAY
+ORDER BY q.scheduled_date, p.priority, q.table_name, q.partition_name;
+
+COMMENT ON VIEW dwh_v_ilm_upcoming_actions IS 'Partitions scheduled for ILM actions in next 30 days';
+
+
+-- -----------------------------------------------------------------------------
+-- ILM Space Savings History View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_space_savings AS
+SELECT
+    e.table_owner,
+    e.table_name,
+    e.policy_name,
+    e.action_type,
+    TRUNC(e.execution_end) AS execution_date,
+    COUNT(*) AS partitions_processed,
+    SUM(e.size_before_mb) AS total_size_before_mb,
+    SUM(e.size_after_mb) AS total_size_after_mb,
+    SUM(e.space_saved_mb) AS total_space_saved_mb,
+    ROUND(AVG(e.compression_ratio), 2) AS avg_compression_ratio,
+    ROUND(AVG(e.duration_seconds), 2) AS avg_duration_seconds,
+    SUM(e.rows_affected) AS total_rows_affected,
+    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful_operations,
+    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_operations
+FROM cmr.dwh_ilm_execution_log e
+WHERE e.status IN ('SUCCESS', 'FAILED')
+GROUP BY e.table_owner, e.table_name, e.policy_name, e.action_type, TRUNC(e.execution_end)
+ORDER BY execution_date DESC, total_space_saved_mb DESC;
+
+COMMENT ON VIEW dwh_v_ilm_space_savings IS 'Historical space savings achieved by ILM policies';
+
+
+-- -----------------------------------------------------------------------------
+-- ILM Execution History Detail View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_execution_history AS
+SELECT
+    e.execution_id,
+    e.policy_id,
+    e.policy_name,
+    e.table_owner,
+    e.table_name,
+    e.partition_name,
+    e.action_type,
+    e.status,
+    e.execution_start,
+    e.execution_end,
+    e.duration_seconds,
+    ROUND(e.duration_seconds / 60, 2) AS duration_minutes,
+    e.size_before_mb,
+    e.size_after_mb,
+    e.space_saved_mb,
+    CASE
+        WHEN e.size_before_mb > 0 THEN ROUND((e.space_saved_mb / e.size_before_mb) * 100, 1)
+        ELSE NULL
+    END AS space_saved_pct,
+    e.compression_ratio,
+    e.rows_affected,
+    e.error_code,
+    CASE
+        WHEN LENGTH(e.error_message) > 100 THEN SUBSTR(e.error_message, 1, 97) || '...'
+        ELSE e.error_message
+    END AS error_message_short,
+    e.executed_by,
+    e.execution_mode,
+    CASE
+        WHEN e.status = 'SUCCESS' AND e.duration_seconds < 300 THEN 'Fast'
+        WHEN e.status = 'SUCCESS' AND e.duration_seconds < 1800 THEN 'Normal'
+        WHEN e.status = 'SUCCESS' AND e.duration_seconds >= 1800 THEN 'Slow'
+        WHEN e.status = 'FAILED' THEN 'Error'
+        ELSE 'Unknown'
+    END AS performance_category
+FROM cmr.dwh_ilm_execution_log e
+WHERE e.execution_start > SYSTIMESTAMP - INTERVAL '30' DAY
+ORDER BY e.execution_start DESC;
+
+COMMENT ON VIEW dwh_v_ilm_execution_history IS 'Detailed execution history for last 30 days';
+
+
+-- -----------------------------------------------------------------------------
+-- Partition Lifecycle Status View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_partition_lifecycle AS
+SELECT
+    tp.table_owner,
+    tp.table_name,
+    tp.partition_name,
+    tp.partition_position,
+    tp.high_value,
+    tp.num_rows,
+    ROUND(NVL(s.bytes, 0) / 1024 / 1024, 2) AS size_mb,
+    tp.compression,
+    tp.tablespace_name,
+    tp.read_only,
+    a.days_since_write,
+    a.days_since_read,
+    a.temperature,
+    a.last_write_time,
+    a.last_read_time,
+    -- Calculate partition age from high_value for RANGE partitions
+    CASE
+        WHEN tp.high_value LIKE 'TO_DATE%' THEN
+            TRUNC(SYSDATE - TO_DATE(
+                REGEXP_SUBSTR(tp.high_value, '''[^'']+'''),
+                'YYYY-MM-DD'
+            ))
+        ELSE NULL
+    END AS partition_age_days_from_highvalue,
+    -- Determine current lifecycle stage
+    CASE
+        WHEN NVL(a.days_since_write, 0) < 90 THEN 'HOT - Active'
+        WHEN NVL(a.days_since_write, 0) BETWEEN 90 AND 365 THEN 'WARM - Aging'
+        WHEN NVL(a.days_since_write, 0) BETWEEN 365 AND 1095 THEN 'COLD - Archive'
+        WHEN NVL(a.days_since_write, 0) > 1095 THEN 'FROZEN - Purge Candidate'
+        ELSE 'UNKNOWN'
+    END AS lifecycle_stage,
+    -- Next recommended action
+    CASE
+        WHEN tp.read_only = 'YES' THEN 'Already Read-Only'
+        WHEN tp.compression LIKE '%ARCHIVE%' THEN 'Already Archived'
+        WHEN NVL(a.days_since_write, 0) > 1095 AND tp.read_only = 'NO' THEN 'Make Read-Only / Drop'
+        WHEN NVL(a.days_since_write, 0) BETWEEN 365 AND 1095 AND tp.compression NOT LIKE '%ARCHIVE%' THEN 'Archive Compression'
+        WHEN NVL(a.days_since_write, 0) BETWEEN 90 AND 365 AND tp.compression IS NULL THEN 'Query Compression'
+        ELSE 'No action needed'
+    END AS recommended_action,
+    -- Check if there's a pending ILM action
+    (SELECT COUNT(*)
+     FROM cmr.dwh_ilm_evaluation_queue q
+     WHERE q.table_owner = tp.table_owner
+     AND q.table_name = tp.table_name
+     AND q.partition_name = tp.partition_name
+     AND q.eligible = 'Y'
+     AND q.execution_status IN ('PENDING', 'SCHEDULED')
+    ) AS pending_ilm_actions,
+    -- Last ILM execution
+    (SELECT MAX(e.execution_end)
+     FROM cmr.dwh_ilm_execution_log e
+     WHERE e.table_owner = tp.table_owner
+     AND e.table_name = tp.table_name
+     AND e.partition_name = tp.partition_name
+     AND e.status = 'SUCCESS'
+    ) AS last_ilm_execution
+FROM all_tab_partitions tp
+LEFT JOIN all_segments s
+    ON s.owner = tp.table_owner
+    AND s.segment_name = tp.table_name
+    AND s.partition_name = tp.partition_name
+LEFT JOIN cmr.dwh_ilm_partition_access a
+    ON a.table_owner = tp.table_owner
+    AND a.table_name = tp.table_name
+    AND a.partition_name = tp.partition_name
+WHERE tp.table_owner = USER
+ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
+
+COMMENT ON VIEW dwh_v_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
+
+
 -- =============================================================================
 -- SECTION 3: INITIALIZATION PROCEDURES
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
--- Initialize partition access tracking
+-- Initialize partition access tracking (full metadata refresh)
 -- -----------------------------------------------------------------------------
 
 CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
@@ -455,6 +688,174 @@ BEGIN
     COMMIT;
 
     DBMS_OUTPUT.PUT_LINE('Partition access tracking refreshed: ' || SQL%ROWCOUNT || ' partitions');
+END;
+/
+
+
+-- -----------------------------------------------------------------------------
+-- Wrapper procedure for policy engine compatibility
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE refresh_partition_access_tracking(
+    p_table_owner VARCHAR2 DEFAULT USER,
+    p_table_name VARCHAR2 DEFAULT NULL
+) AS
+BEGIN
+    dwh_refresh_partition_access_tracking(p_table_owner, p_table_name);
+END;
+/
+
+
+-- -----------------------------------------------------------------------------
+-- Initialize partition access tracking for newly migrated table
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE dwh_init_partition_access_tracking(
+    p_table_owner VARCHAR2,
+    p_table_name VARCHAR2
+) AS
+    v_hot_threshold NUMBER;
+    v_warm_threshold NUMBER;
+    v_partitions_initialized NUMBER := 0;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('Initializing partition access tracking for ' ||
+                        p_table_owner || '.' || p_table_name);
+
+    -- Get thresholds from config
+    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
+
+    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+
+    -- Initialize tracking for all partitions with age calculated from high_value
+    MERGE INTO cmr.dwh_ilm_partition_access a
+    USING (
+        SELECT
+            tp.table_owner,
+            tp.table_name,
+            tp.partition_name,
+            tp.num_rows,
+            ROUND(NVL(s.bytes, 0)/1024/1024, 2) AS size_mb,
+            tp.compression,
+            s.tablespace_name,
+            -- Try to extract date from high_value for initial write time estimation
+            CASE
+                WHEN tp.high_value LIKE 'TO_DATE%' THEN
+                    TO_DATE(
+                        REGEXP_SUBSTR(tp.high_value, '''[^'']+'''),
+                        'YYYY-MM-DD'
+                    )
+                ELSE SYSDATE
+            END AS estimated_write_date
+        FROM all_tab_partitions tp
+        LEFT JOIN all_segments s
+            ON s.owner = tp.table_owner
+            AND s.segment_name = tp.table_name
+            AND s.partition_name = tp.partition_name
+        WHERE tp.table_owner = p_table_owner
+        AND tp.table_name = p_table_name
+    ) src
+    ON (a.table_owner = src.table_owner
+        AND a.table_name = src.table_name
+        AND a.partition_name = src.partition_name)
+    WHEN NOT MATCHED THEN INSERT (
+        table_owner, table_name, partition_name,
+        last_write_time, last_read_time, read_count, write_count,
+        num_rows, size_mb, compression, tablespace_name,
+        days_since_write, days_since_read, temperature, last_updated
+    ) VALUES (
+        src.table_owner, src.table_name, src.partition_name,
+        src.estimated_write_date, src.estimated_write_date, 0, 0,
+        src.num_rows, src.size_mb, src.compression, src.tablespace_name,
+        TRUNC(SYSDATE - src.estimated_write_date),
+        TRUNC(SYSDATE - src.estimated_write_date),
+        CASE
+            WHEN TRUNC(SYSDATE - src.estimated_write_date) < v_hot_threshold THEN 'HOT'
+            WHEN TRUNC(SYSDATE - src.estimated_write_date) < v_warm_threshold THEN 'WARM'
+            ELSE 'COLD'
+        END,
+        SYSTIMESTAMP
+    );
+
+    v_partitions_initialized := SQL%ROWCOUNT;
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('  Initialized tracking for ' || v_partitions_initialized || ' partition(s)');
+    DBMS_OUTPUT.PUT_LINE('  Temperature calculated from partition high_value dates');
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('  ERROR initializing partition tracking: ' || SQLERRM);
+        ROLLBACK;
+END;
+/
+
+
+-- -----------------------------------------------------------------------------
+-- Record partition access event (manual tracking)
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE dwh_record_partition_access(
+    p_table_owner VARCHAR2,
+    p_table_name VARCHAR2,
+    p_partition_name VARCHAR2,
+    p_access_type VARCHAR2  -- 'READ' or 'WRITE'
+) AS
+    v_hot_threshold NUMBER;
+    v_warm_threshold NUMBER;
+BEGIN
+    -- Get thresholds
+    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
+
+    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+
+    -- Update access tracking
+    MERGE INTO cmr.dwh_ilm_partition_access a
+    USING (
+        SELECT
+            p_table_owner AS table_owner,
+            p_table_name AS table_name,
+            p_partition_name AS partition_name,
+            p_access_type AS access_type
+        FROM DUAL
+    ) src
+    ON (a.table_owner = src.table_owner
+        AND a.table_name = src.table_name
+        AND a.partition_name = src.partition_name)
+    WHEN MATCHED THEN UPDATE SET
+        a.last_read_time = CASE WHEN src.access_type = 'READ' THEN SYSTIMESTAMP ELSE a.last_read_time END,
+        a.last_write_time = CASE WHEN src.access_type = 'WRITE' THEN SYSTIMESTAMP ELSE a.last_write_time END,
+        a.read_count = CASE WHEN src.access_type = 'READ' THEN NVL(a.read_count, 0) + 1 ELSE a.read_count END,
+        a.write_count = CASE WHEN src.access_type = 'WRITE' THEN NVL(a.write_count, 0) + 1 ELSE a.write_count END,
+        a.days_since_read = CASE WHEN src.access_type = 'READ' THEN 0 ELSE a.days_since_read END,
+        a.days_since_write = CASE WHEN src.access_type = 'WRITE' THEN 0 ELSE a.days_since_write END,
+        a.temperature = CASE
+            WHEN src.access_type IN ('READ', 'WRITE') THEN 'HOT'
+            ELSE a.temperature
+        END,
+        a.last_updated = SYSTIMESTAMP
+    WHEN NOT MATCHED THEN INSERT (
+        table_owner, table_name, partition_name,
+        last_read_time, last_write_time, read_count, write_count,
+        days_since_read, days_since_write, temperature, last_updated
+    ) VALUES (
+        src.table_owner, src.table_name, src.partition_name,
+        CASE WHEN src.access_type = 'READ' THEN SYSTIMESTAMP ELSE NULL END,
+        CASE WHEN src.access_type = 'WRITE' THEN SYSTIMESTAMP ELSE NULL END,
+        CASE WHEN src.access_type = 'READ' THEN 1 ELSE 0 END,
+        CASE WHEN src.access_type = 'WRITE' THEN 1 ELSE 0 END,
+        0, 0, 'HOT', SYSTIMESTAMP
+    );
+
+    COMMIT;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
 END;
 /
 

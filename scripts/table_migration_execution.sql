@@ -46,6 +46,10 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
         p_task_id NUMBER
     );
 
+    PROCEDURE validate_ilm_policies(
+        p_task_id NUMBER
+    );
+
     -- Rollback
     PROCEDURE rollback_migration(
         p_task_id NUMBER
@@ -2285,6 +2289,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             -- Apply ILM policies if requested
             IF v_task.apply_ilm_policies = 'Y' THEN
                 apply_ilm_policies(p_task_id);
+                -- Validate ILM policies were created successfully
+                validate_ilm_policies(p_task_id);
+                -- Initialize partition access tracking for ILM
+                DBMS_OUTPUT.PUT_LINE('');
+                dwh_init_partition_access_tracking(v_task.source_owner, v_task.source_table);
             END IF;
 
             -- Validate migration
@@ -2554,8 +2563,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     ) AS
         v_task dwh_migration_tasks%ROWTYPE;
         v_template dwh_migration_ilm_templates%ROWTYPE;
-        v_policies_json VARCHAR2(32767);
-        v_policy_name VARCHAR2(100);
+        v_policies_created NUMBER := 0;
+        v_policies_skipped NUMBER := 0;
+        v_policy_id NUMBER;
+        v_error_msg VARCHAR2(4000);
     BEGIN
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
@@ -2570,16 +2581,134 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         FROM cmr.dwh_migration_ilm_templates
         WHERE template_name = v_task.ilm_policy_template;
 
-        DBMS_OUTPUT.PUT_LINE('Applying ILM policies from template: ' || v_template.template_name);
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Applying ILM Policies');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Template: ' || v_template.template_name);
+        DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
+        DBMS_OUTPUT.PUT_LINE('');
 
-        -- This is simplified - in production you'd parse the JSON
-        -- and create actual ILM policies
-        DBMS_OUTPUT.PUT_LINE('  ILM policy application would happen here');
-        DBMS_OUTPUT.PUT_LINE('  Template: ' || v_template.table_type);
+        -- Parse JSON and create policies using JSON_TABLE
+        FOR policy_rec IN (
+            SELECT
+                REPLACE(jt.policy_name, '{TABLE}', v_task.source_table) AS policy_name,
+                jt.policy_type,
+                jt.action_type,
+                jt.age_days,
+                jt.age_months,
+                jt.compression_type,
+                jt.target_tablespace,
+                jt.priority,
+                jt.enabled
+            FROM cmr.dwh_migration_ilm_templates t,
+                JSON_TABLE(t.policies_json, '$[*]'
+                    COLUMNS (
+                        policy_name VARCHAR2(100) PATH '$.policy_name',
+                        policy_type VARCHAR2(30) PATH '$.policy_type' DEFAULT 'COMPRESSION' ON EMPTY,
+                        action_type VARCHAR2(30) PATH '$.action',
+                        age_days NUMBER PATH '$.age_days',
+                        age_months NUMBER PATH '$.age_months',
+                        compression_type VARCHAR2(50) PATH '$.compression',
+                        target_tablespace VARCHAR2(30) PATH '$.tablespace',
+                        priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
+                        enabled CHAR(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
+                    )
+                ) jt
+            WHERE t.template_name = v_template.template_name
+        ) LOOP
+            BEGIN
+                -- Determine policy type from action if not specified
+                DECLARE
+                    v_pol_type VARCHAR2(30);
+                    v_act_type VARCHAR2(30);
+                BEGIN
+                    v_act_type := UPPER(policy_rec.action_type);
+
+                    -- Map action to policy type
+                    v_pol_type := CASE v_act_type
+                        WHEN 'COMPRESS' THEN 'COMPRESSION'
+                        WHEN 'MOVE' THEN 'TIERING'
+                        WHEN 'READ_ONLY' THEN 'ARCHIVAL'
+                        WHEN 'DROP' THEN 'PURGE'
+                        WHEN 'TRUNCATE' THEN 'PURGE'
+                        ELSE COALESCE(policy_rec.policy_type, 'CUSTOM')
+                    END;
+
+                    -- Insert policy
+                    INSERT INTO cmr.dwh_ilm_policies (
+                        policy_name,
+                        table_owner,
+                        table_name,
+                        policy_type,
+                        action_type,
+                        age_days,
+                        age_months,
+                        compression_type,
+                        target_tablespace,
+                        priority,
+                        enabled,
+                        created_by
+                    ) VALUES (
+                        policy_rec.policy_name,
+                        v_task.source_owner,
+                        v_task.source_table,
+                        v_pol_type,
+                        v_act_type,
+                        policy_rec.age_days,
+                        policy_rec.age_months,
+                        policy_rec.compression_type,
+                        policy_rec.target_tablespace,
+                        policy_rec.priority,
+                        policy_rec.enabled,
+                        USER || ' (Migration Task ' || p_task_id || ')'
+                    ) RETURNING policy_id INTO v_policy_id;
+
+                    v_policies_created := v_policies_created + 1;
+
+                    DBMS_OUTPUT.PUT_LINE('✓ Created policy: ' || policy_rec.policy_name);
+                    DBMS_OUTPUT.PUT_LINE('  Action: ' || v_act_type ||
+                        CASE
+                            WHEN policy_rec.age_days IS NOT NULL THEN ' after ' || policy_rec.age_days || ' days'
+                            WHEN policy_rec.age_months IS NOT NULL THEN ' after ' || policy_rec.age_months || ' months'
+                            ELSE ''
+                        END);
+                    IF policy_rec.compression_type IS NOT NULL THEN
+                        DBMS_OUTPUT.PUT_LINE('  Compression: ' || policy_rec.compression_type);
+                    END IF;
+                    IF policy_rec.target_tablespace IS NOT NULL THEN
+                        DBMS_OUTPUT.PUT_LINE('  Tablespace: ' || policy_rec.target_tablespace);
+                    END IF;
+                    DBMS_OUTPUT.PUT_LINE('');
+                END;
+
+            EXCEPTION
+                WHEN DUP_VAL_ON_INDEX THEN
+                    -- Policy already exists, skip
+                    v_policies_skipped := v_policies_skipped + 1;
+                    DBMS_OUTPUT.PUT_LINE('⊘ Skipped (already exists): ' || policy_rec.policy_name);
+                WHEN OTHERS THEN
+                    v_error_msg := SQLERRM;
+                    DBMS_OUTPUT.PUT_LINE('✗ Failed to create policy: ' || policy_rec.policy_name);
+                    DBMS_OUTPUT.PUT_LINE('  Error: ' || v_error_msg);
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('ILM Policy Application Summary');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Policies created: ' || v_policies_created);
+        DBMS_OUTPUT.PUT_LINE('Policies skipped: ' || v_policies_skipped);
+        DBMS_OUTPUT.PUT_LINE('');
+
+        COMMIT;
 
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             DBMS_OUTPUT.PUT_LINE('Warning: ILM template not found: ' || v_task.ilm_policy_template);
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR applying ILM policies: ' || SQLERRM);
+            RAISE;
     END apply_ilm_policies;
 
 
@@ -2617,6 +2746,137 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 'Row count mismatch! Source: ' || v_source_count || ', Target: ' || v_target_count);
         END IF;
     END validate_migration;
+
+
+    PROCEDURE validate_ilm_policies(
+        p_task_id NUMBER
+    ) AS
+        v_task dwh_migration_tasks%ROWTYPE;
+        v_policy_count NUMBER;
+        v_eligible_count NUMBER;
+        v_validation_passed BOOLEAN := TRUE;
+    BEGIN
+        SELECT * INTO v_task
+        FROM cmr.dwh_migration_tasks
+        WHERE task_id = p_task_id;
+
+        IF v_task.apply_ilm_policies != 'Y' OR v_task.ilm_policy_template IS NULL THEN
+            DBMS_OUTPUT.PUT_LINE('ILM policies not applied - skipping validation');
+            RETURN;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Validating ILM Policies');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- Check if policies were created
+        SELECT COUNT(*) INTO v_policy_count
+        FROM cmr.dwh_ilm_policies
+        WHERE table_owner = v_task.source_owner
+        AND table_name = v_task.source_table;
+
+        IF v_policy_count = 0 THEN
+            DBMS_OUTPUT.PUT_LINE('✗ FAILED: No ILM policies found for table');
+            v_validation_passed := FALSE;
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('✓ Found ' || v_policy_count || ' ILM policies');
+
+            -- Display each policy
+            FOR pol IN (
+                SELECT policy_name, policy_type, action_type, enabled,
+                       age_days, age_months, compression_type, target_tablespace
+                FROM cmr.dwh_ilm_policies
+                WHERE table_owner = v_task.source_owner
+                AND table_name = v_task.source_table
+                ORDER BY priority
+            ) LOOP
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('  Policy: ' || pol.policy_name);
+                DBMS_OUTPUT.PUT_LINE('    Type: ' || pol.policy_type);
+                DBMS_OUTPUT.PUT_LINE('    Action: ' || pol.action_type);
+                DBMS_OUTPUT.PUT_LINE('    Enabled: ' || pol.enabled);
+                IF pol.age_days IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('    Trigger: ' || pol.age_days || ' days');
+                END IF;
+                IF pol.age_months IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('    Trigger: ' || pol.age_months || ' months');
+                END IF;
+                IF pol.compression_type IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('    Compression: ' || pol.compression_type);
+                END IF;
+                IF pol.target_tablespace IS NOT NULL THEN
+                    DBMS_OUTPUT.PUT_LINE('    Tablespace: ' || pol.target_tablespace);
+                END IF;
+            END LOOP;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- Check if table is partitioned (required for partition-level ILM)
+        DECLARE
+            v_partitioned VARCHAR2(3);
+        BEGIN
+            SELECT partitioned INTO v_partitioned
+            FROM dba_tables
+            WHERE owner = v_task.source_owner
+            AND table_name = v_task.source_table;
+
+            IF v_partitioned = 'YES' THEN
+                DBMS_OUTPUT.PUT_LINE('✓ Table is partitioned (ILM can operate on partitions)');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('⚠ WARNING: Table is not partitioned (ILM will operate on entire table)');
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                DBMS_OUTPUT.PUT_LINE('✗ FAILED: Table not found');
+                v_validation_passed := FALSE;
+        END;
+
+        -- Test policy evaluation (don't queue actions, just check eligibility)
+        BEGIN
+            -- Call policy engine to evaluate this table
+            pck_dwh_ilm_policy_engine.evaluate_table(v_task.source_owner, v_task.source_table);
+
+            -- Check evaluation queue
+            SELECT COUNT(*) INTO v_eligible_count
+            FROM cmr.dwh_ilm_evaluation_queue
+            WHERE table_owner = v_task.source_owner
+            AND table_name = v_task.source_table
+            AND eligible = 'Y';
+
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('✓ Policy evaluation successful');
+            DBMS_OUTPUT.PUT_LINE('  Eligible partitions now: ' || v_eligible_count);
+            IF v_eligible_count > 0 THEN
+                DBMS_OUTPUT.PUT_LINE('  Note: These partitions are ready for ILM actions');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  Note: No partitions currently eligible (expected for new tables)');
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                DBMS_OUTPUT.PUT_LINE('✗ FAILED: Policy evaluation error: ' || SQLERRM);
+                v_validation_passed := FALSE;
+        END;
+
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        IF v_validation_passed THEN
+            DBMS_OUTPUT.PUT_LINE('ILM Validation: PASSED');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('ILM Validation: FAILED');
+        END IF;
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('');
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR validating ILM policies: ' || SQLERRM);
+            RAISE;
+    END validate_ilm_policies;
 
 
     -- ==========================================================================

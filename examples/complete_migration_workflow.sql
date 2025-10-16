@@ -452,6 +452,281 @@ WHERE project_name LIKE '%2024';
 COMMIT;
 */
 
+-- =============================================================================
+-- Example 6: Complete Migration with ILM Integration (NEW!)
+-- =============================================================================
+
+PROMPT ========================================
+PROMPT Example 6: Migration with ILM Policies
+PROMPT ========================================
+
+DECLARE
+    v_project_id NUMBER;
+    v_task_id NUMBER;
+BEGIN
+    -- Create project
+    INSERT INTO cmr.dwh_migration_projects (project_name, description, status)
+    VALUES ('ILM_MIGRATION_2024', 'Migration with automatic ILM policy application', 'PLANNING')
+    RETURNING project_id INTO v_project_id;
+
+    DBMS_OUTPUT.PUT_LINE('Created project ID: ' || v_project_id);
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Create task with ILM policies enabled
+    INSERT INTO cmr.dwh_migration_tasks (
+        project_id,
+        task_name,
+        source_owner,
+        source_table,
+        use_compression,
+        compression_type,
+        apply_ilm_policies,        -- Enable ILM
+        ilm_policy_template,       -- Choose template
+        status
+    ) VALUES (
+        v_project_id,
+        'Migrate with ILM',
+        USER,
+        'SALES_FACT',
+        'Y',
+        'QUERY HIGH',
+        'Y',                       -- Apply ILM policies
+        'FACT_TABLE_STANDARD',     -- Template: 90-day compression, tiering, archival
+        'PENDING'
+    ) RETURNING task_id INTO v_task_id;
+
+    DBMS_OUTPUT.PUT_LINE('Created task ID: ' || v_task_id);
+    DBMS_OUTPUT.PUT_LINE('ILM policies will be automatically applied after migration');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 1: Analyze table
+    DBMS_OUTPUT.PUT_LINE('=== Step 1: Analyzing table ===');
+    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 2: Apply recommendations
+    DBMS_OUTPUT.PUT_LINE('=== Step 2: Applying recommendations ===');
+    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 3: Simulate migration
+    DBMS_OUTPUT.PUT_LINE('=== Step 3: Simulating migration ===');
+    pck_dwh_table_migration_executor.execute_migration(
+        p_task_id => v_task_id,
+        p_simulate => TRUE
+    );
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 4: Execute migration (uncomment to run)
+    -- DBMS_OUTPUT.PUT_LINE('=== Step 4: Executing migration with ILM ===');
+    -- pck_dwh_table_migration_executor.execute_migration(v_task_id);
+    --
+    -- After migration completes, the following happens automatically:
+    --   1. ILM policies are created from template
+    --   2. Policies are validated
+    --   3. Partition access tracking is initialized
+    --   4. Partitions are classified by temperature (HOT/WARM/COLD)
+
+    COMMIT;
+END;
+/
+
+
+-- =============================================================================
+-- Example 7: Monitor ILM Policies After Migration
+-- =============================================================================
+
+PROMPT ========================================
+PROMPT Example 7: ILM Monitoring Dashboard
+PROMPT ========================================
+
+PROMPT Query 1: Summary of ILM policies per table
+SELECT * FROM dwh_v_ilm_policy_summary ORDER BY pending_actions DESC;
+
+PROMPT Query 2: Upcoming ILM actions in next 30 days
+SELECT * FROM dwh_v_ilm_upcoming_actions WHERE urgency IN ('Overdue', 'Today', 'This Week');
+
+PROMPT Query 3: Partition lifecycle status
+SELECT
+    table_name,
+    partition_name,
+    lifecycle_stage,
+    recommended_action,
+    partition_age_days_from_highvalue,
+    size_mb,
+    compression
+FROM dwh_v_ilm_partition_lifecycle
+WHERE table_name = 'SALES_FACT'
+ORDER BY partition_position;
+
+PROMPT Query 4: Space savings history
+SELECT
+    table_name,
+    action_type,
+    execution_date,
+    partitions_processed,
+    total_space_saved_mb,
+    avg_compression_ratio
+FROM dwh_v_ilm_space_savings
+WHERE table_name = 'SALES_FACT'
+AND execution_date > SYSDATE - 30
+ORDER BY execution_date DESC;
+
+PROMPT Query 5: Recent ILM execution history
+SELECT
+    policy_name,
+    partition_name,
+    action_type,
+    status,
+    execution_start,
+    duration_minutes,
+    space_saved_mb,
+    performance_category
+FROM dwh_v_ilm_execution_history
+WHERE table_name = 'SALES_FACT'
+ORDER BY execution_start DESC;
+
+
+-- =============================================================================
+-- Example 8: Manual ILM Policy Evaluation
+-- =============================================================================
+
+PROMPT ========================================
+PROMPT Example 8: Evaluate ILM Policies
+PROMPT ========================================
+
+-- Evaluate all policies for a specific table
+EXEC pck_dwh_ilm_policy_engine.evaluate_table(USER, 'SALES_FACT');
+
+-- Check evaluation queue for eligible partitions
+SELECT
+    policy_name,
+    partition_name,
+    evaluation_date,
+    reason,
+    execution_status
+FROM cmr.dwh_ilm_evaluation_queue
+WHERE table_name = 'SALES_FACT'
+AND eligible = 'Y'
+ORDER BY evaluation_date DESC;
+
+
+-- =============================================================================
+-- Example 9: Record Manual Partition Access
+-- =============================================================================
+
+PROMPT ========================================
+PROMPT Example 9: Track Partition Access
+PROMPT ========================================
+
+-- Record read access to a partition
+EXEC dwh_record_partition_access(USER, 'SALES_FACT', 'P_2024_01', 'READ');
+
+-- Record write access to a partition
+EXEC dwh_record_partition_access(USER, 'SALES_FACT', 'P_2024_12', 'WRITE');
+
+-- Refresh partition access tracking for all tables
+EXEC dwh_refresh_partition_access_tracking(USER, NULL);
+
+-- View updated temperature classification
+SELECT
+    partition_name,
+    temperature,
+    days_since_read,
+    days_since_write,
+    read_count,
+    write_count,
+    last_read_time,
+    last_write_time
+FROM cmr.dwh_ilm_partition_access
+WHERE table_name = 'SALES_FACT'
+ORDER BY partition_name;
+
+
+-- =============================================================================
+-- Example 10: Complete End-to-End ILM Workflow
+-- =============================================================================
+
+PROMPT ========================================
+PROMPT Example 10: Complete ILM Lifecycle
+PROMPT ========================================
+
+DECLARE
+    v_task_id NUMBER := 1; -- Your migration task ID
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('=== Complete ILM Lifecycle Demo ===');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 1: Migrate table (with ILM enabled)
+    DBMS_OUTPUT.PUT_LINE('Step 1: Table migrated with apply_ilm_policies = Y');
+    DBMS_OUTPUT.PUT_LINE('  - Partitioned table created');
+    DBMS_OUTPUT.PUT_LINE('  - ILM policies applied from template');
+    DBMS_OUTPUT.PUT_LINE('  - Partition access tracking initialized');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 2: Verify ILM policies were created
+    DBMS_OUTPUT.PUT_LINE('Step 2: Verify ILM policies');
+    FOR pol IN (
+        SELECT policy_name, policy_type, action_type, age_days
+        FROM cmr.dwh_ilm_policies
+        WHERE table_owner = USER
+        AND table_name = 'SALES_FACT'
+        ORDER BY policy_id
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('  Policy: ' || pol.policy_name);
+        DBMS_OUTPUT.PUT_LINE('    Type: ' || pol.policy_type);
+        DBMS_OUTPUT.PUT_LINE('    Action: ' || pol.action_type);
+        DBMS_OUTPUT.PUT_LINE('    Age: ' || pol.age_days || ' days');
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 3: Check partition temperatures
+    DBMS_OUTPUT.PUT_LINE('Step 3: Partition temperature classification');
+    FOR part IN (
+        SELECT partition_name, temperature, days_since_write, size_mb
+        FROM cmr.dwh_ilm_partition_access
+        WHERE table_name = 'SALES_FACT'
+        ORDER BY days_since_write DESC
+        FETCH FIRST 5 ROWS ONLY
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('  ' || part.partition_name || ': ' || part.temperature);
+        DBMS_OUTPUT.PUT_LINE('    Age: ' || part.days_since_write || ' days');
+        DBMS_OUTPUT.PUT_LINE('    Size: ' || part.size_mb || ' MB');
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 4: Evaluate policies (find eligible partitions)
+    DBMS_OUTPUT.PUT_LINE('Step 4: Evaluate ILM policies');
+    pck_dwh_ilm_policy_engine.evaluate_table(USER, 'SALES_FACT');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 5: Review pending actions
+    DBMS_OUTPUT.PUT_LINE('Step 5: Review pending ILM actions');
+    FOR action IN (
+        SELECT policy_name, partition_name, reason
+        FROM cmr.dwh_ilm_evaluation_queue
+        WHERE table_name = 'SALES_FACT'
+        AND eligible = 'Y'
+        AND execution_status = 'PENDING'
+        FETCH FIRST 5 ROWS ONLY
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('  ' || action.partition_name);
+        DBMS_OUTPUT.PUT_LINE('    Policy: ' || action.policy_name);
+        DBMS_OUTPUT.PUT_LINE('    Reason: ' || action.reason);
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Step 6: Execute ILM actions (commented - requires execution engine)
+    DBMS_OUTPUT.PUT_LINE('Step 6: Execute ILM actions (manual step)');
+    DBMS_OUTPUT.PUT_LINE('  Run: pck_dwh_ilm_execution_engine.execute_pending_actions()');
+    DBMS_OUTPUT.PUT_LINE('  Or enable automatic execution via scheduler');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    DBMS_OUTPUT.PUT_LINE('=== ILM Lifecycle Complete ===');
+END;
+/
+
+
 PROMPT ========================================
 PROMPT Complete Workflow Examples Loaded
 PROMPT ========================================
@@ -461,5 +736,14 @@ PROMPT 1. Create minimal task (no partition strategy)
 PROMPT 2. Analyze table (get recommendations)
 PROMPT 3. Apply recommendations (KEY STEP!)
 PROMPT 4. Execute migration
+PROMPT 5. ILM policies applied automatically
+PROMPT 6. Monitor via dashboard views
+PROMPT
+PROMPT NEW: ILM Integration (Examples 6-10)
+PROMPT - Automatic ILM policy application
+PROMPT - Partition access tracking
+PROMPT - Temperature classification
+PROMPT - Policy evaluation and monitoring
+PROMPT - Complete lifecycle management
 PROMPT
 PROMPT ========================================
