@@ -237,6 +237,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_num_rows NUMBER;
         v_bytes NUMBER;
         v_size_mb NUMBER;
+        v_parallel_by_rows NUMBER := 1;
+        v_parallel_by_size NUMBER := 1;
         v_parallel_degree NUMBER;
     BEGIN
         -- Get table row count and size from statistics
@@ -253,46 +255,55 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_bytes := 0;
         END;
 
-        -- If num_rows is 0 (no statistics), use table size in MB as fallback
-        IF v_num_rows = 0 AND v_bytes > 0 THEN
+        -- Calculate parallelism based on SIZE (MB)
+        -- For DWH tables, size is often more important than row count (wide rows)
+        IF v_bytes > 0 THEN
             v_size_mb := v_bytes / 1024 / 1024;
 
-            -- Estimate parallelism based on size
+            -- Size-based parallelism
             -- <10 MB: degree 1
             -- 10-100 MB: degree 2
-            -- 100-1000 MB: degree 4
+            -- 100-1000 MB (100MB-1GB): degree 4
             -- 1-10 GB: degree 8
             -- >10 GB: degree 16
             IF v_size_mb < 10 THEN
-                v_parallel_degree := 1;
+                v_parallel_by_size := 1;
             ELSIF v_size_mb < 100 THEN
-                v_parallel_degree := 2;
+                v_parallel_by_size := 2;
             ELSIF v_size_mb < 1000 THEN
-                v_parallel_degree := 4;
+                v_parallel_by_size := 4;
             ELSIF v_size_mb < 10000 THEN
-                v_parallel_degree := 8;
+                v_parallel_by_size := 8;
             ELSE
-                v_parallel_degree := 16;
-            END IF;
-        ELSE
-            -- Use row count based parallelism
-            -- Small tables (<100K rows): No parallelism (degree 1)
-            -- Medium tables (100K-1M rows): Degree 2
-            -- Large tables (1M-10M rows): Degree 4
-            -- Very large tables (10M-100M rows): Degree 8
-            -- Huge tables (>100M rows): Degree 16
-            IF v_num_rows < 100000 THEN
-                v_parallel_degree := 1;
-            ELSIF v_num_rows < 1000000 THEN
-                v_parallel_degree := 2;
-            ELSIF v_num_rows < 10000000 THEN
-                v_parallel_degree := 4;
-            ELSIF v_num_rows < 100000000 THEN
-                v_parallel_degree := 8;
-            ELSE
-                v_parallel_degree := 16;
+                v_parallel_by_size := 16;
             END IF;
         END IF;
+
+        -- Calculate parallelism based on ROW COUNT
+        IF v_num_rows > 0 THEN
+            -- Row count based parallelism
+            -- Small tables (<100K rows): degree 1
+            -- Medium tables (100K-1M rows): degree 2
+            -- Large tables (1M-10M rows): degree 4
+            -- Very large tables (10M-100M rows): degree 8
+            -- Huge tables (>100M rows): degree 16
+            IF v_num_rows < 100000 THEN
+                v_parallel_by_rows := 1;
+            ELSIF v_num_rows < 1000000 THEN
+                v_parallel_by_rows := 2;
+            ELSIF v_num_rows < 10000000 THEN
+                v_parallel_by_rows := 4;
+            ELSIF v_num_rows < 100000000 THEN
+                v_parallel_by_rows := 8;
+            ELSE
+                v_parallel_by_rows := 16;
+            END IF;
+        END IF;
+
+        -- Take the GREATER of the two recommendations
+        -- This ensures wide-row tables get appropriate parallelism
+        -- even if they have relatively few rows
+        v_parallel_degree := GREATEST(v_parallel_by_size, v_parallel_by_rows);
 
         RETURN v_parallel_degree;
     EXCEPTION
