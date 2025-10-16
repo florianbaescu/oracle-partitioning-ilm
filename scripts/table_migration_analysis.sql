@@ -4107,12 +4107,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         FROM cmr.dwh_migration_analysis
         WHERE task_id = p_task_id;
 
-        -- Update task with recommended method
+        -- Update task with recommended method and analyzed parallel degree
         UPDATE cmr.dwh_migration_tasks
         SET status = 'ANALYZED',
             migration_method = v_recommended_method,
             source_rows = v_num_rows,
             source_size_mb = v_table_size,
+            parallel_degree = v_parallel_degree,
             validation_status = CASE
                 WHEN DBMS_LOB.INSTR(v_blocking_issues, 'ERROR') > 0 THEN 'BLOCKED'
                 ELSE 'READY'
