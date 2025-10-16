@@ -368,31 +368,67 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 END IF;
 
                 IF v_min_date IS NOT NULL THEN
-                    -- Round down to first day of month/year depending on interval
-                    -- This ensures initial partition is BEFORE the earliest data
-                    IF UPPER(p_task.interval_clause) LIKE '%MONTH%' THEN
-                        v_min_date := TRUNC(v_min_date, 'MM');
-                    ELSIF UPPER(p_task.interval_clause) LIKE '%YEAR%' THEN
-                        v_min_date := TRUNC(v_min_date, 'YYYY');
-                    ELSIF UPPER(p_task.interval_clause) LIKE '%DAY%' THEN
-                        v_min_date := TRUNC(v_min_date);
-                    ELSE
-                        -- Default: truncate to day
-                        v_min_date := TRUNC(v_min_date);
-                    END IF;
+                    DECLARE
+                        v_buffer_months NUMBER;
+                    BEGIN
+                        -- Get buffer configuration (default 1 month if not set)
+                        BEGIN
+                            v_buffer_months := TO_NUMBER(get_dwh_ilm_config('INITIAL_PARTITION_BUFFER_MONTHS'));
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                v_buffer_months := 1;
+                        END;
 
-                    v_starting_boundary := 'TO_DATE(''' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')';
-                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: ' || v_starting_boundary || ' (from analysis, excludes NULLs)');
+                        -- Round down to first day of month/year depending on interval
+                        -- This ensures initial partition is BEFORE the earliest data
+                        IF UPPER(p_task.interval_clause) LIKE '%MONTH%' THEN
+                            v_min_date := TRUNC(v_min_date, 'MM');
+                            -- Subtract buffer months for safety margin
+                            v_min_date := ADD_MONTHS(v_min_date, -v_buffer_months);
+                        ELSIF UPPER(p_task.interval_clause) LIKE '%YEAR%' THEN
+                            v_min_date := TRUNC(v_min_date, 'YYYY');
+                            -- Subtract buffer in years (convert months to years)
+                            v_min_date := ADD_MONTHS(v_min_date, -v_buffer_months);
+                        ELSIF UPPER(p_task.interval_clause) LIKE '%DAY%' THEN
+                            v_min_date := TRUNC(v_min_date);
+                            -- Subtract buffer in days (buffer_months * 30)
+                            v_min_date := v_min_date - (v_buffer_months * 30);
+                        ELSE
+                            -- Default: truncate to day and subtract buffer
+                            v_min_date := TRUNC(v_min_date);
+                            v_min_date := ADD_MONTHS(v_min_date, -v_buffer_months);
+                        END IF;
+
+                        v_starting_boundary := 'TO_DATE(''' || TO_CHAR(v_min_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD'')';
+                        DBMS_OUTPUT.PUT_LINE('Initial partition boundary: ' || v_starting_boundary ||
+                            ' (from analysis, excludes NULLs, includes ' || v_buffer_months || ' month buffer)');
+                    END;
                 ELSE
-                    -- No data detected, use safe historical date
-                    v_starting_boundary := 'TO_DATE(''1900-01-01'', ''YYYY-MM-DD'')';
-                    DBMS_OUTPUT.PUT_LINE('Initial partition boundary: 1900-01-01 (no data found, using safe historical date)');
+                    -- No data detected, use configured fallback date
+                    DECLARE
+                        v_fallback_date VARCHAR2(20);
+                    BEGIN
+                        v_fallback_date := get_dwh_ilm_config('FALLBACK_INITIAL_PARTITION_DATE');
+                        IF v_fallback_date IS NULL THEN
+                            v_fallback_date := '1900-01-01';
+                        END IF;
+                        v_starting_boundary := 'TO_DATE(''' || v_fallback_date || ''', ''YYYY-MM-DD'')';
+                        DBMS_OUTPUT.PUT_LINE('Initial partition boundary: ' || v_fallback_date || ' (no data found, using configured fallback date)');
+                    END;
                 END IF;
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- Fallback: use safe historical date
-                    v_starting_boundary := 'TO_DATE(''1900-01-01'', ''YYYY-MM-DD'')';
-                    DBMS_OUTPUT.PUT_LINE('WARNING: Could not determine initial partition boundary - using 1900-01-01');
+                    -- Fallback: use configured fallback date
+                    DECLARE
+                        v_fallback_date VARCHAR2(20);
+                    BEGIN
+                        v_fallback_date := get_dwh_ilm_config('FALLBACK_INITIAL_PARTITION_DATE');
+                        IF v_fallback_date IS NULL THEN
+                            v_fallback_date := '1900-01-01';
+                        END IF;
+                        v_starting_boundary := 'TO_DATE(''' || v_fallback_date || ''', ''YYYY-MM-DD'')';
+                        DBMS_OUTPUT.PUT_LINE('WARNING: Could not determine initial partition boundary - using ' || v_fallback_date);
+                    END;
             END;
 
             v_initial_partition_clause := '(PARTITION p_initial VALUES LESS THAN (' || v_starting_boundary || '))';

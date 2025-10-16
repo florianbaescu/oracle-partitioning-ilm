@@ -730,6 +730,20 @@ WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('NULL_DEFAULT_VARCHAR', 'nav', 'Default varchar value for NULL varchar columns. Used with UPDATE strategy.');
 
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'INITIAL_PARTITION_BUFFER_MONTHS' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('INITIAL_PARTITION_BUFFER_MONTHS', '1', 'Number of months before MIN date to set initial partition boundary. Prevents ORA-14300 when data exists before the boundary. Recommended: 1-3 months for safety buffer.');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'FALLBACK_INITIAL_PARTITION_DATE' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('FALLBACK_INITIAL_PARTITION_DATE', '1900-01-01', 'Fallback date for initial partition boundary when no data is found in table. Format: YYYY-MM-DD. This safe historical date ensures all realistic data will be AFTER the initial partition.');
+
 COMMIT;
 
 
