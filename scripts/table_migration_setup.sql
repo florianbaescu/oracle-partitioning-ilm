@@ -199,6 +199,19 @@ CREATE TABLE cmr.dwh_migration_analysis (
     blocking_issues     CLOB,                  -- Issues that must be resolved
     warnings            CLOB,                  -- Non-blocking warnings
 
+    -- Tablespace configuration (detected during analysis)
+    target_tablespace           VARCHAR2(128),  -- Which tablespace will be used
+    tablespace_extent_mgmt      VARCHAR2(30),   -- LOCAL or DICTIONARY
+    tablespace_allocation       VARCHAR2(30),   -- UNIFORM or SYSTEM (autoallocate)
+    tablespace_ssm              VARCHAR2(30),   -- AUTO (ASSM) or MANUAL
+    tablespace_uniform_size     NUMBER,         -- If UNIFORM, size in bytes
+
+    -- Storage recommendations (calculated based on table size + tablespace type)
+    recommended_initial_extent  NUMBER,         -- Calculated INITIAL size in bytes
+    recommended_next_extent     NUMBER,         -- Calculated NEXT size (or NULL if not needed)
+    recommended_storage_clause  VARCHAR2(500),  -- Complete STORAGE(...) or NULL
+    storage_recommendation_reason VARCHAR2(1000), -- Why this was recommended
+
     analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
     analysis_duration_seconds NUMBER,          -- Duration of analysis in seconds
 
@@ -668,6 +681,13 @@ ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('STORAGE_NEXT_EXTENT', '1048576', 'Next extent size in bytes for tables and partitions (1MB)');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'STORAGE_EXTENT_MODE' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('STORAGE_EXTENT_MODE', 'AUTO', 'Storage extent mode: AUTO (use analysis recommendations), FORCED (always use fixed config), NONE (never use STORAGE clause)');
 
 COMMIT;
 

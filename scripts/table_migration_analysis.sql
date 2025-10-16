@@ -102,6 +102,11 @@ CREATE OR REPLACE PACKAGE pck_dwh_table_migration_analyzer AUTHID CURRENT_USER A
         p_compression_type VARCHAR2
     ) RETURN NUMBER;
 
+    FUNCTION calculate_optimal_initial_extent(
+        p_avg_partition_mb NUMBER,
+        p_total_table_mb NUMBER
+    ) RETURN NUMBER;
+
     -- ==========================================================================
     -- AUTOMATIC LIST Partitioning helper functions
     -- ==========================================================================
@@ -2868,6 +2873,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_supports_online_redef CHAR(1) := 'N';
         v_online_redef_method VARCHAR2(30) := NULL;
         v_recommended_method VARCHAR2(30) := 'CTAS';  -- Default to CTAS
+        -- Tablespace configuration variables
+        v_target_tablespace VARCHAR2(128);
+        v_ts_extent_mgmt VARCHAR2(30);
+        v_ts_allocation VARCHAR2(30);
+        v_ts_ssm VARCHAR2(30);
+        v_ts_uniform_size NUMBER;
+        v_recommended_initial NUMBER;
+        v_recommended_next NUMBER;
+        v_storage_clause VARCHAR2(500);
+        v_storage_reason VARCHAR2(1000);
     BEGIN
         v_start_time := SYSTIMESTAMP;
         -- Get task details
@@ -3575,6 +3590,113 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             v_space_savings_mb := 0;
         END IF;
 
+        -- Analyze target tablespace and calculate optimal storage parameters
+        DECLARE
+            v_ts_initial NUMBER;
+            v_ts_next NUMBER;
+            v_avg_part_mb NUMBER;
+        BEGIN
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('Analyzing tablespace configuration...');
+
+            -- Step 1: Determine target tablespace
+            IF v_task.target_tablespace IS NOT NULL THEN
+                v_target_tablespace := v_task.target_tablespace;
+                DBMS_OUTPUT.PUT_LINE('  Using explicitly set tablespace: ' || v_target_tablespace);
+            ELSE
+                -- Use source table's current tablespace
+                BEGIN
+                    SELECT tablespace_name INTO v_target_tablespace
+                    FROM dba_tables
+                    WHERE owner = v_task.source_owner
+                    AND table_name = v_task.source_table;
+
+                    DBMS_OUTPUT.PUT_LINE('  Using source table tablespace: ' || v_target_tablespace);
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_target_tablespace := NULL;
+                        DBMS_OUTPUT.PUT_LINE('  WARNING: Could not determine tablespace');
+                END;
+            END IF;
+
+            -- Step 2: Query tablespace configuration
+            IF v_target_tablespace IS NOT NULL THEN
+                BEGIN
+                    SELECT
+                        extent_management,
+                        allocation_type,
+                        segment_space_management,
+                        initial_extent,
+                        next_extent
+                    INTO
+                        v_ts_extent_mgmt,
+                        v_ts_allocation,
+                        v_ts_ssm,
+                        v_ts_initial,
+                        v_ts_next
+                    FROM dba_tablespaces
+                    WHERE tablespace_name = v_target_tablespace;
+
+                    DBMS_OUTPUT.PUT_LINE('  Tablespace type: ' || v_ts_extent_mgmt || ' / ' ||
+                                        v_ts_allocation || ' / ' || v_ts_ssm);
+
+                    -- Step 3: Calculate optimal storage based on tablespace type
+                    v_avg_part_mb := CASE WHEN v_partition_count > 0
+                                         THEN v_table_size / v_partition_count
+                                         ELSE NULL END;
+
+                    IF v_ts_ssm = 'AUTO' THEN
+                        -- ASSM: STORAGE clause mostly ignored, Oracle manages automatically
+                        v_recommended_initial := NULL;
+                        v_recommended_next := NULL;
+                        v_storage_clause := NULL;
+                        v_storage_reason := 'ASSM tablespace - Oracle automatically manages extent allocation (starts 64KB, grows to 64MB+)';
+                        DBMS_OUTPUT.PUT_LINE('  Recommendation: Omit STORAGE clause (ASSM handles it)');
+
+                    ELSIF v_ts_allocation = 'UNIFORM' THEN
+                        -- UNIFORM: All extents same size, configured at tablespace level
+                        v_ts_uniform_size := v_ts_initial;  -- UNIFORM size stored in initial_extent
+                        v_recommended_initial := v_ts_uniform_size;
+                        v_recommended_next := v_ts_uniform_size;
+                        v_storage_clause := NULL;  -- Not needed, tablespace enforces uniform size
+                        v_storage_reason := 'UNIFORM tablespace (' ||
+                                           ROUND(v_ts_uniform_size / 1024 / 1024, 2) ||
+                                           'MB uniform extent) - extent size fixed at tablespace level';
+                        DBMS_OUTPUT.PUT_LINE('  Recommendation: Omit STORAGE clause (UNIFORM enforces ' ||
+                                            ROUND(v_ts_uniform_size / 1024 / 1024, 2) || 'MB extents)');
+
+                    ELSE
+                        -- Manual/SYSTEM AUTOALLOCATE: Calculate optimal extent size
+                        v_recommended_initial := calculate_optimal_initial_extent(v_avg_part_mb, v_table_size);
+                        v_recommended_next := v_recommended_initial;  -- Keep consistent
+                        v_storage_clause := 'STORAGE (INITIAL ' || v_recommended_initial ||
+                                           ' NEXT ' || v_recommended_next || ')';
+                        v_storage_reason := 'Manual space management - optimized for ' ||
+                                           CASE WHEN v_avg_part_mb IS NOT NULL
+                                                THEN ROUND(v_avg_part_mb, 2) || 'MB avg partition'
+                                                ELSE ROUND(v_table_size, 2) || 'MB table' END ||
+                                           ' (INITIAL=' || ROUND(v_recommended_initial / 1024 / 1024, 2) || 'MB)';
+                        DBMS_OUTPUT.PUT_LINE('  Recommendation: INITIAL ' ||
+                                            ROUND(v_recommended_initial / 1024 / 1024, 2) || 'MB, NEXT ' ||
+                                            ROUND(v_recommended_next / 1024 / 1024, 2) || 'MB');
+                    END IF;
+
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        v_ts_extent_mgmt := NULL;
+                        v_ts_allocation := NULL;
+                        v_ts_ssm := NULL;
+                        v_storage_reason := 'Tablespace not found in data dictionary';
+                        DBMS_OUTPUT.PUT_LINE('  WARNING: Tablespace not found');
+                END;
+            ELSE
+                v_storage_reason := 'No target tablespace specified';
+            END IF;
+
+            -- Variables are already stored in outer scope for MERGE statement
+
+        END;
+
         -- Check if table supports online redefinition (Enterprise Edition only)
         -- Using EXECUTE IMMEDIATE to defer privilege check to runtime
         -- This allows package to compile even without EXECUTE grant on DBMS_REDEFINITION
@@ -3677,6 +3799,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 dependent_objects = v_dependent_objects,
                 blocking_issues = v_blocking_issues,
                 warnings = v_warnings,
+                target_tablespace = v_target_tablespace,
+                tablespace_extent_mgmt = v_ts_extent_mgmt,
+                tablespace_allocation = v_ts_allocation,
+                tablespace_ssm = v_ts_ssm,
+                tablespace_uniform_size = v_ts_uniform_size,
+                recommended_initial_extent = v_recommended_initial,
+                recommended_next_extent = v_recommended_next,
+                recommended_storage_clause = v_storage_clause,
+                storage_recommendation_reason = v_storage_reason,
                 analysis_date = SYSTIMESTAMP,
                 analysis_duration_seconds = v_duration_seconds
         WHEN NOT MATCHED THEN
@@ -3711,6 +3842,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 dependent_objects,
                 blocking_issues,
                 warnings,
+                target_tablespace,
+                tablespace_extent_mgmt,
+                tablespace_allocation,
+                tablespace_ssm,
+                tablespace_uniform_size,
+                recommended_initial_extent,
+                recommended_next_extent,
+                recommended_storage_clause,
+                storage_recommendation_reason,
                 analysis_date,
                 analysis_duration_seconds
             ) VALUES (
@@ -3744,6 +3884,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_dependent_objects,
                 v_blocking_issues,
                 v_warnings,
+                v_target_tablespace,
+                v_ts_extent_mgmt,
+                v_ts_allocation,
+                v_ts_ssm,
+                v_ts_uniform_size,
+                v_recommended_initial,
+                v_recommended_next,
+                v_storage_clause,
+                v_storage_reason,
                 SYSTIMESTAMP,
                 v_duration_seconds
             );
@@ -3926,6 +4075,52 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         RETURN v_ratio;
     END get_compression_ratio;
+
+    FUNCTION calculate_optimal_initial_extent(
+        p_avg_partition_mb NUMBER,
+        p_total_table_mb NUMBER
+    ) RETURN NUMBER
+    AS
+        v_initial_bytes NUMBER;
+    BEGIN
+        -- Size based on average partition size for optimal performance
+        -- Larger initial extent = fewer extents = better performance
+        -- But avoid over-allocation on small tables
+
+        IF p_avg_partition_mb IS NULL THEN
+            -- No partition info, use table size
+            IF p_total_table_mb > 10000 THEN       -- > 10GB
+                v_initial_bytes := 128 * 1024 * 1024;  -- 128MB
+            ELSIF p_total_table_mb > 1000 THEN     -- 1GB-10GB
+                v_initial_bytes := 64 * 1024 * 1024;   -- 64MB
+            ELSIF p_total_table_mb > 100 THEN      -- 100MB-1GB
+                v_initial_bytes := 16 * 1024 * 1024;   -- 16MB
+            ELSIF p_total_table_mb > 10 THEN       -- 10MB-100MB
+                v_initial_bytes := 4 * 1024 * 1024;    -- 4MB
+            ELSE                                    -- < 10MB
+                v_initial_bytes := 1 * 1024 * 1024;    -- 1MB
+            END IF;
+        ELSE
+            -- Use average partition size (more accurate)
+            IF p_avg_partition_mb > 1000 THEN           -- > 1GB partitions
+                v_initial_bytes := 128 * 1024 * 1024;   -- 128MB
+            ELSIF p_avg_partition_mb > 500 THEN         -- 500MB-1GB
+                v_initial_bytes := 64 * 1024 * 1024;    -- 64MB
+            ELSIF p_avg_partition_mb > 100 THEN         -- 100MB-500MB
+                v_initial_bytes := 32 * 1024 * 1024;    -- 32MB
+            ELSIF p_avg_partition_mb > 50 THEN          -- 50MB-100MB
+                v_initial_bytes := 16 * 1024 * 1024;    -- 16MB
+            ELSIF p_avg_partition_mb > 10 THEN          -- 10MB-50MB
+                v_initial_bytes := 8 * 1024 * 1024;     -- 8MB
+            ELSIF p_avg_partition_mb > 1 THEN           -- 1MB-10MB
+                v_initial_bytes := 2 * 1024 * 1024;     -- 2MB
+            ELSE                                        -- < 1MB
+                v_initial_bytes := 1 * 1024 * 1024;     -- 1MB
+            END IF;
+        END IF;
+
+        RETURN v_initial_bytes;
+    END calculate_optimal_initial_extent;
 
     -- ==========================================================================
     -- AUTOMATIC LIST Partitioning Helper Functions

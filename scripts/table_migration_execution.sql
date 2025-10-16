@@ -226,23 +226,70 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             AND table_name = p_task.source_table;
         END IF;
 
-        -- Build storage clause
+        -- Build storage clause using analyzed recommendations
         v_storage_clause := '';
-        IF p_task.target_tablespace IS NOT NULL THEN
-            v_storage_clause := v_storage_clause || ' TABLESPACE ' || p_task.target_tablespace;
-        END IF;
 
-        -- Add STORAGE clause with extent sizes from global config
+        -- Step 1: Get analyzed storage recommendations from analysis table
         DECLARE
-            v_initial_extent VARCHAR2(20);
-            v_next_extent VARCHAR2(20);
+            v_analyzed_tablespace VARCHAR2(128);
+            v_analyzed_storage_clause VARCHAR2(500);
+            v_storage_mode VARCHAR2(20);
+            v_fallback_initial VARCHAR2(20);
+            v_fallback_next VARCHAR2(20);
         BEGIN
-            v_initial_extent := get_dwh_ilm_config('STORAGE_INITIAL_EXTENT');
-            v_next_extent := get_dwh_ilm_config('STORAGE_NEXT_EXTENT');
+            -- Get storage mode configuration
+            v_storage_mode := get_dwh_ilm_config('STORAGE_EXTENT_MODE');
 
-            IF v_initial_extent IS NOT NULL AND v_next_extent IS NOT NULL THEN
-                v_storage_clause := v_storage_clause || CHR(10) ||
-                    'STORAGE (INITIAL ' || v_initial_extent || ' NEXT ' || v_next_extent || ')';
+            -- Try to get analyzed recommendations
+            BEGIN
+                SELECT
+                    target_tablespace,
+                    recommended_storage_clause
+                INTO
+                    v_analyzed_tablespace,
+                    v_analyzed_storage_clause
+                FROM cmr.dwh_migration_analysis
+                WHERE task_id = p_task.task_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_analyzed_tablespace := NULL;
+                    v_analyzed_storage_clause := NULL;
+            END;
+
+            -- Step 2: Apply tablespace based on mode
+            -- Explicit task tablespace takes priority, then analyzed tablespace
+            IF p_task.target_tablespace IS NOT NULL THEN
+                v_storage_clause := v_storage_clause || ' TABLESPACE ' || p_task.target_tablespace;
+            ELSIF v_analyzed_tablespace IS NOT NULL THEN
+                v_storage_clause := v_storage_clause || ' TABLESPACE ' || v_analyzed_tablespace;
+            END IF;
+
+            -- Step 3: Apply STORAGE clause based on mode
+            IF UPPER(v_storage_mode) = 'AUTO' THEN
+                -- Use analyzed recommendations (may be NULL for ASSM/UNIFORM)
+                IF v_analyzed_storage_clause IS NOT NULL THEN
+                    v_storage_clause := v_storage_clause || CHR(10) || v_analyzed_storage_clause;
+                END IF;
+                -- Otherwise omit STORAGE clause (ASSM/UNIFORM case)
+
+            ELSIF UPPER(v_storage_mode) = 'FORCED' THEN
+                -- Always use fixed config values
+                v_fallback_initial := get_dwh_ilm_config('STORAGE_INITIAL_EXTENT');
+                v_fallback_next := get_dwh_ilm_config('STORAGE_NEXT_EXTENT');
+                IF v_fallback_initial IS NOT NULL AND v_fallback_next IS NOT NULL THEN
+                    v_storage_clause := v_storage_clause || CHR(10) ||
+                        'STORAGE (INITIAL ' || v_fallback_initial || ' NEXT ' || v_fallback_next || ')';
+                END IF;
+
+            ELSIF UPPER(v_storage_mode) = 'NONE' THEN
+                -- Never use STORAGE clause
+                NULL;
+
+            ELSE
+                -- Default to AUTO mode
+                IF v_analyzed_storage_clause IS NOT NULL THEN
+                    v_storage_clause := v_storage_clause || CHR(10) || v_analyzed_storage_clause;
+                END IF;
             END IF;
         END;
 
