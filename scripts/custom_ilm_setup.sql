@@ -461,7 +461,7 @@ EXCEPTION
 END;
 /
 
-COMMENT ON TRIGGER trg_validate_dwh_ilm_policy IS
+COMMENT ON TRIGGER cmr.trg_validate_dwh_ilm_policy IS
     'Validates ILM policy configuration before insert/update';
 
 
