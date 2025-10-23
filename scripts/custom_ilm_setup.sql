@@ -4,6 +4,59 @@
 -- =============================================================================
 
 -- =============================================================================
+-- SECTION 0: CLEANUP (for rerunnable script)
+-- =============================================================================
+-- Drop existing tables in reverse dependency order (child tables first)
+-- Suppress errors if tables don't exist
+
+BEGIN
+    -- Drop child tables first (tables with foreign keys)
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_evaluation_queue CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_evaluation_queue');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_execution_log CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_execution_log');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_partition_access CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_partition_access');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
+    -- Drop parent tables
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_policies CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_policies');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_config CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_config');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
+    DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully');
+END;
+/
+
+-- =============================================================================
 -- SECTION 1: METADATA TABLES
 -- =============================================================================
 
