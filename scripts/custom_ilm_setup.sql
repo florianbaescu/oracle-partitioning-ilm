@@ -8,6 +8,7 @@
 -- =============================================================================
 -- Drop existing tables in reverse dependency order (child tables first)
 -- Suppress errors if tables don't exist
+-- NOTE: dwh_ilm_config is NOT dropped to preserve custom configuration values
 
 BEGIN
     -- Drop child tables first (tables with foreign keys)
@@ -35,7 +36,7 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
-    -- Drop parent tables
+    -- Drop parent tables (except dwh_ilm_config which is preserved)
     BEGIN
         EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_policies CASCADE CONSTRAINTS PURGE';
         DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_policies');
@@ -44,15 +45,7 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
-    BEGIN
-        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_config CASCADE CONSTRAINTS PURGE';
-        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_config');
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLCODE != -942 THEN RAISE; END IF;
-    END;
-
-    DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully');
+    DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully (dwh_ilm_config preserved)');
 END;
 /
 
@@ -228,14 +221,27 @@ COMMENT ON TABLE cmr.dwh_ilm_evaluation_queue IS 'Queue of partitions eligible f
 -- -----------------------------------------------------------------------------
 -- ILM Configuration
 -- -----------------------------------------------------------------------------
+-- Create config table only if it doesn't exist (preserves custom settings on rerun)
 
-CREATE TABLE cmr.dwh_ilm_config (
-    config_key          VARCHAR2(100) PRIMARY KEY,
-    config_value        VARCHAR2(4000),
-    description         VARCHAR2(500),
-    modified_by         VARCHAR2(50),
-    modified_date       TIMESTAMP DEFAULT SYSTIMESTAMP
-);
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_ilm_config (
+            config_key          VARCHAR2(100) PRIMARY KEY,
+            config_value        VARCHAR2(4000),
+            description         VARCHAR2(500),
+            modified_by         VARCHAR2(50),
+            modified_date       TIMESTAMP DEFAULT SYSTIMESTAMP
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_ilm_config');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_ilm_config already exists - preserving existing data');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
 
 -- Insert default configuration (using MERGE for rerunnable script)
 MERGE INTO cmr.dwh_ilm_config t
