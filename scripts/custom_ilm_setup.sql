@@ -782,7 +782,7 @@ SELECT
     tp.table_name,
     tp.partition_name,
     tp.partition_position,
-    -- Note: high_value excluded (LONG type - use get_partition_high_value() function if needed)
+    get_partition_high_value(tp.table_owner, tp.table_name, tp.partition_name) AS high_value,
     tp.num_rows,
     ROUND(NVL(s.bytes, 0) / 1024 / 1024, 2) AS size_mb,
     tp.compression,
