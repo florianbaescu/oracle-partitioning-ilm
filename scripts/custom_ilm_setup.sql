@@ -577,19 +577,19 @@ ORDER BY p.priority, p.policy_name;
 
 CREATE OR REPLACE VIEW v_ilm_execution_stats AS
 SELECT
-    table_owner,
-    table_name,
-    policy_name,
-    action_type,
+    e.table_owner,
+    e.table_name,
+    e.policy_name,
+    e.action_type,
     COUNT(*) AS total_executions,
-    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful,
-    SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
-    ROUND(AVG(duration_seconds), 2) AS avg_duration_sec,
-    ROUND(SUM(space_saved_mb), 2) AS total_space_saved_mb,
-    MAX(execution_end) AS last_execution
-FROM cmr.dwh_ilm_execution_log
-GROUP BY table_owner, table_name, policy_name, action_type
-ORDER BY SUM(space_saved_mb) DESC NULLS LAST;
+    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful,
+    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+    ROUND(AVG(e.duration_seconds), 2) AS avg_duration_sec,
+    ROUND(SUM(e.space_saved_mb), 2) AS total_space_saved_mb,
+    MAX(e.execution_end) AS last_execution
+FROM cmr.dwh_ilm_execution_log e
+GROUP BY e.table_owner, e.table_name, e.policy_name, e.action_type
+ORDER BY SUM(e.space_saved_mb) DESC NULLS LAST;
 
 
 -- -----------------------------------------------------------------------------
