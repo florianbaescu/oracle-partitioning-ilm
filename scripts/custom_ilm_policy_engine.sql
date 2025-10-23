@@ -228,11 +228,28 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
 
         -- Check access pattern (temperature)
         IF v_policy.access_pattern IS NOT NULL THEN
-            IF v_temperature != v_policy.access_pattern THEN
-                p_reason := 'Partition temperature ' || v_temperature ||
-                           ' does not match required ' || v_policy.access_pattern;
-                RETURN FALSE;
-            END IF;
+            -- Calculate temperature using policy-specific thresholds
+            DECLARE
+                v_hot_threshold NUMBER;
+                v_warm_threshold NUMBER;
+                v_policy_temperature VARCHAR2(10);
+            BEGIN
+                v_hot_threshold := get_policy_thresholds(v_policy.policy_id, 'HOT');
+                v_warm_threshold := get_policy_thresholds(v_policy.policy_id, 'WARM');
+
+                v_policy_temperature := CASE
+                    WHEN v_age_days < v_hot_threshold THEN 'HOT'
+                    WHEN v_age_days < v_warm_threshold THEN 'WARM'
+                    ELSE 'COLD'
+                END;
+
+                IF v_policy_temperature != v_policy.access_pattern THEN
+                    p_reason := 'Partition temperature (' || v_policy_temperature ||
+                               ') does not match required ' || v_policy.access_pattern ||
+                               ' [thresholds: HOT<' || v_hot_threshold || ', WARM<' || v_warm_threshold || ']';
+                    RETURN FALSE;
+                END IF;
+            END;
         END IF;
 
         -- Check if already in target state
