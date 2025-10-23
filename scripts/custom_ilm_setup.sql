@@ -45,6 +45,14 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_threshold_profiles CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_threshold_profiles');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
     DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully (dwh_ilm_config preserved)');
 END;
 /
@@ -394,6 +402,103 @@ COMMIT;
 
 COMMENT ON TABLE cmr.dwh_ilm_config IS 'Configuration parameters for custom ILM framework';
 
+-- -----------------------------------------------------------------------------
+-- ILM Threshold Profiles
+-- -----------------------------------------------------------------------------
+-- Reusable threshold profiles for temperature-based ILM classification
+-- Policies can reference a profile or fall back to global config
+-- -----------------------------------------------------------------------------
+
+CREATE TABLE cmr.dwh_ilm_threshold_profiles (
+    profile_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    profile_name        VARCHAR2(100) NOT NULL UNIQUE,
+    description         VARCHAR2(500),
+
+    -- Temperature thresholds in days
+    hot_threshold_days  NUMBER NOT NULL,
+    warm_threshold_days NUMBER NOT NULL,
+    cold_threshold_days NUMBER NOT NULL,
+
+    -- Audit fields
+    created_by          VARCHAR2(50) DEFAULT USER,
+    created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
+    modified_by         VARCHAR2(50),
+    modified_date       TIMESTAMP,
+
+    -- Validation: ensure thresholds are in ascending order
+    CONSTRAINT chk_profile_thresholds CHECK (
+        hot_threshold_days < warm_threshold_days
+        AND warm_threshold_days < cold_threshold_days
+    )
+);
+
+CREATE INDEX idx_ilm_profiles_name ON cmr.dwh_ilm_threshold_profiles(profile_name);
+
+COMMENT ON TABLE cmr.dwh_ilm_threshold_profiles IS
+    'Reusable threshold profiles for ILM temperature-based classification';
+
+-- Insert commonly used threshold profiles
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'DEFAULT' AS profile_name,
+              'Standard aging profile (matches global config)' AS description,
+              90 AS hot_threshold_days,
+              365 AS warm_threshold_days,
+              1095 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'FAST_AGING' AS profile_name,
+              'Fast aging for transactional data (sales, orders)' AS description,
+              30 AS hot_threshold_days,
+              90 AS warm_threshold_days,
+              180 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'SLOW_AGING' AS profile_name,
+              'Slow aging for reference/master data' AS description,
+              180 AS hot_threshold_days,
+              730 AS warm_threshold_days,
+              1825 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'AGGRESSIVE_ARCHIVE' AS profile_name,
+              'Aggressive archival for high-volume data' AS description,
+              14 AS hot_threshold_days,
+              30 AS warm_threshold_days,
+              90 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+COMMIT;
+
+-- Add foreign key to threshold profiles in dwh_ilm_policies table
+ALTER TABLE cmr.dwh_ilm_policies
+ADD (
+    threshold_profile_id NUMBER,
+    CONSTRAINT fk_ilm_policy_profile
+        FOREIGN KEY (threshold_profile_id)
+        REFERENCES cmr.dwh_ilm_threshold_profiles(profile_id)
+);
+
+CREATE INDEX idx_ilm_policies_profile ON cmr.dwh_ilm_policies(threshold_profile_id);
+
 
 -- =============================================================================
 -- SECTION 1B: POLICY VALIDATION TRIGGER AND PROCEDURES
@@ -617,6 +722,43 @@ SELECT
     END AS recommendation
 FROM cmr.dwh_ilm_partition_access a
 ORDER BY a.days_since_write DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- ILM Policy Threshold View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_policy_thresholds AS
+SELECT
+    p.policy_id,
+    p.policy_name,
+    p.table_owner,
+    p.table_name,
+    p.threshold_profile_id,
+    prof.profile_name,
+    -- Show effective thresholds
+    CASE
+        WHEN p.threshold_profile_id IS NOT NULL THEN prof.hot_threshold_days
+        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS')
+    END AS effective_hot_threshold_days,
+    CASE
+        WHEN p.threshold_profile_id IS NOT NULL THEN prof.warm_threshold_days
+        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS')
+    END AS effective_warm_threshold_days,
+    CASE
+        WHEN p.threshold_profile_id IS NOT NULL THEN prof.cold_threshold_days
+        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS')
+    END AS effective_cold_threshold_days,
+    CASE
+        WHEN p.threshold_profile_id IS NOT NULL THEN 'CUSTOM'
+        ELSE 'GLOBAL'
+    END AS threshold_source
+FROM cmr.dwh_ilm_policies p
+LEFT JOIN cmr.dwh_ilm_threshold_profiles prof
+    ON prof.profile_id = p.threshold_profile_id;
+
+COMMENT ON TABLE cmr.dwh_v_ilm_policy_thresholds IS
+    'Shows effective threshold values for each ILM policy';
 
 
 -- -----------------------------------------------------------------------------
@@ -1742,6 +1884,62 @@ EXCEPTION
     WHEN OTHERS THEN
         RETURN NULL;
 END get_partition_high_value;
+/
+
+
+-- -----------------------------------------------------------------------------
+-- Get Threshold Values for a Policy
+-- -----------------------------------------------------------------------------
+-- Returns HOT, WARM, COLD thresholds for a given policy
+-- Uses policy's profile if specified, otherwise global config
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_policy_thresholds(
+    p_policy_id NUMBER,
+    p_threshold_type VARCHAR2 -- 'HOT', 'WARM', or 'COLD'
+) RETURN NUMBER
+AS
+    v_profile_id NUMBER;
+    v_threshold NUMBER;
+BEGIN
+    -- Get profile_id for this policy
+    SELECT threshold_profile_id INTO v_profile_id
+    FROM cmr.dwh_ilm_policies
+    WHERE policy_id = p_policy_id;
+
+    IF v_profile_id IS NOT NULL THEN
+        -- Use profile thresholds
+        SELECT
+            CASE p_threshold_type
+                WHEN 'HOT' THEN hot_threshold_days
+                WHEN 'WARM' THEN warm_threshold_days
+                WHEN 'COLD' THEN cold_threshold_days
+            END INTO v_threshold
+        FROM cmr.dwh_ilm_threshold_profiles
+        WHERE profile_id = v_profile_id;
+    ELSE
+        -- Use global config
+        SELECT TO_NUMBER(config_value) INTO v_threshold
+        FROM cmr.dwh_ilm_config
+        WHERE config_key = p_threshold_type || '_THRESHOLD_DAYS';
+    END IF;
+
+    RETURN v_threshold;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        -- Fallback to global config
+        SELECT TO_NUMBER(config_value) INTO v_threshold
+        FROM cmr.dwh_ilm_config
+        WHERE config_key = p_threshold_type || '_THRESHOLD_DAYS';
+        RETURN v_threshold;
+    WHEN OTHERS THEN
+        -- Default fallback values
+        RETURN CASE p_threshold_type
+            WHEN 'HOT' THEN 90
+            WHEN 'WARM' THEN 365
+            WHEN 'COLD' THEN 1095
+        END;
+END get_policy_thresholds;
 /
 
 
