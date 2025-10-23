@@ -647,6 +647,8 @@ LEFT JOIN cmr.dwh_ilm_execution_log e
 GROUP BY p.table_owner, p.table_name
 ORDER BY COUNT(DISTINCT q.queue_id) DESC, SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) DESC;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_policy_summary IS 'Summary of ILM policies per table for dashboard';
+
 
 -- -----------------------------------------------------------------------------
 -- Upcoming ILM Actions View
@@ -692,6 +694,7 @@ AND q.execution_status IN ('PENDING', 'SCHEDULED')
 AND q.scheduled_date < SYSTIMESTAMP + INTERVAL '30' DAY
 ORDER BY q.scheduled_date, p.priority, q.table_name, q.partition_name;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_upcoming_actions IS 'Partitions scheduled for ILM actions in next 30 days';
 
 
 -- -----------------------------------------------------------------------------
@@ -719,6 +722,7 @@ WHERE e.status IN ('SUCCESS', 'FAILED')
 GROUP BY e.table_owner, e.table_name, e.policy_name, e.action_type, TRUNC(e.execution_end)
 ORDER BY TRUNC(e.execution_end) DESC, SUM(e.space_saved_mb) DESC;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_space_savings IS 'Historical space savings achieved by ILM policies';
 
 
 -- -----------------------------------------------------------------------------
@@ -766,6 +770,7 @@ FROM cmr.dwh_ilm_execution_log e
 WHERE e.execution_start > SYSTIMESTAMP - INTERVAL '30' DAY
 ORDER BY e.execution_start DESC;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_execution_history IS 'Detailed execution history for last 30 days';
 
 
 -- -----------------------------------------------------------------------------
@@ -844,6 +849,7 @@ LEFT JOIN cmr.dwh_ilm_partition_access a
 WHERE tp.table_owner = USER
 ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
 
 
 -- -----------------------------------------------------------------------------
@@ -882,6 +888,7 @@ SELECT
     SYSTIMESTAMP AS dashboard_timestamp
 FROM DUAL;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_performance_dashboard IS 'Real-time performance dashboard with key metrics';
 
 
 -- -----------------------------------------------------------------------------
@@ -964,6 +971,7 @@ FROM (
     FROM DUAL
 );
 
+COMMENT ON VIEW cmr.dwh_v_ilm_alerting_metrics IS 'Pre-calculated alerting metrics with threshold-based status';
 
 
 -- -----------------------------------------------------------------------------
@@ -1038,6 +1046,7 @@ ORDER BY
     ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024, 2) DESC NULLS LAST,
     CASE WHEN COUNT(e.execution_id) > 0 THEN ROUND((SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) / COUNT(e.execution_id)) * 100, 2) ELSE NULL END DESC NULLS LAST;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_policy_effectiveness IS 'Policy effectiveness metrics including ROI and success rates';
 
 
 -- -----------------------------------------------------------------------------
@@ -1088,6 +1097,7 @@ GROUP BY
     TRUNC(e.execution_end)
 ORDER BY TRUNC(e.execution_end) DESC;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_resource_trends IS 'Historical resource utilization trends for capacity planning';
 
 
 -- -----------------------------------------------------------------------------
@@ -1151,6 +1161,7 @@ GROUP BY
     END
 ORDER BY COUNT(*) DESC, MAX(e.execution_start) DESC;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_failure_analysis IS 'Categorized failure analysis with recommended actions';
 
 
 -- -----------------------------------------------------------------------------
@@ -1251,6 +1262,7 @@ LEFT JOIN (
 WHERE tp.partition_count > 0  -- Only partitioned tables
 ORDER BY total_table_size_gb DESC NULLS LAST, lifecycle_status, t.table_name;
 
+COMMENT ON VIEW cmr.dwh_v_ilm_table_overview IS 'Comprehensive table lifecycle overview with recommendations';
 
 
 -- =============================================================================
