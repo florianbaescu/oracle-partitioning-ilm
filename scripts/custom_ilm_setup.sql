@@ -582,8 +582,8 @@ SELECT
     e.policy_name,
     e.action_type,
     COUNT(*) AS total_executions,
-    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful,
-    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful_count,
+    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
     ROUND(AVG(e.duration_seconds), 2) AS avg_duration_sec,
     ROUND(SUM(e.space_saved_mb), 2) AS total_space_saved_mb,
     MAX(e.execution_end) AS last_execution
