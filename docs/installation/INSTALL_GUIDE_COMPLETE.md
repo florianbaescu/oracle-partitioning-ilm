@@ -347,6 +347,24 @@ FROM user_objects
 WHERE object_name = 'PCK_DWH_ILM_EXECUTION_ENGINE';
 -- Expected: PACKAGE and PACKAGE BODY, both VALID
 
+PAUSE Press Enter to continue with validation utilities (optional)...
+
+-- Component 3A: Validation utilities - OPTIONAL (~30 seconds)
+PROMPT ========================================
+PROMPT Installing ILM Validation Utilities (Optional)...
+PROMPT ========================================
+@scripts/custom_ilm_validation.sql
+
+-- Verify step 3A:
+SELECT object_name, object_type, status
+FROM user_objects
+WHERE object_name = 'DWH_VALIDATE_ILM_POLICY';
+-- Expected: PROCEDURE, VALID
+
+-- Note: This is an optional component for policy validation and testing
+-- The dwh_validate_ilm_policy procedure can be used to validate policies
+-- Example: EXEC dwh_validate_ilm_policy(1);
+
 PAUSE Press Enter to continue with scheduler installation...
 
 -- Component 4: Scheduler jobs (~1 minute)
@@ -927,6 +945,7 @@ DROP PROCEDURE dwh_run_ilm_cycle;
 DROP PROCEDURE dwh_start_ilm_jobs;
 DROP PROCEDURE dwh_stop_ilm_jobs;
 DROP PROCEDURE dwh_run_ilm_job_now;
+DROP PROCEDURE dwh_validate_ilm_policy;
 DROP PROCEDURE cleanup_execution_logs;
 DROP PROCEDURE refresh_partition_access_tracking;
 DROP FUNCTION get_dwh_ilm_config;
