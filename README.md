@@ -22,6 +22,7 @@ This repository includes **two approaches** to Information Lifecycle Management:
 - ✅ **Metadata-driven with complete audit trail**
 - ✅ **Customizable business logic**
 - ✅ **Scheduler-based automation**
+- ✅ **Configurable threshold profiles** (v3.1+) - Define custom HOT/WARM/COLD aging boundaries per data type
 
 **Quick Start**: See [Custom ILM Guide](docs/custom_ilm_guide.md)
 
@@ -77,7 +78,7 @@ ENABLE ROW MOVEMENT;
 ### 3. Define ILM Policy
 
 ```sql
--- Compress partitions older than 90 days
+-- Basic policy: Compress partitions older than 90 days
 INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name,
     policy_type, action_type, age_days,
@@ -86,6 +87,20 @@ INSERT INTO cmr.dwh_ilm_policies (
     'COMPRESS_SALES_90D', USER, 'SALES_FACT',
     'COMPRESSION', 'COMPRESS', 90,
     'QUERY HIGH', 100, 'Y'
+);
+
+-- Advanced (v3.1+): Use threshold profiles for custom aging behavior
+-- Fast aging for transactional data (compress at 30 days, archive at 90 days)
+INSERT INTO cmr.dwh_ilm_policies (
+    policy_name, table_owner, table_name,
+    policy_type, action_type, age_days,
+    compression_type, priority, enabled,
+    threshold_profile_id
+) VALUES (
+    'COMPRESS_SALES_FAST', USER, 'SALES_FACT',
+    'COMPRESSION', 'COMPRESS', 30,
+    'QUERY HIGH', 100, 'Y',
+    (SELECT profile_id FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'FAST_AGING')
 );
 COMMIT;
 ```

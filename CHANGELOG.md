@@ -4,6 +4,155 @@ All notable changes to the Oracle Custom ILM Framework project.
 
 ---
 
+## [3.1] - 2025-10-23
+
+**Feature Release: Configurable Threshold Profiles for Temperature-Based ILM**
+
+### Added
+
+- **Threshold Profiles Feature** - Reusable HOT/WARM/COLD age boundary definitions
+  - File: `scripts/custom_ilm_setup.sql` - Added threshold profiles table, function, and view (~200 lines)
+  - File: `scripts/custom_ilm_policy_engine.sql` - Enhanced policy evaluation with profile-specific thresholds (~25 lines)
+  - File: `scripts/migration/upgrade_to_v3.1_threshold_profiles.sql` - Migration script for existing installations (288 lines)
+  - File: `tests/unit_tests_threshold_profiles.sql` - 7 comprehensive unit tests (347 lines)
+
+  **New Database Objects:**
+  1. **dwh_ilm_threshold_profiles** table - Stores reusable threshold definitions
+     - profile_id (primary key), profile_name (unique), description
+     - hot_threshold_days, warm_threshold_days, cold_threshold_days
+     - Constraint: hot < warm < cold validation
+     - 4 default profiles: DEFAULT, FAST_AGING, SLOW_AGING, AGGRESSIVE_ARCHIVE
+
+  2. **dwh_ilm_policies.threshold_profile_id** column - Foreign key to profiles table
+     - NULL = use global config (backwards compatible)
+     - Set profile_id = use profile-specific thresholds
+
+  3. **get_policy_thresholds()** function - Returns HOT/WARM/COLD thresholds for a policy
+     - Uses profile thresholds if profile_id is set
+     - Falls back to global config from dwh_ilm_config
+     - Hardcoded defaults as last resort (90/365/1095)
+
+  4. **dwh_v_ilm_policy_thresholds** view - Shows effective thresholds per policy
+     - Displays profile name, effective thresholds, threshold source (CUSTOM vs GLOBAL)
+     - Useful for monitoring and auditing policy configurations
+
+### Default Threshold Profiles
+
+| Profile | HOT (days) | WARM (days) | COLD (days) | Use Case |
+|---------|------------|-------------|-------------|----------|
+| DEFAULT | 90 | 365 | 1095 | General-purpose data, matches global config |
+| FAST_AGING | 30 | 90 | 180 | High-velocity transactional data (sales, orders, IoT) |
+| SLOW_AGING | 180 | 730 | 1825 | Stable reference/master data (customers, products) |
+| AGGRESSIVE_ARCHIVE | 14 | 30 | 90 | High-volume data requiring rapid archival (logs, audit trails) |
+
+### Key Features
+
+**Flexible Temperature Classification:**
+- Different policies can classify same partition differently
+- Sales data can use fast aging (30/90/180) while master data uses slow aging (180/730/1825)
+- Temperature calculation respects policy-specific thresholds during evaluation
+
+**Policy Evaluation Enhancement:**
+- `is_partition_eligible()` now recalculates temperature using policy's profile
+- More accurate eligibility evaluation with profile-specific age boundaries
+- Enhanced reason messages showing actual thresholds used
+
+**Backwards Compatibility:**
+- Existing policies without profile_id continue using global config
+- NULL profile_id = legacy behavior (no changes required)
+- Migration script is optional and idempotent
+
+### Usage
+
+**Create Custom Profile:**
+```sql
+INSERT INTO cmr.dwh_ilm_threshold_profiles (
+    profile_name, description,
+    hot_threshold_days, warm_threshold_days, cold_threshold_days
+) VALUES (
+    'FINANCIAL_COMPLIANCE',
+    'Financial data - aggressive archival after 90 days',
+    30, 90, 365
+);
+```
+
+**Assign Profile to Policy:**
+```sql
+-- New policy with FAST_AGING profile
+INSERT INTO cmr.dwh_ilm_policies (
+    policy_name, table_name, age_days, access_pattern,
+    action_type, compression_type,
+    threshold_profile_id
+) VALUES (
+    'COMPRESS_SALES_WARM', 'SALES_FACT', 100, 'WARM',
+    'COMPRESS', 'QUERY HIGH',
+    (SELECT profile_id FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'FAST_AGING')
+);
+
+-- Update existing policy
+UPDATE cmr.dwh_ilm_policies
+SET threshold_profile_id = (SELECT profile_id FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'SLOW_AGING')
+WHERE policy_name = 'COMPRESS_CUSTOMER_DIM';
+```
+
+**Monitor Effective Thresholds:**
+```sql
+SELECT policy_name, profile_name, threshold_source,
+       effective_hot_threshold_days, effective_warm_threshold_days, effective_cold_threshold_days
+FROM cmr.dwh_v_ilm_policy_thresholds;
+```
+
+### Migration from v3.0
+
+**Option 1: Fresh Install** - Use updated setup scripts (profiles created automatically)
+```sql
+@scripts/custom_ilm_setup.sql  -- Includes threshold profiles
+```
+
+**Option 2: Upgrade Existing Installation** - Run migration script
+```sql
+@scripts/migration/upgrade_to_v3.1_threshold_profiles.sql
+-- Migration is idempotent (safe to run multiple times)
+```
+
+### Technical Details
+
+- **Files Modified**: 3 files
+  - `scripts/custom_ilm_setup.sql` - Added table, function, view, cleanup logic
+  - `scripts/custom_ilm_policy_engine.sql` - Enhanced access_pattern evaluation
+  - `README.md` - Added v3.1 examples and feature listing
+
+- **Files Created**: 2 files
+  - `scripts/migration/upgrade_to_v3.1_threshold_profiles.sql` - Upgrade script
+  - `tests/unit_tests_threshold_profiles.sql` - Unit tests
+
+- **Total Code**: ~860 lines (SQL + tests + documentation)
+
+- **Test Coverage**: 7 new unit tests
+  1. Create custom threshold profile
+  2. NULL profile uses global config
+  3. Policy with profile uses profile values
+  4. Profile constraint validation (hot < warm < cold)
+  5. get_policy_thresholds returns all types
+  6. View shows effective thresholds
+  7. Default profiles exist with correct values
+
+### Backward Compatibility
+
+- ✅ Existing policies without profile_id continue using global config
+- ✅ NULL profile_id = legacy behavior (no migration required)
+- ✅ All new columns are nullable with sensible defaults
+- ✅ Views and functions handle both profile and global config seamlessly
+- ✅ No breaking changes to existing APIs or data structures
+
+### Performance Impact
+
+- Minimal: get_policy_thresholds() adds 1-2 SELECT queries per policy evaluation
+- View performance: Subqueries are executed once per policy (acceptable for typical workloads)
+- No impact on policies without profile_id (direct global config lookup)
+
+---
+
 ## [3.0] - 2025-10-23
 
 **Quality Assurance Release: Test Suite and Performance Benchmarking (Phase 4 - Tasks 1 & 2)**
