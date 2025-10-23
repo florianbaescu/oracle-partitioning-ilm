@@ -782,7 +782,7 @@ SELECT
     tp.table_name,
     tp.partition_name,
     tp.partition_position,
-    tp.high_value,
+    -- Note: high_value excluded (LONG type - use get_partition_high_value() function if needed)
     tp.num_rows,
     ROUND(NVL(s.bytes, 0) / 1024 / 1024, 2) AS size_mb,
     tp.compression,
@@ -793,15 +793,6 @@ SELECT
     a.temperature,
     a.last_write_time,
     a.last_read_time,
-    -- Calculate partition age from high_value for RANGE partitions
-    CASE
-        WHEN tp.high_value LIKE 'TO_DATE%' THEN
-            TRUNC(SYSDATE - TO_DATE(
-                REGEXP_SUBSTR(tp.high_value, '''[^'']+'''),
-                'YYYY-MM-DD'
-            ))
-        ELSE NULL
-    END AS partition_age_days_from_highvalue,
     -- Determine current lifecycle stage
     CASE
         WHEN NVL(a.days_since_write, 0) < 90 THEN 'HOT - Active'
@@ -1470,15 +1461,9 @@ BEGIN
             ROUND(NVL(s.bytes, 0)/1024/1024, 2) AS size_mb,
             tp.compression,
             s.tablespace_name,
-            -- Try to extract date from high_value for initial write time estimation
-            CASE
-                WHEN tp.high_value LIKE 'TO_DATE%' THEN
-                    TO_DATE(
-                        REGEXP_SUBSTR(tp.high_value, '''[^'']+'''),
-                        'YYYY-MM-DD'
-                    )
-                ELSE SYSDATE
-            END AS estimated_write_date
+            -- Note: Cannot extract date from high_value directly (LONG type)
+            -- Using SYSDATE as fallback - will be updated by refresh procedure
+            SYSDATE AS estimated_write_date
         FROM all_tab_partitions tp
         LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
@@ -1724,6 +1709,41 @@ END;
 -- =============================================================================
 -- SECTION 4: UTILITY FUNCTIONS
 -- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- Convert LONG high_value to VARCHAR2
+-- -----------------------------------------------------------------------------
+-- Note: high_value in all_tab_partitions is LONG type and cannot be used
+-- directly in WHERE clauses or with functions. This function converts it.
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_partition_high_value(
+    p_table_owner VARCHAR2,
+    p_table_name VARCHAR2,
+    p_partition_name VARCHAR2
+) RETURN VARCHAR2
+AS
+    v_high_value LONG;
+    v_high_value_str VARCHAR2(4000);
+BEGIN
+    SELECT high_value INTO v_high_value
+    FROM all_tab_partitions
+    WHERE table_owner = p_table_owner
+    AND table_name = p_table_name
+    AND partition_name = p_partition_name;
+
+    -- Convert LONG to VARCHAR2 (max 4000 chars)
+    v_high_value_str := SUBSTR(v_high_value, 1, 4000);
+
+    RETURN v_high_value_str;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+    WHEN OTHERS THEN
+        RETURN NULL;
+END get_partition_high_value;
+/
+
 
 -- -----------------------------------------------------------------------------
 -- Check if currently in execution window
