@@ -402,7 +402,7 @@ COMMENT ON TABLE cmr.dwh_ilm_config IS 'Configuration parameters for custom ILM 
 -- -----------------------------------------------------------------------------
 -- Trigger: Validate ILM Policy Configuration
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE TRIGGER trg_validate_dwh_ilm_policy
+CREATE OR REPLACE TRIGGER cmr.trg_validate_dwh_ilm_policy
 BEFORE INSERT OR UPDATE ON cmr.dwh_ilm_policies
 FOR EACH ROW
 DECLARE
