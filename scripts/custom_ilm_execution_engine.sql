@@ -125,7 +125,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
     BEGIN
         SELECT ROUND(bytes/1024/1024, 2)
         INTO v_size_mb
-        FROM all_segments
+        FROM dba_segments
         WHERE owner = p_table_owner
         AND segment_name = p_table_name
         AND partition_name = p_partition_name;

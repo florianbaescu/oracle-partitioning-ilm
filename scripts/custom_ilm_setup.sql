@@ -837,7 +837,7 @@ SELECT
      AND e.status = 'SUCCESS'
     ) AS last_ilm_execution
 FROM all_tab_partitions tp
-LEFT JOIN all_segments s
+LEFT JOIN dba_segments s
     ON s.owner = tp.table_owner
     AND s.segment_name = tp.table_name
     AND s.partition_name = tp.partition_name
@@ -1219,7 +1219,7 @@ LEFT JOIN (
 ) tp ON tp.table_owner = t.owner AND tp.table_name = t.table_name
 LEFT JOIN (
     SELECT owner, segment_name, SUM(bytes/1024/1024) AS total_size_mb
-    FROM all_segments
+    FROM dba_segments
     WHERE segment_type LIKE '%PARTITION%'
     GROUP BY owner, segment_name
 ) s ON s.owner = t.owner AND s.segment_name = t.table_name
@@ -1342,7 +1342,7 @@ BEGIN
                 ELSE 10000  -- Very old if can't determine
             END AS calculated_age_days
         FROM all_tab_partitions tp
-        LEFT JOIN all_segments s
+        LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
             AND s.partition_name = tp.partition_name
@@ -1480,7 +1480,7 @@ BEGIN
                 ELSE SYSDATE
             END AS estimated_write_date
         FROM all_tab_partitions tp
-        LEFT JOIN all_segments s
+        LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
             AND s.partition_name = tp.partition_name
