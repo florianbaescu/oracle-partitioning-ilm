@@ -282,9 +282,302 @@ WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES (s.config_key, s.config_value, s.description);
 
+-- Email notification configuration
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ENABLE_EMAIL_NOTIFICATIONS' AS config_key, 'N' AS config_value,
+              'Enable email notifications for ILM failures (Y/N)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ALERT_EMAIL_RECIPIENTS' AS config_key, 'dba@company.com' AS config_value,
+              'Comma-separated list of email recipients for alerts' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ALERT_EMAIL_SENDER' AS config_key, 'oracle-ilm@company.com' AS config_value,
+              'Email address for alert sender' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'SMTP_SERVER' AS config_key, 'smtp.company.com' AS config_value,
+              'SMTP server for sending emails' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ALERT_FAILURE_THRESHOLD' AS config_key, '3' AS config_value,
+              'Number of failures before sending alert' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'ALERT_INTERVAL_HOURS' AS config_key, '4' AS config_value,
+              'Minimum hours between alert emails (prevents spam)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
 COMMIT;
 
 COMMENT ON TABLE cmr.dwh_ilm_config IS 'Configuration parameters for custom ILM framework';
+
+
+-- =============================================================================
+-- SECTION 1B: POLICY VALIDATION TRIGGER AND PROCEDURES
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- Trigger: Validate ILM Policy Configuration
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TRIGGER trg_validate_dwh_ilm_policy
+BEFORE INSERT OR UPDATE ON cmr.dwh_ilm_policies
+FOR EACH ROW
+DECLARE
+    v_count NUMBER;
+    v_partition_count NUMBER;
+    v_error_msg VARCHAR2(500);
+BEGIN
+    -- Validation 1: Table exists and is partitioned
+    BEGIN
+        SELECT COUNT(*) INTO v_partition_count
+        FROM all_part_tables
+        WHERE owner = :NEW.table_owner
+        AND table_name = :NEW.table_name;
+
+        IF v_partition_count = 0 THEN
+            -- Check if table exists but is not partitioned
+            SELECT COUNT(*) INTO v_count
+            FROM all_tables
+            WHERE owner = :NEW.table_owner
+            AND table_name = :NEW.table_name;
+
+            IF v_count > 0 THEN
+                v_error_msg := 'Table ' || :NEW.table_owner || '.' || :NEW.table_name ||
+                              ' exists but is not partitioned. ILM policies require partitioned tables.';
+            ELSE
+                v_error_msg := 'Table ' || :NEW.table_owner || '.' || :NEW.table_name ||
+                              ' does not exist.';
+            END IF;
+            RAISE_APPLICATION_ERROR(-20001, v_error_msg);
+        END IF;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(-20001,
+                'Unable to verify table ' || :NEW.table_owner || '.' || :NEW.table_name);
+    END;
+
+    -- Validation 2: Tablespace exists (for MOVE action)
+    IF :NEW.action_type = 'MOVE' AND :NEW.target_tablespace IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_count
+        FROM dba_tablespaces
+        WHERE tablespace_name = :NEW.target_tablespace;
+
+        IF v_count = 0 THEN
+            RAISE_APPLICATION_ERROR(-20002,
+                'Target tablespace ' || :NEW.target_tablespace || ' does not exist');
+        END IF;
+    END IF;
+
+    -- Validation 3: Compression type valid (if specified)
+    IF :NEW.compression_type IS NOT NULL THEN
+        IF :NEW.compression_type NOT IN (
+            'QUERY LOW', 'QUERY HIGH', 'ARCHIVE LOW', 'ARCHIVE HIGH',
+            'BASIC', 'OLTP'
+        ) THEN
+            RAISE_APPLICATION_ERROR(-20003,
+                'Invalid compression type: ' || :NEW.compression_type ||
+                '. Valid types: QUERY LOW/HIGH, ARCHIVE LOW/HIGH, BASIC, OLTP');
+        END IF;
+    END IF;
+
+    -- Validation 4: Action type requires parameters
+    IF :NEW.action_type = 'COMPRESS' AND :NEW.compression_type IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20004,
+            'COMPRESS action requires compression_type to be specified');
+    END IF;
+
+    IF :NEW.action_type = 'MOVE' AND :NEW.target_tablespace IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20005,
+            'MOVE action requires target_tablespace to be specified');
+    END IF;
+
+    IF :NEW.action_type = 'CUSTOM' AND :NEW.custom_action IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20006,
+            'CUSTOM action requires custom_action PL/SQL block');
+    END IF;
+
+    -- Validation 5: Age threshold conflict
+    IF :NEW.age_days IS NOT NULL AND :NEW.age_months IS NOT NULL THEN
+        DBMS_OUTPUT.PUT_LINE('WARNING: Both age_days and age_months specified. ' ||
+                           'age_months will take precedence.');
+    END IF;
+
+    -- Validation 6: At least one condition specified
+    IF :NEW.age_days IS NULL
+       AND :NEW.age_months IS NULL
+       AND :NEW.access_pattern IS NULL
+       AND :NEW.size_threshold_mb IS NULL
+       AND :NEW.custom_condition IS NULL THEN
+        RAISE_APPLICATION_ERROR(-20007,
+            'Policy must have at least one condition: age_days, age_months, ' ||
+            'access_pattern, size_threshold_mb, or custom_condition');
+    END IF;
+
+    -- Validation 7: Policy type and action type compatibility
+    IF :NEW.policy_type = 'COMPRESSION' AND :NEW.action_type NOT IN ('COMPRESS') THEN
+        RAISE_APPLICATION_ERROR(-20008,
+            'COMPRESSION policy type requires COMPRESS action');
+    END IF;
+
+    IF :NEW.policy_type = 'PURGE' AND :NEW.action_type NOT IN ('DROP', 'TRUNCATE') THEN
+        RAISE_APPLICATION_ERROR(-20009,
+            'PURGE policy type requires DROP or TRUNCATE action');
+    END IF;
+
+    -- Validation 8: Priority range check
+    IF :NEW.priority < 1 OR :NEW.priority > 999 THEN
+        RAISE_APPLICATION_ERROR(-20010,
+            'Priority must be between 1 and 999');
+    END IF;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Re-raise any errors
+        RAISE;
+END;
+/
+
+COMMENT ON TRIGGER trg_validate_dwh_ilm_policy IS
+    'Validates ILM policy configuration before insert/update';
+
+
+-- -----------------------------------------------------------------------------
+-- Procedure: Validate Policy Configuration
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE dwh_validate_ilm_policy(
+    p_policy_id NUMBER,
+    p_show_details BOOLEAN DEFAULT TRUE
+) AS
+    v_policy cmr.dwh_ilm_policies%ROWTYPE;
+    v_partition_count NUMBER;
+    v_eligible_count NUMBER;
+    v_warnings VARCHAR2(4000) := '';
+    v_errors VARCHAR2(4000) := '';
+BEGIN
+    -- Get policy
+    SELECT * INTO v_policy
+    FROM cmr.dwh_ilm_policies
+    WHERE policy_id = p_policy_id;
+
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Validating Policy: ' || v_policy.policy_name);
+    DBMS_OUTPUT.PUT_LINE('========================================');
+
+    -- Check 1: Count partitions in target table
+    SELECT COUNT(*) INTO v_partition_count
+    FROM all_tab_partitions
+    WHERE table_owner = v_policy.table_owner
+    AND table_name = v_policy.table_name;
+
+    DBMS_OUTPUT.PUT_LINE('Target table: ' || v_policy.table_owner || '.' || v_policy.table_name);
+    DBMS_OUTPUT.PUT_LINE('Partition count: ' || v_partition_count);
+
+    IF v_partition_count = 0 THEN
+        v_errors := v_errors || 'ERROR: Table has no partitions. ';
+    END IF;
+
+    -- Check 2: Test eligibility evaluation
+    BEGIN
+        pck_dwh_ilm_policy_engine.evaluate_policy(p_policy_id);
+
+        SELECT COUNT(*) INTO v_eligible_count
+        FROM cmr.dwh_ilm_evaluation_queue
+        WHERE policy_id = p_policy_id
+        AND eligible = 'Y';
+
+        DBMS_OUTPUT.PUT_LINE('Eligible partitions: ' || v_eligible_count);
+
+        IF v_eligible_count = 0 THEN
+            v_warnings := v_warnings || 'WARNING: No partitions currently eligible. ';
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_errors := v_errors || 'ERROR: Evaluation failed - ' || SQLERRM || '. ';
+    END;
+
+    -- Check 3: Compression compatibility
+    IF v_policy.action_type = 'COMPRESS' THEN
+        -- Check if we can compress partitions
+        DECLARE
+            v_can_compress NUMBER;
+        BEGIN
+            SELECT COUNT(*) INTO v_can_compress
+            FROM all_tab_partitions
+            WHERE table_owner = v_policy.table_owner
+            AND table_name = v_policy.table_name
+            AND compression IN ('DISABLED', 'ENABLED')
+            FETCH FIRST 1 ROWS ONLY;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_errors := v_errors || 'ERROR: Cannot query compression status. ';
+        END;
+    END IF;
+
+    -- Check 4: Tablespace accessibility
+    IF v_policy.action_type = 'MOVE' THEN
+        DECLARE
+            v_ts_size NUMBER;
+        BEGIN
+            SELECT bytes/1024/1024 INTO v_ts_size
+            FROM dba_free_space
+            WHERE tablespace_name = v_policy.target_tablespace
+            FETCH FIRST 1 ROWS ONLY;
+
+            DBMS_OUTPUT.PUT_LINE('Target tablespace free space: ' ||
+                               ROUND(v_ts_size, 2) || ' MB');
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_errors := v_errors || 'ERROR: Cannot access target tablespace. ';
+        END;
+    END IF;
+
+    -- Report results
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    IF v_errors IS NOT NULL THEN
+        DBMS_OUTPUT.PUT_LINE('VALIDATION FAILED');
+        DBMS_OUTPUT.PUT_LINE(v_errors);
+    ELSIF v_warnings IS NOT NULL THEN
+        DBMS_OUTPUT.PUT_LINE('VALIDATION PASSED WITH WARNINGS');
+        DBMS_OUTPUT.PUT_LINE(v_warnings);
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('VALIDATION PASSED');
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('========================================');
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('ERROR: Policy ID ' || p_policy_id || ' not found');
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);
+END dwh_validate_ilm_policy;
+/
+
+COMMENT ON PROCEDURE dwh_validate_ilm_policy IS
+    'Validates an existing ILM policy by testing evaluation and checking configuration';
 
 
 -- =============================================================================
@@ -606,12 +899,424 @@ ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
 COMMENT ON VIEW dwh_v_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
 
 
+-- -----------------------------------------------------------------------------
+-- Enhanced Performance Dashboard View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_performance_dashboard AS
+SELECT
+    -- Current Status
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_policies WHERE enabled = 'Y') AS active_policies_count,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_evaluation_queue WHERE execution_status = 'PENDING' AND eligible = 'Y') AS pending_actions_count,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSTIMESTAMP - INTERVAL '1' HOUR AND status = 'IN_PROGRESS') AS running_actions_count,
+    -- Today's Metrics
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE TRUNC(execution_start) = TRUNC(SYSDATE) AND status = 'SUCCESS') AS actions_today_success,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE TRUNC(execution_start) = TRUNC(SYSDATE) AND status = 'FAILED') AS actions_today_failed,
+    (SELECT ROUND(SUM(space_saved_mb)/1024, 2) FROM cmr.dwh_ilm_execution_log WHERE TRUNC(execution_start) = TRUNC(SYSDATE) AND status = 'SUCCESS') AS space_saved_today_gb,
+    (SELECT ROUND(AVG(duration_seconds)/60, 2) FROM cmr.dwh_ilm_execution_log WHERE TRUNC(execution_start) = TRUNC(SYSDATE) AND status = 'SUCCESS') AS avg_duration_today_min,
+    -- Last 7 Days Metrics
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 7 AND status = 'SUCCESS') AS actions_7days_success,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 7 AND status = 'FAILED') AS actions_7days_failed,
+    (SELECT ROUND(SUM(space_saved_mb)/1024, 2) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 7 AND status = 'SUCCESS') AS space_saved_7days_gb,
+    (SELECT ROUND(AVG(compression_ratio), 2) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 7 AND status = 'SUCCESS' AND action_type = 'COMPRESS') AS avg_compression_ratio_7days,
+    -- Last 30 Days Metrics
+    (SELECT ROUND(SUM(space_saved_mb)/1024, 2) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 30 AND status = 'SUCCESS') AS space_saved_30days_gb,
+    (SELECT ROUND(AVG(duration_seconds), 2) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 30 AND status = 'SUCCESS') AS avg_duration_30days_sec,
+    (SELECT MAX(execution_end) FROM cmr.dwh_ilm_execution_log WHERE status = 'SUCCESS') AS last_successful_execution,
+    (SELECT MAX(execution_end) FROM cmr.dwh_ilm_execution_log WHERE status = 'FAILED') AS last_failed_execution,
+    -- Partition Temperature Distribution
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_partition_access WHERE temperature = 'HOT') AS partitions_hot,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_partition_access WHERE temperature = 'WARM') AS partitions_warm,
+    (SELECT COUNT(*) FROM cmr.dwh_ilm_partition_access WHERE temperature = 'COLD') AS partitions_cold,
+    (SELECT ROUND(SUM(size_mb)/1024, 2) FROM cmr.dwh_ilm_partition_access) AS total_tracked_partitions_gb,
+    -- Execution Rate (actions per day average over last 30 days)
+    (SELECT ROUND(COUNT(*) / 30.0, 2) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 30 AND status = 'SUCCESS') AS avg_actions_per_day,
+    -- Current Date/Time
+    SYSTIMESTAMP AS dashboard_timestamp
+FROM DUAL;
+
+COMMENT ON VIEW dwh_v_ilm_performance_dashboard IS 'Real-time performance dashboard with key metrics';
+
+
+-- -----------------------------------------------------------------------------
+-- Alerting Metrics View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_alerting_metrics AS
+SELECT
+    -- Failure Rate (last 24 hours)
+    CASE
+        WHEN total_24h > 0 THEN ROUND((failed_24h / total_24h) * 100, 2)
+        ELSE 0
+    END AS failure_rate_24h_pct,
+    CASE
+        WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 10 THEN 'CRITICAL'
+        WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 5 THEN 'WARNING'
+        ELSE 'OK'
+    END AS failure_rate_status,
+    failed_24h AS failures_count_24h,
+    -- Execution Duration (last 24 hours)
+    ROUND(avg_duration_24h / 60, 2) AS avg_duration_24h_min,
+    CASE
+        WHEN avg_duration_24h > 7200 THEN 'CRITICAL'  -- > 2 hours
+        WHEN avg_duration_24h > 3600 THEN 'WARNING'   -- > 1 hour
+        ELSE 'OK'
+    END AS duration_status,
+    -- Queue Backlog
+    pending_queue_count,
+    CASE
+        WHEN pending_queue_count > 500 THEN 'CRITICAL'
+        WHEN pending_queue_count > 100 THEN 'WARNING'
+        ELSE 'OK'
+    END AS queue_status,
+    -- Compression Ratio (last 7 days)
+    ROUND(avg_compression_ratio_7d, 2) AS avg_compression_ratio_7d,
+    CASE
+        WHEN avg_compression_ratio_7d < 1.5 THEN 'CRITICAL'  -- Very poor compression
+        WHEN avg_compression_ratio_7d < 2.0 THEN 'WARNING'
+        ELSE 'OK'
+    END AS compression_status,
+    -- Job Execution Lag (scheduled vs actual)
+    overdue_actions_count,
+    CASE
+        WHEN overdue_actions_count > 50 THEN 'CRITICAL'
+        WHEN overdue_actions_count > 10 THEN 'WARNING'
+        ELSE 'OK'
+    END AS execution_lag_status,
+    -- Stale Partitions (not tracked in last 7 days)
+    stale_partitions_count,
+    CASE
+        WHEN stale_partitions_count > 100 THEN 'WARNING'
+        ELSE 'OK'
+    END AS stale_tracking_status,
+    -- Overall Health Score
+    CASE
+        WHEN GREATEST(
+            CASE WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 10 THEN 3 WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 5 THEN 2 ELSE 1 END,
+            CASE WHEN avg_duration_24h > 7200 THEN 3 WHEN avg_duration_24h > 3600 THEN 2 ELSE 1 END,
+            CASE WHEN pending_queue_count > 500 THEN 3 WHEN pending_queue_count > 100 THEN 2 ELSE 1 END,
+            CASE WHEN avg_compression_ratio_7d < 1.5 THEN 3 WHEN avg_compression_ratio_7d < 2.0 THEN 2 ELSE 1 END
+        ) >= 3 THEN 'CRITICAL'
+        WHEN GREATEST(
+            CASE WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 10 THEN 3 WHEN ROUND((failed_24h / NULLIF(total_24h, 0)) * 100, 2) > 5 THEN 2 ELSE 1 END,
+            CASE WHEN avg_duration_24h > 7200 THEN 3 WHEN avg_duration_24h > 3600 THEN 2 ELSE 1 END,
+            CASE WHEN pending_queue_count > 500 THEN 3 WHEN pending_queue_count > 100 THEN 2 ELSE 1 END,
+            CASE WHEN avg_compression_ratio_7d < 1.5 THEN 3 WHEN avg_compression_ratio_7d < 2.0 THEN 2 ELSE 1 END
+        ) >= 2 THEN 'WARNING'
+        ELSE 'OK'
+    END AS overall_health_status,
+    SYSTIMESTAMP AS metrics_timestamp
+FROM (
+    SELECT
+        (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 1) AS total_24h,
+        (SELECT COUNT(*) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 1 AND status = 'FAILED') AS failed_24h,
+        (SELECT AVG(duration_seconds) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 1 AND status = 'SUCCESS') AS avg_duration_24h,
+        (SELECT COUNT(*) FROM cmr.dwh_ilm_evaluation_queue WHERE execution_status = 'PENDING' AND eligible = 'Y') AS pending_queue_count,
+        (SELECT AVG(compression_ratio) FROM cmr.dwh_ilm_execution_log WHERE execution_start > SYSDATE - 7 AND status = 'SUCCESS' AND action_type = 'COMPRESS') AS avg_compression_ratio_7d,
+        (SELECT COUNT(*) FROM cmr.dwh_ilm_evaluation_queue WHERE execution_status = 'PENDING' AND eligible = 'Y' AND scheduled_date < SYSTIMESTAMP) AS overdue_actions_count,
+        (SELECT COUNT(*) FROM cmr.dwh_ilm_partition_access WHERE last_updated < SYSTIMESTAMP - INTERVAL '7' DAY) AS stale_partitions_count
+    FROM DUAL
+);
+
+COMMENT ON VIEW dwh_v_ilm_alerting_metrics IS 'Pre-calculated alerting metrics with threshold-based status';
+
+
+-- -----------------------------------------------------------------------------
+-- Policy Effectiveness View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_policy_effectiveness AS
+SELECT
+    p.policy_id,
+    p.policy_name,
+    p.table_owner,
+    p.table_name,
+    p.policy_type,
+    p.action_type,
+    p.priority,
+    p.enabled,
+    p.created_date,
+    -- Execution Metrics
+    COUNT(e.execution_id) AS total_executions,
+    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful_executions,
+    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_executions,
+    CASE
+        WHEN COUNT(e.execution_id) > 0 THEN
+            ROUND((SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) / COUNT(e.execution_id)) * 100, 2)
+        ELSE NULL
+    END AS success_rate_pct,
+    -- Space Savings
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024, 2) AS total_space_saved_gb,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' THEN e.space_saved_mb ELSE NULL END), 2) AS avg_space_saved_per_partition_mb,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' AND e.action_type = 'COMPRESS' THEN e.compression_ratio ELSE NULL END), 2) AS avg_compression_ratio,
+    -- Performance Metrics
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END), 2) AS avg_execution_time_sec,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END) / 60, 2) AS avg_execution_time_min,
+    MIN(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END) AS min_execution_time_sec,
+    MAX(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END) AS max_execution_time_sec,
+    -- Activity Metrics
+    MIN(e.execution_start) AS first_execution,
+    MAX(e.execution_end) AS last_execution,
+    TRUNC(SYSDATE - MAX(e.execution_end)) AS days_since_last_execution,
+    -- ROI Calculation (GB saved per hour of execution time)
+    CASE
+        WHEN SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) > 0 THEN
+            ROUND(
+                (SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024) /
+                (SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) / 3600),
+                2
+            )
+        ELSE NULL
+    END AS space_saved_per_hour_gb,
+    -- Effectiveness Rating
+    CASE
+        WHEN COUNT(e.execution_id) = 0 THEN 'NOT_EXECUTED'
+        WHEN SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) > COUNT(e.execution_id) * 0.2 THEN 'POOR'  -- >20% failure rate
+        WHEN AVG(CASE WHEN e.status = 'SUCCESS' AND e.action_type = 'COMPRESS' THEN e.compression_ratio ELSE NULL END) < 2.0 THEN 'FAIR'  -- Low compression
+        WHEN AVG(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END) > 3600 THEN 'SLOW'  -- Avg >1 hour
+        WHEN AVG(CASE WHEN e.status = 'SUCCESS' AND e.action_type = 'COMPRESS' THEN e.compression_ratio ELSE NULL END) >= 3.0 THEN 'EXCELLENT'  -- Great compression
+        ELSE 'GOOD'
+    END AS effectiveness_rating,
+    -- Pending Actions
+    (SELECT COUNT(*)
+     FROM cmr.dwh_ilm_evaluation_queue q
+     WHERE q.policy_id = p.policy_id
+     AND q.execution_status = 'PENDING'
+     AND q.eligible = 'Y'
+    ) AS pending_actions_count
+FROM cmr.dwh_ilm_policies p
+LEFT JOIN cmr.dwh_ilm_execution_log e ON e.policy_id = p.policy_id
+GROUP BY
+    p.policy_id, p.policy_name, p.table_owner, p.table_name, p.policy_type,
+    p.action_type, p.priority, p.enabled, p.created_date
+ORDER BY total_space_saved_gb DESC NULLS LAST, success_rate_pct DESC NULLS LAST;
+
+COMMENT ON VIEW dwh_v_ilm_policy_effectiveness IS 'Policy effectiveness metrics including ROI and success rates';
+
+
+-- -----------------------------------------------------------------------------
+-- Resource Utilization Trend View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_resource_trends AS
+SELECT
+    TO_CHAR(e.execution_end, 'YYYY-MM') AS year_month,
+    TO_CHAR(e.execution_end, 'YYYY-IW') AS year_week,
+    TRUNC(e.execution_end) AS execution_date,
+    -- Daily Aggregates
+    COUNT(*) AS total_actions,
+    SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful_actions,
+    SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_actions,
+    ROUND((SUM(CASE WHEN e.status = 'FAILED' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) * 100, 2) AS failure_rate_pct,
+    -- Space Metrics
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024, 2) AS space_saved_gb,
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.size_before_mb, 0) ELSE 0 END) / 1024, 2) AS size_before_gb,
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.size_after_mb, 0) ELSE 0 END) / 1024, 2) AS size_after_gb,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' AND e.action_type = 'COMPRESS' THEN e.compression_ratio ELSE NULL END), 2) AS avg_compression_ratio,
+    -- Time Metrics
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) / 3600, 2) AS total_execution_hours,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END), 2) AS avg_duration_seconds,
+    ROUND(AVG(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE NULL END) / 60, 2) AS avg_duration_minutes,
+    -- Efficiency Metrics
+    CASE
+        WHEN SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) > 0 THEN
+            ROUND(
+                (SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024) /
+                (SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) / 3600),
+                2
+            )
+        ELSE NULL
+    END AS gb_saved_per_hour,
+    -- Row Metrics
+    SUM(e.rows_affected) AS total_rows_affected,
+    -- Action Type Breakdown
+    SUM(CASE WHEN e.action_type = 'COMPRESS' AND e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS compress_actions,
+    SUM(CASE WHEN e.action_type = 'MOVE' AND e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS move_actions,
+    SUM(CASE WHEN e.action_type = 'DROP' AND e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS drop_actions,
+    SUM(CASE WHEN e.action_type = 'CUSTOM' AND e.status = 'SUCCESS' THEN 1 ELSE 0 END) AS custom_actions
+FROM cmr.dwh_ilm_execution_log e
+WHERE e.execution_end IS NOT NULL
+GROUP BY
+    TO_CHAR(e.execution_end, 'YYYY-MM'),
+    TO_CHAR(e.execution_end, 'YYYY-IW'),
+    TRUNC(e.execution_end)
+ORDER BY execution_date DESC;
+
+COMMENT ON VIEW dwh_v_ilm_resource_trends IS 'Historical resource utilization trends for capacity planning';
+
+
+-- -----------------------------------------------------------------------------
+-- Failure Analysis View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_failure_analysis AS
+SELECT
+    e.table_owner,
+    e.table_name,
+    e.policy_name,
+    e.action_type,
+    e.error_code,
+    CASE
+        WHEN e.error_message LIKE '%ORA-01031%' THEN 'Insufficient Privileges'
+        WHEN e.error_message LIKE '%ORA-00054%' THEN 'Resource Busy (Lock Conflict)'
+        WHEN e.error_message LIKE '%ORA-01654%' THEN 'Tablespace Full'
+        WHEN e.error_message LIKE '%ORA-08104%' THEN 'Index Not Partitioned'
+        WHEN e.error_message LIKE '%ORA-14006%' THEN 'Invalid Partition Name'
+        WHEN e.error_message LIKE '%ORA-14511%' THEN 'Partition Maintenance Not Allowed'
+        WHEN e.error_message LIKE '%timeout%' THEN 'Operation Timeout'
+        WHEN e.error_message LIKE '%space%' THEN 'Space Related Error'
+        WHEN e.error_message LIKE '%lock%' THEN 'Lock Related Error'
+        ELSE 'Other Error'
+    END AS error_category,
+    COUNT(*) AS failure_count,
+    MIN(e.execution_start) AS first_failure,
+    MAX(e.execution_start) AS last_failure,
+    ROUND(AVG(e.duration_seconds), 2) AS avg_duration_before_failure_sec,
+    -- Sample error message (first occurrence)
+    MIN(CASE
+        WHEN LENGTH(e.error_message) > 200 THEN SUBSTR(e.error_message, 1, 197) || '...'
+        ELSE e.error_message
+    END) AS sample_error_message,
+    -- Recommended Action
+    CASE
+        WHEN MIN(e.error_message) LIKE '%ORA-01031%' THEN 'Grant necessary privileges to schema'
+        WHEN MIN(e.error_message) LIKE '%ORA-00054%' THEN 'Check for long-running transactions, adjust execution window'
+        WHEN MIN(e.error_message) LIKE '%ORA-01654%' THEN 'Add datafile or increase tablespace size'
+        WHEN MIN(e.error_message) LIKE '%ORA-08104%' THEN 'Create local indexes or convert to partitioned indexes'
+        WHEN MIN(e.error_message) LIKE '%ORA-14006%' THEN 'Verify partition exists, refresh partition tracking'
+        WHEN MIN(e.error_message) LIKE '%timeout%' THEN 'Increase timeout or run during maintenance window'
+        ELSE 'Review error message and execution log for details'
+    END AS recommended_action
+FROM cmr.dwh_ilm_execution_log e
+WHERE e.status = 'FAILED'
+AND e.execution_start > SYSDATE - 30  -- Last 30 days
+GROUP BY
+    e.table_owner, e.table_name, e.policy_name, e.action_type, e.error_code,
+    CASE
+        WHEN e.error_message LIKE '%ORA-01031%' THEN 'Insufficient Privileges'
+        WHEN e.error_message LIKE '%ORA-00054%' THEN 'Resource Busy (Lock Conflict)'
+        WHEN e.error_message LIKE '%ORA-01654%' THEN 'Tablespace Full'
+        WHEN e.error_message LIKE '%ORA-08104%' THEN 'Index Not Partitioned'
+        WHEN e.error_message LIKE '%ORA-14006%' THEN 'Invalid Partition Name'
+        WHEN e.error_message LIKE '%ORA-14511%' THEN 'Partition Maintenance Not Allowed'
+        WHEN e.error_message LIKE '%timeout%' THEN 'Operation Timeout'
+        WHEN e.error_message LIKE '%space%' THEN 'Space Related Error'
+        WHEN e.error_message LIKE '%lock%' THEN 'Lock Related Error'
+        ELSE 'Other Error'
+    END
+ORDER BY failure_count DESC, last_failure DESC;
+
+COMMENT ON VIEW dwh_v_ilm_failure_analysis IS 'Categorized failure analysis with recommended actions';
+
+
+-- -----------------------------------------------------------------------------
+-- Table Lifecycle Overview View
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW dwh_v_ilm_table_overview AS
+SELECT
+    t.table_owner,
+    t.table_name,
+    -- Table Metadata
+    tp.partition_count,
+    tp.partitioning_type,
+    -- Space Metrics
+    ROUND(NVL(s.total_size_mb, 0) / 1024, 2) AS total_table_size_gb,
+    ROUND(NVL(a.tracked_size_mb, 0) / 1024, 2) AS tracked_partitions_size_gb,
+    -- Temperature Distribution
+    NVL(a.hot_partitions, 0) AS hot_partitions,
+    NVL(a.warm_partitions, 0) AS warm_partitions,
+    NVL(a.cold_partitions, 0) AS cold_partitions,
+    -- Policy Coverage
+    NVL(p.policy_count, 0) AS ilm_policies_count,
+    NVL(p.active_policy_count, 0) AS active_policies_count,
+    -- ILM Activity
+    NVL(e.total_executions, 0) AS total_ilm_executions,
+    NVL(e.successful_executions, 0) AS successful_executions,
+    NVL(e.failed_executions, 0) AS failed_executions,
+    ROUND(NVL(e.total_space_saved_gb, 0), 2) AS total_space_saved_gb,
+    e.last_execution,
+    -- Pending Actions
+    NVL(q.pending_count, 0) AS pending_actions,
+    -- Lifecycle Status
+    CASE
+        WHEN NVL(p.active_policy_count, 0) = 0 THEN 'NO_ILM_POLICIES'
+        WHEN NVL(e.total_executions, 0) = 0 THEN 'NEVER_EXECUTED'
+        WHEN e.last_execution < SYSDATE - 7 THEN 'STALE'
+        WHEN NVL(e.failed_executions, 0) > NVL(e.successful_executions, 0) * 0.2 THEN 'HIGH_FAILURE_RATE'
+        WHEN NVL(q.pending_count, 0) > 50 THEN 'HIGH_BACKLOG'
+        ELSE 'ACTIVE'
+    END AS lifecycle_status,
+    -- Recommendations
+    CASE
+        WHEN NVL(p.active_policy_count, 0) = 0 THEN 'Create ILM policies for this table'
+        WHEN NVL(e.total_executions, 0) = 0 THEN 'Policies defined but never executed - check policy criteria'
+        WHEN e.last_execution < SYSDATE - 7 THEN 'No recent activity - verify policies and refresh tracking'
+        WHEN NVL(e.failed_executions, 0) > NVL(e.successful_executions, 0) * 0.2 THEN 'Review failure logs and fix issues'
+        WHEN NVL(q.pending_count, 0) > 50 THEN 'Large backlog - increase execution frequency'
+        WHEN NVL(a.cold_partitions, 0) > NVL(tp.partition_count, 0) * 0.3 THEN 'Many COLD partitions - consider archival'
+        ELSE 'Table lifecycle management is healthy'
+    END AS recommendation
+FROM all_tables t
+LEFT JOIN (
+    SELECT table_owner, table_name, COUNT(*) AS partition_count, partitioning_type
+    FROM all_part_tables
+    GROUP BY table_owner, table_name, partitioning_type
+) tp ON tp.table_owner = t.owner AND tp.table_name = t.table_name
+LEFT JOIN (
+    SELECT owner, segment_name, SUM(bytes/1024/1024) AS total_size_mb
+    FROM all_segments
+    WHERE segment_type LIKE '%PARTITION%'
+    GROUP BY owner, segment_name
+) s ON s.owner = t.owner AND s.segment_name = t.table_name
+LEFT JOIN (
+    SELECT
+        table_owner, table_name,
+        SUM(size_mb) AS tracked_size_mb,
+        SUM(CASE WHEN temperature = 'HOT' THEN 1 ELSE 0 END) AS hot_partitions,
+        SUM(CASE WHEN temperature = 'WARM' THEN 1 ELSE 0 END) AS warm_partitions,
+        SUM(CASE WHEN temperature = 'COLD' THEN 1 ELSE 0 END) AS cold_partitions
+    FROM cmr.dwh_ilm_partition_access
+    GROUP BY table_owner, table_name
+) a ON a.table_owner = t.owner AND a.table_name = t.table_name
+LEFT JOIN (
+    SELECT
+        table_owner, table_name,
+        COUNT(*) AS policy_count,
+        SUM(CASE WHEN enabled = 'Y' THEN 1 ELSE 0 END) AS active_policy_count
+    FROM cmr.dwh_ilm_policies
+    GROUP BY table_owner, table_name
+) p ON p.table_owner = t.owner AND p.table_name = t.table_name
+LEFT JOIN (
+    SELECT
+        table_owner, table_name,
+        COUNT(*) AS total_executions,
+        SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS successful_executions,
+        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed_executions,
+        SUM(CASE WHEN status = 'SUCCESS' THEN NVL(space_saved_mb, 0) ELSE 0 END) / 1024 AS total_space_saved_gb,
+        MAX(execution_end) AS last_execution
+    FROM cmr.dwh_ilm_execution_log
+    GROUP BY table_owner, table_name
+) e ON e.table_owner = t.owner AND e.table_name = t.table_name
+LEFT JOIN (
+    SELECT table_owner, table_name, COUNT(*) AS pending_count
+    FROM cmr.dwh_ilm_evaluation_queue
+    WHERE execution_status = 'PENDING' AND eligible = 'Y'
+    GROUP BY table_owner, table_name
+) q ON q.table_owner = t.owner AND q.table_name = t.table_name
+WHERE tp.partition_count > 0  -- Only partitioned tables
+ORDER BY total_table_size_gb DESC NULLS LAST, lifecycle_status, t.table_name;
+
+COMMENT ON VIEW dwh_v_ilm_table_overview IS 'Comprehensive table lifecycle overview with recommendations';
+
+
 -- =============================================================================
 -- SECTION 3: INITIALIZATION PROCEDURES
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
 -- Initialize partition access tracking (full metadata refresh)
+-- Enhanced to calculate age from partition high_value instead of placeholders
 -- -----------------------------------------------------------------------------
 
 CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
@@ -621,6 +1326,38 @@ CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
     v_hot_threshold NUMBER;
     v_warm_threshold NUMBER;
     v_cold_threshold NUMBER;
+    v_merge_count NUMBER;
+    v_hot_count NUMBER := 0;
+    v_warm_count NUMBER := 0;
+    v_cold_count NUMBER := 0;
+
+    -- Function to extract date from partition high_value
+    FUNCTION get_partition_date(
+        p_owner VARCHAR2,
+        p_table VARCHAR2,
+        p_partition VARCHAR2
+    ) RETURN DATE
+    IS
+        v_high_value LONG;
+        v_date DATE;
+    BEGIN
+        SELECT high_value INTO v_high_value
+        FROM all_tab_partitions
+        WHERE table_owner = p_owner
+        AND table_name = p_table
+        AND partition_name = p_partition;
+
+        -- Try to evaluate high_value as date
+        BEGIN
+            EXECUTE IMMEDIATE 'SELECT ' || v_high_value || ' FROM DUAL'
+            INTO v_date;
+            RETURN v_date;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN NULL;
+        END;
+    END;
+
 BEGIN
     -- Get thresholds from config
     SELECT TO_NUMBER(config_value) INTO v_hot_threshold
@@ -632,19 +1369,25 @@ BEGIN
     SELECT TO_NUMBER(config_value) INTO v_cold_threshold
     FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
 
-    -- Merge partition data
+    -- Merge partition data with age calculated from high_value
     MERGE INTO cmr.dwh_ilm_partition_access a
     USING (
         SELECT
             tp.table_owner,
             tp.table_name,
             tp.partition_name,
-            SYSTIMESTAMP AS last_write_time,  -- Placeholder - would track actual access
             tp.num_rows,
             ROUND(NVL(s.bytes, 0)/1024/1024, 2) AS size_mb,
             tp.compression,
-            s.tablespace_name
-        FROM dba_tab_partitions tp
+            s.tablespace_name,
+            -- Calculate estimated write time from partition boundary date
+            get_partition_date(tp.table_owner, tp.table_name, tp.partition_name) AS partition_date,
+            CASE
+                WHEN get_partition_date(tp.table_owner, tp.table_name, tp.partition_name) IS NOT NULL THEN
+                    TRUNC(SYSDATE - get_partition_date(tp.table_owner, tp.table_name, tp.partition_name))
+                ELSE 10000  -- Very old if can't determine
+            END AS calculated_age_days
+        FROM all_tab_partitions tp
         LEFT JOIN all_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
@@ -660,34 +1403,68 @@ BEGIN
         a.size_mb = src.size_mb,
         a.compression = src.compression,
         a.tablespace_name = src.tablespace_name,
-        a.days_since_write = TRUNC(SYSDATE - NVL(a.last_write_time, SYSDATE - 10000)),
-        a.days_since_read = TRUNC(SYSDATE - NVL(a.last_read_time, SYSDATE - 10000)),
+        -- Only update timestamps if we don't have real tracking data
+        a.last_write_time = CASE
+            WHEN a.write_count > 0 THEN a.last_write_time  -- Preserve real data
+            ELSE src.partition_date  -- Use calculated
+        END,
+        a.last_read_time = CASE
+            WHEN a.read_count > 0 THEN a.last_read_time  -- Preserve real data
+            ELSE src.partition_date  -- Assume read age = write age
+        END,
+        a.days_since_write = src.calculated_age_days,
+        a.days_since_read = src.calculated_age_days,  -- Assume read age = write age
         a.temperature = CASE
-            WHEN TRUNC(SYSDATE - NVL(a.last_write_time, SYSDATE - 10000)) < v_hot_threshold THEN 'HOT'
-            WHEN TRUNC(SYSDATE - NVL(a.last_write_time, SYSDATE - 10000)) < v_warm_threshold THEN 'WARM'
+            WHEN src.calculated_age_days < v_hot_threshold THEN 'HOT'
+            WHEN src.calculated_age_days < v_warm_threshold THEN 'WARM'
             ELSE 'COLD'
         END,
         a.last_updated = SYSTIMESTAMP
     WHEN NOT MATCHED THEN INSERT (
         table_owner, table_name, partition_name,
-        last_write_time, num_rows, size_mb, compression, tablespace_name,
+        last_write_time, last_read_time, num_rows, size_mb, compression, tablespace_name,
+        read_count, write_count,
         days_since_write, days_since_read, temperature, last_updated
     ) VALUES (
         src.table_owner, src.table_name, src.partition_name,
-        src.last_write_time, src.num_rows, src.size_mb, src.compression, src.tablespace_name,
-        TRUNC(SYSDATE - src.last_write_time),
-        TRUNC(SYSDATE - src.last_write_time),
+        src.partition_date, src.partition_date, src.num_rows, src.size_mb, src.compression, src.tablespace_name,
+        0, 0,  -- No real access tracking yet
+        src.calculated_age_days,
+        src.calculated_age_days,
         CASE
-            WHEN TRUNC(SYSDATE - src.last_write_time) < v_hot_threshold THEN 'HOT'
-            WHEN TRUNC(SYSDATE - src.last_write_time) < v_warm_threshold THEN 'WARM'
+            WHEN src.calculated_age_days < v_hot_threshold THEN 'HOT'
+            WHEN src.calculated_age_days < v_warm_threshold THEN 'WARM'
             ELSE 'COLD'
         END,
         SYSTIMESTAMP
     );
 
+    v_merge_count := SQL%ROWCOUNT;
+
+    -- Count temperature distribution
+    SELECT
+        SUM(CASE WHEN temperature = 'HOT' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN temperature = 'WARM' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN temperature = 'COLD' THEN 1 ELSE 0 END)
+    INTO v_hot_count, v_warm_count, v_cold_count
+    FROM cmr.dwh_ilm_partition_access
+    WHERE table_owner = p_table_owner
+    AND (p_table_name IS NULL OR table_name = p_table_name);
+
     COMMIT;
 
-    DBMS_OUTPUT.PUT_LINE('Partition access tracking refreshed: ' || SQL%ROWCOUNT || ' partitions');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Partition Access Tracking Refreshed');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Total partitions: ' || v_merge_count);
+    DBMS_OUTPUT.PUT_LINE('HOT partitions (< ' || v_hot_threshold || ' days): ' || v_hot_count);
+    DBMS_OUTPUT.PUT_LINE('WARM partitions (< ' || v_warm_threshold || ' days): ' || v_warm_count);
+    DBMS_OUTPUT.PUT_LINE('COLD partitions (> ' || v_cold_threshold || ' days): ' || v_cold_count);
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Note: Temperature based on partition age (high_value)');
+    DBMS_OUTPUT.PUT_LINE('      For accurate access tracking, use Oracle Heat Map');
+    DBMS_OUTPUT.PUT_LINE('      or dwh_sync_heatmap_to_tracking() if available');
+    DBMS_OUTPUT.PUT_LINE('========================================');
 END;
 /
 
@@ -790,6 +1567,114 @@ EXCEPTION
         ROLLBACK;
 END;
 /
+
+
+-- -----------------------------------------------------------------------------
+-- Oracle Heat Map Integration (Optional - Enterprise Edition Only)
+-- Syncs real access data from Oracle Heat Map to partition tracking table
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE dwh_sync_heatmap_to_tracking(
+    p_table_owner VARCHAR2 DEFAULT USER,
+    p_table_name VARCHAR2 DEFAULT NULL
+) AS
+    v_heat_map_available BOOLEAN := FALSE;
+    v_count NUMBER;
+    v_hot_threshold NUMBER;
+    v_warm_threshold NUMBER;
+    v_cold_threshold NUMBER;
+    v_synced_count NUMBER;
+BEGIN
+    -- Check if Heat Map is enabled
+    BEGIN
+        SELECT COUNT(*) INTO v_count
+        FROM v$option
+        WHERE parameter = 'Heat Map'
+        AND value = 'TRUE';
+
+        v_heat_map_available := (v_count > 0);
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_heat_map_available := FALSE;
+    END;
+
+    IF NOT v_heat_map_available THEN
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Oracle Heat Map Integration');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Oracle Heat Map is not available or not enabled');
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('To enable Heat Map (Enterprise Edition):');
+        DBMS_OUTPUT.PUT_LINE('  ALTER SYSTEM SET HEAT_MAP = ON SCOPE=BOTH;');
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('Using partition high_value dates for temperature calculation instead');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        RETURN;
+    END IF;
+
+    -- Get thresholds from config
+    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
+
+    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+
+    SELECT TO_NUMBER(config_value) INTO v_cold_threshold
+    FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
+
+    -- Sync Heat Map data to tracking table
+    MERGE INTO cmr.dwh_ilm_partition_access a
+    USING (
+        SELECT
+            h.object_owner,
+            h.object_name,
+            h.subobject_name AS partition_name,
+            h.segment_write_time,
+            h.segment_read_time,
+            TRUNC(SYSDATE - NVL(h.segment_write_time, SYSDATE - 10000)) AS days_since_write,
+            TRUNC(SYSDATE - NVL(h.segment_read_time, SYSDATE - 10000)) AS days_since_read
+        FROM dba_heat_map_segment h
+        WHERE h.object_type = 'TABLE PARTITION'
+        AND h.object_owner = p_table_owner
+        AND (p_table_name IS NULL OR h.object_name = p_table_name)
+    ) src
+    ON (a.table_owner = src.object_owner
+        AND a.table_name = src.object_name
+        AND a.partition_name = src.partition_name)
+    WHEN MATCHED THEN UPDATE SET
+        a.last_write_time = src.segment_write_time,
+        a.last_read_time = src.segment_read_time,
+        a.days_since_write = src.days_since_write,
+        a.days_since_read = src.days_since_read,
+        a.write_count = NVL(a.write_count, 0) + 1,
+        a.read_count = NVL(a.read_count, 0) + 1,
+        a.temperature = CASE
+            WHEN src.days_since_write < v_hot_threshold THEN 'HOT'
+            WHEN src.days_since_write < v_warm_threshold THEN 'WARM'
+            ELSE 'COLD'
+        END,
+        a.last_updated = SYSTIMESTAMP;
+
+    v_synced_count := SQL%ROWCOUNT;
+
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Heat Map Data Synced');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+    DBMS_OUTPUT.PUT_LINE('Synced Heat Map data for ' || v_synced_count || ' partition(s)');
+    DBMS_OUTPUT.PUT_LINE('Temperature calculated from real access patterns');
+    DBMS_OUTPUT.PUT_LINE('========================================');
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('ERROR syncing Heat Map data: ' || SQLERRM);
+        ROLLBACK;
+END;
+/
+
+COMMENT ON PROCEDURE dwh_sync_heatmap_to_tracking IS
+    'Syncs real partition access data from Oracle Heat Map (Enterprise Edition required)';
 
 
 -- -----------------------------------------------------------------------------

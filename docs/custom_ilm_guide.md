@@ -43,12 +43,12 @@ This custom ILM framework provides full control over partition lifecycle managem
 
 ### Data Flow
 
-1. **Policy Definition**: Define ILM policies in `ilm_policies` table
+1. **Policy Definition**: Define ILM policies in `cmr.dwh_ilm_policies` table
 2. **Access Tracking**: Track partition access in `ilm_partition_access`
 3. **Evaluation**: Policy engine identifies eligible partitions
 4. **Queuing**: Eligible partitions added to `ilm_evaluation_queue`
 5. **Execution**: Execution engine performs actions
-6. **Logging**: Results recorded in `ilm_execution_log`
+6. **Logging**: Results recorded in `cmr.dwh_ilm_execution_log`
 
 ## Installation
 
@@ -81,10 +81,10 @@ SELECT * FROM v_ilm_scheduler_status;
 
 ```sql
 -- Set execution window (optional)
-UPDATE ilm_config SET config_value = '22:00'
+UPDATE cmr.dwh_ilm_config SET config_value = '22:00'
 WHERE config_key = 'EXECUTION_WINDOW_START';
 
-UPDATE ilm_config SET config_value = '06:00'
+UPDATE cmr.dwh_ilm_config SET config_value = '06:00'
 WHERE config_key = 'EXECUTION_WINDOW_END';
 
 COMMIT;
@@ -97,7 +97,7 @@ COMMIT;
 #### Basic Compression Policy
 
 ```sql
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name,
     table_owner,
     table_name,
@@ -125,7 +125,7 @@ COMMIT;
 
 ```sql
 -- Warm tier (3 months)
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_months, target_tablespace, compression_type, priority, enabled
 ) VALUES (
@@ -134,7 +134,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Cold tier (12 months)
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_months, target_tablespace, compression_type, priority, enabled
 ) VALUES (
@@ -143,7 +143,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Archive tier (36 months) + Read-only
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_months, target_tablespace, compression_type, priority, enabled
 ) VALUES (
@@ -151,7 +151,7 @@ INSERT INTO ilm_policies (
     36, 'TBS_ARCHIVE', 'ARCHIVE HIGH', 300, 'Y'
 );
 
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_months, priority, enabled
 ) VALUES (
@@ -165,7 +165,7 @@ COMMIT;
 #### Purge Policy
 
 ```sql
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_months, priority, enabled
 ) VALUES (
@@ -181,7 +181,7 @@ COMMIT;
 
 ```sql
 -- Compress only partitions matching specific criteria
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, custom_condition, compression_type, priority, enabled
 ) VALUES (
@@ -195,7 +195,7 @@ COMMIT;
 
 ```sql
 -- Compress only large partitions
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, size_threshold_mb, compression_type, priority, enabled
 ) VALUES (
@@ -216,7 +216,7 @@ The framework includes predefined policy templates for common table types used w
 -- Preserves historical versions with gradual compression
 
 -- Compress versions older than 1 year
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -225,7 +225,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Archive compress versions older than 3 years
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -234,7 +234,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Read-only after 5 years (compliance)
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -250,7 +250,7 @@ COMMIT;
 -- Same lifecycle as effective_date pattern
 
 -- Compress historical records older than 1 year
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -266,7 +266,7 @@ COMMIT;
 -- For clickstream, IoT, and high-volume events
 
 -- Compress after 7 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -275,7 +275,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Archive compress after 30 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -284,7 +284,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Purge after 90 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -300,7 +300,7 @@ COMMIT;
 -- For audit logs and regulatory compliance
 
 -- Compress after 90 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -309,7 +309,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Archive compress after 1 year
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -318,7 +318,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Read-only after 2 years
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -327,7 +327,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Purge after 7 years (regulatory requirement)
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -343,7 +343,7 @@ COMMIT;
 -- For transactional staging tables
 
 -- Purge after 7 days (no compression needed)
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -359,7 +359,7 @@ COMMIT;
 -- For change data capture staging
 
 -- Purge after 30 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -375,7 +375,7 @@ COMMIT;
 -- For error/exception records requiring investigation
 
 -- Compress after 30 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, compression_type, priority, enabled
 ) VALUES (
@@ -384,7 +384,7 @@ INSERT INTO ilm_policies (
 );
 
 -- Purge after 1 year
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, priority, enabled
 ) VALUES (
@@ -402,7 +402,7 @@ COMMIT;
 
 ```sql
 -- Enable automatic execution
-UPDATE ilm_config
+UPDATE cmr.dwh_ilm_config
 SET config_value = 'Y'
 WHERE config_key = 'ENABLE_AUTO_EXECUTION';
 COMMIT;
@@ -415,12 +415,12 @@ COMMIT;
 
 ```sql
 -- Complete ILM cycle
-EXEC run_ilm_cycle();
+EXEC dwh_run_ilm_cycle();
 
 -- Or run individual steps:
-EXEC refresh_partition_access_tracking();
-EXEC ilm_policy_engine.evaluate_all_policies();
-EXEC ilm_execution_engine.execute_pending_actions();
+EXEC dwh_refresh_partition_access_tracking();
+EXEC pck_dwh_ilm_policy_engine.evaluate_all_policies();
+EXEC pck_dwh_ilm_execution_engine.execute_pending_actions();
 ```
 
 #### Execute Specific Policy
@@ -490,7 +490,7 @@ SELECT
     duration_seconds,
     status,
     space_saved_mb
-FROM ilm_execution_log
+FROM cmr.dwh_ilm_execution_log
 ORDER BY execution_start DESC
 FETCH FIRST 20 ROWS ONLY;
 ```
@@ -503,7 +503,7 @@ SELECT
     COUNT(*) AS partitions_processed,
     ROUND(SUM(space_saved_mb), 2) AS total_saved_mb,
     ROUND(AVG(compression_ratio), 2) AS avg_compression_ratio
-FROM ilm_execution_log
+FROM cmr.dwh_ilm_execution_log
 WHERE status = 'SUCCESS'
 AND action_type = 'COMPRESS'
 GROUP BY table_name
@@ -571,7 +571,7 @@ ORDER BY log_date DESC;
 ## Configuration Parameters
 
 ```sql
-SELECT * FROM ilm_config ORDER BY config_key;
+SELECT * FROM cmr.dwh_ilm_config ORDER BY config_key;
 ```
 
 | Parameter | Default | Description |
@@ -592,7 +592,7 @@ SELECT * FROM ilm_config ORDER BY config_key;
 
 ```sql
 -- Begin with one policy and test
-INSERT INTO ilm_policies (...) VALUES (...);
+INSERT INTO cmr.dwh_ilm_policies (...) VALUES (...);
 
 -- Evaluate without executing
 EXEC ilm_policy_engine.evaluate_policy(1);
@@ -626,7 +626,7 @@ EXEC ilm_execution_engine.execute_pending_actions(p_max_operations => 5);
 
 ```sql
 -- Check for failures regularly
-SELECT * FROM ilm_execution_log
+SELECT * FROM cmr.dwh_ilm_execution_log
 WHERE status = 'FAILED'
 AND execution_start > SYSDATE - 7
 ORDER BY execution_start DESC;
@@ -639,12 +639,12 @@ SELECT * FROM v_ilm_execution_stats;
 
 ```sql
 -- Start with oldest partitions
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET custom_condition = 'partition_date < DATE ''2020-01-01'''
 WHERE policy_name = 'COMPRESS_SALES_90D';
 
 -- Gradually remove restriction
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET custom_condition = NULL
 WHERE policy_name = 'COMPRESS_SALES_90D';
 ```
@@ -683,7 +683,7 @@ SELECT
     partition_name,
     error_code,
     error_message
-FROM ilm_execution_log
+FROM cmr.dwh_ilm_execution_log
 WHERE status = 'FAILED'
 ORDER BY execution_start DESC
 FETCH FIRST 10 ROWS ONLY;
@@ -719,7 +719,7 @@ EXEC ilm_policy_engine.evaluate_all_policies();
 ### Disable Policy Temporarily
 
 ```sql
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET enabled = 'N'
 WHERE policy_name = 'COMPRESS_SALES_90D';
 COMMIT;
@@ -728,7 +728,7 @@ COMMIT;
 ### Update Policy Parameters
 
 ```sql
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET age_days = 120,
     compression_type = 'ARCHIVE HIGH',
     modified_date = SYSTIMESTAMP,
@@ -741,10 +741,10 @@ COMMIT;
 
 ```sql
 -- Stop scheduler jobs
-EXEC stop_ilm_jobs();
+EXEC dwh_stop_ilm_jobs();
 
 -- Or disable auto execution
-UPDATE ilm_config
+UPDATE cmr.dwh_ilm_config
 SET config_value = 'N'
 WHERE config_key = 'ENABLE_AUTO_EXECUTION';
 COMMIT;
@@ -754,10 +754,10 @@ COMMIT;
 
 ```sql
 -- Start scheduler jobs
-EXEC start_ilm_jobs();
+EXEC dwh_start_ilm_jobs();
 
 -- Or enable auto execution
-UPDATE ilm_config
+UPDATE cmr.dwh_ilm_config
 SET config_value = 'Y'
 WHERE config_key = 'ENABLE_AUTO_EXECUTION';
 COMMIT;
@@ -770,7 +770,7 @@ COMMIT;
 EXEC cleanup_execution_logs();
 
 -- Or adjust retention
-UPDATE ilm_config
+UPDATE cmr.dwh_ilm_config
 SET config_value = '180'  -- 6 months
 WHERE config_key = 'LOG_RETENTION_DAYS';
 COMMIT;
@@ -781,7 +781,7 @@ COMMIT;
 ### Custom Actions
 
 ```sql
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name, policy_type, action_type,
     age_days, custom_action, priority, enabled
 ) VALUES (
@@ -839,7 +839,7 @@ END;
 
 ```sql
 -- Adjust parallel degree in policies
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET parallel_degree = 8
 WHERE table_name = 'SALES_FACT';
 COMMIT;
@@ -856,7 +856,7 @@ EXEC ilm_execution_engine.execute_pending_actions(p_max_operations => 10);
 
 ```sql
 -- Skip index rebuild for faster execution (rebuild separately)
-UPDATE ilm_policies
+UPDATE cmr.dwh_ilm_policies
 SET rebuild_indexes = 'N'
 WHERE policy_name = 'COMPRESS_SALES_90D';
 COMMIT;
@@ -903,7 +903,7 @@ END;
 
 ```sql
 -- Grant policy management to specific user
-GRANT SELECT, INSERT, UPDATE ON ilm_policies TO ilm_admin;
+GRANT SELECT, INSERT, UPDATE ON cmr.dwh_ilm_policies TO ilm_admin;
 GRANT SELECT ON v_ilm_active_policies TO ilm_admin;
 
 -- Grant execution to specific user
@@ -921,7 +921,7 @@ SELECT
     created_date,
     modified_by,
     modified_date
-FROM ilm_policies
+FROM cmr.dwh_ilm_policies
 ORDER BY modified_date DESC;
 ```
 

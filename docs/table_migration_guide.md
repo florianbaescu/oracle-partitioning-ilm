@@ -201,7 +201,7 @@ Projects help organize multiple related migrations:
 
 ```sql
 -- Create project
-INSERT INTO migration_projects (
+INSERT INTO cmr.dwh_migration_projects (
     project_name,
     description,
     status
@@ -212,7 +212,7 @@ INSERT INTO migration_projects (
 );
 
 -- Update project status
-UPDATE migration_projects
+UPDATE cmr.dwh_migration_projects
 SET status = 'IN_PROGRESS', started_date = SYSTIMESTAMP
 WHERE project_name = 'DWH_OPTIMIZATION_2024';
 
@@ -228,7 +228,7 @@ Tasks represent individual table migrations:
 
 ```sql
 -- Framework will analyze and recommend strategy
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_table,
@@ -249,7 +249,7 @@ INSERT INTO migration_tasks (
 
 ```sql
 -- Specify exact partitioning strategy
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_table,
@@ -272,7 +272,7 @@ INSERT INTO migration_tasks (
 
 ```sql
 -- Range-Hash composite partitioning
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     task_name,
     source_table,
@@ -417,8 +417,8 @@ SELECT
     a.complexity_score,
     a.estimated_downtime_minutes,
     t.validation_status
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE t.project_id = 1;
 ```
 
@@ -430,8 +430,8 @@ SELECT
     t.task_name,
     a.blocking_issues,
     a.complexity_factors
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE t.validation_status = 'BLOCKED';
 ```
 
@@ -610,7 +610,7 @@ SELECT
     TO_CHAR(t.execution_start, 'YYYY-MM-DD HH24:MI:SS') AS started,
     ROUND((SYSTIMESTAMP - t.execution_start) * 24 * 60, 1) AS minutes_running,
     l.step_name AS current_step
-FROM migration_tasks t
+FROM cmr.dwh_migration_tasks t
 JOIN (
     SELECT task_id, step_name
     FROM (
@@ -665,7 +665,7 @@ SELECT
     task_name,
     backup_table_name,
     can_rollback
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 WHERE can_rollback = 'Y';
 ```
 
@@ -685,7 +685,7 @@ DECLARE
 BEGIN
     FOR rec IN (
         SELECT source_owner, backup_table_name
-        FROM migration_tasks
+        FROM cmr.dwh_migration_tasks
         WHERE backup_table_name IS NOT NULL
         AND status = 'COMPLETED'
         AND execution_end < SYSDATE - 30  -- Older than 30 days
@@ -694,7 +694,7 @@ BEGIN
                 rec.backup_table_name || ' PURGE';
         EXECUTE IMMEDIATE v_sql;
 
-        UPDATE migration_tasks
+        UPDATE cmr.dwh_migration_tasks
         SET can_rollback = 'N', backup_table_name = NULL
         WHERE backup_table_name = rec.backup_table_name;
     END LOOP;
@@ -707,14 +707,14 @@ END;
 
 ```sql
 -- View configuration
-SELECT * FROM ilm_config WHERE config_key LIKE 'MIGRATION%';
+SELECT * FROM cmr.dwh_ilm_config WHERE config_key LIKE 'MIGRATION%';
 
 -- Disable automatic backups
-UPDATE ilm_config SET config_value = 'N'
+UPDATE cmr.dwh_ilm_config SET config_value = 'N'
 WHERE config_key = 'MIGRATION_BACKUP_ENABLED';
 
 -- Adjust parallel degree
-UPDATE ilm_config SET config_value = '8'
+UPDATE cmr.dwh_ilm_config SET config_value = '8'
 WHERE config_key = 'MIGRATION_PARALLEL_DEGREE';
 
 COMMIT;
@@ -835,7 +835,7 @@ CREATE TABLE legacy_sales (
 );
 
 -- Create migration task
-INSERT INTO migration_tasks (
+INSERT INTO cmr.dwh_migration_tasks (
     task_name, source_table, migration_method
 ) VALUES (
     'Migrate LEGACY_SALES', 'LEGACY_SALES', 'CTAS'
@@ -851,7 +851,7 @@ SELECT
     date_format_detected,
     date_conversion_expr,
     recommended_strategy
-FROM migration_analysis
+FROM cmr.dwh_migration_analysis
 WHERE task_id = 1;
 
 -- Results:
@@ -907,7 +907,7 @@ If automatic detection fails or you want to specify conversion manually:
 
 ```sql
 -- Update migration task with explicit conversion
-UPDATE migration_tasks
+UPDATE cmr.dwh_migration_tasks
 SET partition_type = 'RANGE(sale_date)',
     partition_key = 'TO_DATE(TO_CHAR(sale_date), ''YYYYMMDD'')'
 WHERE task_id = 1;
@@ -931,8 +931,8 @@ SELECT
     a.date_column_type,
     a.date_format_detected,
     a.requires_conversion
-FROM migration_tasks t
-JOIN migration_analysis a ON a.task_id = t.task_id
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE a.requires_conversion = 'Y'
 ORDER BY t.task_id;
 ```
@@ -964,7 +964,7 @@ SELECT
     (SELECT step_name FROM migration_execution_log
      WHERE task_id = t.task_id AND status = 'FAILED'
      ORDER BY step_number DESC FETCH FIRST 1 ROW ONLY) AS failed_step
-FROM migration_tasks t
+FROM cmr.dwh_migration_tasks t
 WHERE status = 'FAILED';
 
 -- View detailed error
@@ -989,7 +989,7 @@ ORDER BY step_number;
 
 ```sql
 -- Reset task status
-UPDATE migration_tasks
+UPDATE cmr.dwh_migration_tasks
 SET status = 'READY',
     error_message = NULL,
     execution_start = NULL
@@ -1006,7 +1006,7 @@ EXEC table_migration_executor.execute_migration(1);
 
 ```sql
 -- Increase parallelism for large tables
-UPDATE migration_tasks
+UPDATE cmr.dwh_migration_tasks
 SET parallel_degree = 16
 WHERE source_table = 'LARGE_FACT_TABLE';
 ```
@@ -1015,7 +1015,7 @@ WHERE source_table = 'LARGE_FACT_TABLE';
 
 ```sql
 -- Apply compression during copy
-UPDATE migration_tasks
+UPDATE cmr.dwh_migration_tasks
 SET use_compression = 'Y',
     compression_type = 'QUERY HIGH'
 WHERE task_id = 1;
@@ -1198,8 +1198,8 @@ interval_clause: 'NUMTOYMINTERVAL(1,''MONTH'')'
 
 ```sql
 -- Grant migration privileges
-GRANT SELECT, INSERT, UPDATE ON migration_projects TO migration_admin;
-GRANT SELECT, INSERT, UPDATE ON migration_tasks TO migration_admin;
+GRANT SELECT, INSERT, UPDATE ON cmr.dwh_migration_projects TO migration_admin;
+GRANT SELECT, INSERT, UPDATE ON cmr.dwh_migration_tasks TO migration_admin;
 GRANT EXECUTE ON table_migration_analyzer TO migration_admin;
 GRANT EXECUTE ON table_migration_executor TO migration_admin;
 ```
@@ -1217,7 +1217,7 @@ SELECT
     execution_start,
     execution_end,
     status
-FROM migration_tasks
+FROM cmr.dwh_migration_tasks
 ORDER BY created_date DESC;
 ```
 

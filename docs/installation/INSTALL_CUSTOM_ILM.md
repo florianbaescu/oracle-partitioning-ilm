@@ -1,5 +1,19 @@
 # Custom ILM Framework - Installation Guide
 
+> **⚠️ DEPRECATION NOTICE**
+> This guide has been superseded by [INSTALL_GUIDE_COMPLETE.md](INSTALL_GUIDE_COMPLETE.md) which includes:
+> - Enhanced prerequisites checklist with verification scripts
+> - Framework independence support (install ILM or Migration in any order)
+> - Comprehensive verification procedures
+> - Functional testing and troubleshooting
+> - All procedure names corrected with `dwh_` prefix
+>
+> **This document is kept for reference only.** Please use INSTALL_GUIDE_COMPLETE.md for new installations.
+>
+> **Last Updated:** 2025-10-22
+
+---
+
 Quick installation guide for the custom PL/SQL-based ILM framework.
 
 ## Prerequisites
@@ -79,16 +93,16 @@ WHERE job_name LIKE 'ILM_JOB_%';
 
 ```sql
 -- Set execution window (default is 22:00 to 06:00)
-UPDATE ilm_config SET config_value = '23:00'
+UPDATE cmr.dwh_ilm_config SET config_value = '23:00'
 WHERE config_key = 'EXECUTION_WINDOW_START';
 
-UPDATE ilm_config SET config_value = '05:00'
+UPDATE cmr.dwh_ilm_config SET config_value = '05:00'
 WHERE config_key = 'EXECUTION_WINDOW_END';
 
 COMMIT;
 
 -- Review all configuration
-SELECT * FROM ilm_config ORDER BY config_key;
+SELECT * FROM cmr.dwh_ilm_config ORDER BY config_key;
 ```
 
 ### Step 5: Test Installation
@@ -111,7 +125,7 @@ INSERT INTO test_fact VALUES (1, DATE '2023-01-15', 'Test data');
 COMMIT;
 
 -- Create a test policy
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name,
     policy_type, action_type, age_days,
     compression_type, priority, enabled
@@ -123,15 +137,15 @@ INSERT INTO ilm_policies (
 COMMIT;
 
 -- Run test cycle
-EXEC run_ilm_cycle();
+EXEC dwh_run_ilm_cycle();
 
 -- Check results
-SELECT * FROM ilm_execution_log
+SELECT * FROM cmr.dwh_ilm_execution_log
 WHERE table_name = 'TEST_FACT'
 ORDER BY execution_start DESC;
 
 -- Clean up test
-DELETE FROM ilm_policies WHERE policy_name = 'TEST_COMPRESS';
+DELETE FROM cmr.dwh_ilm_policies WHERE policy_name = 'TEST_COMPRESS';
 DROP TABLE test_fact PURGE;
 COMMIT;
 ```
@@ -142,12 +156,12 @@ COMMIT;
 
 ```sql
 -- Enable auto-execution
-UPDATE ilm_config SET config_value = 'Y'
+UPDATE cmr.dwh_ilm_config SET config_value = 'Y'
 WHERE config_key = 'ENABLE_AUTO_EXECUTION';
 COMMIT;
 
 -- Ensure jobs are started
-EXEC start_ilm_jobs();
+EXEC dwh_start_ilm_jobs();
 
 -- Verify jobs are running
 SELECT * FROM v_ilm_scheduler_status;
@@ -157,7 +171,7 @@ SELECT * FROM v_ilm_scheduler_status;
 
 ```sql
 -- Example: Compress SALES_FACT partitions older than 90 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name,
     policy_type, action_type, age_days,
     compression_type, priority, enabled
@@ -170,7 +184,7 @@ COMMIT;
 
 -- Evaluate policy (without executing)
 EXEC ilm_policy_engine.evaluate_policy(
-    (SELECT policy_id FROM ilm_policies WHERE policy_name = 'COMPRESS_SALES_90D')
+    (SELECT policy_id FROM cmr.dwh_ilm_policies WHERE policy_name = 'COMPRESS_SALES_90D')
 );
 
 -- Check what would be executed
@@ -186,7 +200,7 @@ SELECT * FROM ilm_evaluation_queue WHERE eligible = 'Y';
 SELECT * FROM v_ilm_active_policies;
 
 -- Recent executions
-SELECT * FROM ilm_execution_log
+SELECT * FROM cmr.dwh_ilm_execution_log
 WHERE execution_start > SYSDATE - 7
 ORDER BY execution_start DESC;
 
@@ -221,10 +235,10 @@ FROM user_scheduler_jobs
 WHERE job_name LIKE 'ILM_JOB_%';
 
 -- Re-enable jobs
-EXEC start_ilm_jobs();
+EXEC dwh_start_ilm_jobs();
 
 -- Run job manually for testing
-EXEC run_ilm_job_now('ILM_JOB_EVALUATE');
+EXEC dwh_run_ilm_job_now('ILM_JOB_EVALUATE');
 
 -- Check job log
 SELECT * FROM v_ilm_job_history ORDER BY log_date DESC;
@@ -234,7 +248,7 @@ SELECT * FROM v_ilm_job_history ORDER BY log_date DESC;
 
 ```sql
 -- Refresh access tracking manually
-EXEC refresh_partition_access_tracking();
+EXEC dwh_refresh_partition_access_tracking();
 
 -- Check partition access data
 SELECT * FROM ilm_partition_access;
@@ -252,7 +266,7 @@ To completely remove the framework:
 
 ```sql
 -- Stop all jobs
-EXEC stop_ilm_jobs();
+EXEC dwh_stop_ilm_jobs();
 
 -- Drop scheduler components
 BEGIN
@@ -270,14 +284,15 @@ DROP PACKAGE ilm_execution_engine;
 DROP PACKAGE ilm_policy_engine;
 
 -- Drop procedures/functions
+DROP PROCEDURE dwh_refresh_partition_access_tracking;
 DROP PROCEDURE refresh_partition_access_tracking;
 DROP PROCEDURE cleanup_execution_logs;
-DROP PROCEDURE stop_ilm_jobs;
-DROP PROCEDURE start_ilm_jobs;
-DROP PROCEDURE run_ilm_job_now;
-DROP PROCEDURE run_ilm_cycle;
+DROP PROCEDURE dwh_stop_ilm_jobs;
+DROP PROCEDURE dwh_start_ilm_jobs;
+DROP PROCEDURE dwh_run_ilm_job_now;
+DROP PROCEDURE dwh_run_ilm_cycle;
 DROP FUNCTION is_execution_window_open;
-DROP FUNCTION get_ilm_config;
+DROP FUNCTION get_dwh_ilm_config;
 
 -- Drop views
 DROP VIEW v_ilm_active_policies;
@@ -288,10 +303,10 @@ DROP VIEW v_ilm_job_history;
 
 -- Drop tables (WARNING: Data loss!)
 DROP TABLE ilm_evaluation_queue PURGE;
-DROP TABLE ilm_execution_log PURGE;
+DROP TABLE cmr.dwh_ilm_execution_log PURGE;
 DROP TABLE ilm_partition_access PURGE;
-DROP TABLE ilm_policies PURGE;
-DROP TABLE ilm_config PURGE;
+DROP TABLE cmr.dwh_ilm_policies PURGE;
+DROP TABLE cmr.dwh_ilm_config PURGE;
 ```
 
 ## Next Steps
@@ -306,7 +321,7 @@ DROP TABLE ilm_config PURGE;
 For issues or questions:
 - Check the [Custom ILM Guide](docs/custom_ilm_guide.md) troubleshooting section
 - Review [Quick Reference](docs/quick_reference.md) for common commands
-- Check execution logs: `SELECT * FROM ilm_execution_log WHERE status = 'FAILED'`
+- Check execution logs: `SELECT * FROM cmr.dwh_ilm_execution_log WHERE status = 'FAILED'`
 
 ## License
 

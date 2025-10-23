@@ -37,6 +37,12 @@ This repository includes **two approaches** to Information Lifecycle Management:
 
 ## Quick Start - Custom ILM Framework
 
+**📖 Complete Installation Guide**: See [docs/installation/INSTALL_GUIDE_COMPLETE.md](docs/installation/INSTALL_GUIDE_COMPLETE.md) for step-by-step installation with prerequisites, verification, and troubleshooting.
+
+**📋 Operations Runbook**: See [docs/operations/OPERATIONS_RUNBOOK.md](docs/operations/OPERATIONS_RUNBOOK.md) for daily operations, troubleshooting, and maintenance procedures.
+
+**📝 What's New**: See [CHANGELOG.md](CHANGELOG.md) for version history, release notes, and upgrade instructions.
+
 ### 1. Install Framework
 
 ```sql
@@ -72,7 +78,7 @@ ENABLE ROW MOVEMENT;
 
 ```sql
 -- Compress partitions older than 90 days
-INSERT INTO ilm_policies (
+INSERT INTO cmr.dwh_ilm_policies (
     policy_name, table_owner, table_name,
     policy_type, action_type, age_days,
     compression_type, priority, enabled
@@ -88,28 +94,49 @@ COMMIT;
 
 ```sql
 -- Manual execution
-EXEC run_ilm_cycle();
+EXEC dwh_run_ilm_cycle();
 
 -- Or enable automatic execution
-UPDATE ilm_config SET config_value = 'Y'
+UPDATE cmr.dwh_ilm_config SET config_value = 'Y'
 WHERE config_key = 'ENABLE_AUTO_EXECUTION';
 COMMIT;
 
-EXEC start_ilm_jobs();
+EXEC dwh_start_ilm_jobs();
 ```
 
 ## Repository Structure
 
 ```
 oracle-partitioning-ilm/
-├── README.md
-├── INSTALL_CUSTOM_ILM.md                # Custom ILM installation guide
+├── README.md                            # Main entry point (you are here)
+├── CHANGELOG.md                         # Version history and release notes
 ├── docs/
+│   ├── # User Guides
 │   ├── partitioning_strategy.md         # Partitioning best practices
 │   ├── ilm_strategy.md                  # Oracle ADO ILM guide
 │   ├── custom_ilm_guide.md              # Custom PL/SQL ILM framework guide
 │   ├── table_migration_guide.md         # Table migration framework guide
-│   └── quick_reference.md               # Command cheat sheet
+│   ├── quick_reference.md               # Command cheat sheet
+│   │
+│   ├── installation/                    # Installation Documentation
+│   │   ├── INSTALL_GUIDE_COMPLETE.md    # Complete installation guide (recommended)
+│   │   └── INSTALL_CUSTOM_ILM.md        # Legacy installation guide (deprecated)
+│   │
+│   ├── operations/                      # Operations Documentation
+│   │   └── OPERATIONS_RUNBOOK.md        # Daily operations, troubleshooting, maintenance
+│   │
+│   ├── technical/                       # Technical Documentation
+│   │   ├── POLICY_VALIDATION_IMPLEMENTATION.md      # Policy validation details
+│   │   ├── PARTITION_ACCESS_TRACKING_ENHANCEMENT.md # Partition tracking enhancement
+│   │   ├── ILM_TEMPLATE_APPLICATION_ENHANCEMENT.md  # Template auto-detection
+│   │   ├── MIGRATION_WORKFLOW.md        # Migration workflow details
+│   │   ├── COLUMN_SELECTION_LOGIC.md    # Column selection algorithm
+│   │   ├── DISTINCT_DATES_EXPLAINED.md  # Date handling explanation
+│   │   └── REFACTORING_PLAN.md          # Date column detection refactoring
+│   │
+│   └── planning/                        # Project Planning
+│       └── MISSING_COMPONENTS_ANALYSIS.md           # Feature roadmap and status
+│
 ├── examples/
 │   ├── fact_table_partitioning.sql      # Fact table DDL examples
 │   ├── dimension_table_partitioning.sql # Dimension table DDL
@@ -117,6 +144,7 @@ oracle-partitioning-ilm/
 │   ├── ilm_policies.sql                 # Oracle ADO ILM examples
 │   ├── custom_ilm_examples.sql          # Custom ILM usage examples
 │   └── table_migration_examples.sql     # Migration framework examples
+│
 └── scripts/
     ├── partition_management.sql         # Partition operations
     ├── monitoring_diagnostics.sql       # Health checks and monitoring
@@ -152,6 +180,40 @@ Complete guide for the PL/SQL-based ILM framework:
 - Advanced features and customization
 - No ADO license required
 
+### Policy Design Guide (New!)
+[docs/POLICY_DESIGN_GUIDE.md](docs/POLICY_DESIGN_GUIDE.md)
+
+Methodology for designing effective ILM policies:
+- **Data Lifecycle Methodology**: Define HOT/WARM/COOL/COLD stages for your data
+- **Compression Strategy Selection**: Choose the right compression type for each stage
+- **7-Step Policy Design Process**: Structured approach from requirements to production
+- **Testing Procedures**: Validate policies before deployment
+- **Common Patterns**: Proven policy templates for different table types
+- **Performance Considerations**: Balance storage savings with query performance
+- **Pitfalls to Avoid**: Learn from common mistakes
+
+### Integration Guide (New!)
+[docs/INTEGRATION_GUIDE.md](docs/INTEGRATION_GUIDE.md)
+
+Comprehensive guide for integrating ILM with existing infrastructure:
+- **ETL Integration**: Coordinate ILM operations with data loading workflows
+  - Scheduling coordination (avoid conflicts during data loads)
+  - Partition locking detection and handling
+  - Post-ETL workflow patterns (Direct Call, Scheduler Chains, Event-Based)
+  - ETL tool integration (Informatica, Oracle Data Integrator)
+- **Application Hooks**: Custom pre/post operation callbacks
+  - Hook framework for cache invalidation, notifications, custom logic
+  - Query routing based on partition temperature (HOT/WARM/COOL/COLD)
+  - Read-only partition detection and handling
+- **Backup Coordination**: Align backups with ILM lifecycle stages
+  - RMAN integration patterns and tiered backup strategies
+  - Timing coordination to avoid backup window conflicts
+  - Block Change Tracking optimization
+  - Recovery implications for compressed partitions
+- **Monitoring Integration**: Export metrics to Prometheus, Grafana, CloudWatch
+- **Security & Compliance**: Audit logging, data retention, GDPR/SOX compliance
+- **Reference Architectures**: Small/Medium/Large data warehouse configurations
+
 ### Oracle ADO ILM Strategy
 [docs/ilm_strategy.md](docs/ilm_strategy.md)
 
@@ -174,20 +236,40 @@ Migrate non-partitioned tables to partitioned:
 - **Validation & Rollback**: Verify success and rollback if needed
 - **Complete Audit Trail**: Detailed logging of all steps
 
-Quick example:
+Quick example (automatic workflow):
 ```sql
 -- 1. Identify candidates
-SELECT * FROM v_migration_candidates;
+SELECT * FROM cmr.dwh_v_migration_candidates;
 
 -- 2. Create migration task
-INSERT INTO migration_tasks (task_name, source_table, migration_method)
+INSERT INTO cmr.dwh_migration_tasks (task_name, source_table, migration_method)
 VALUES ('Migrate SALES_FACT', 'SALES_FACT', 'CTAS');
 
--- 3. Analyze table
-EXEC table_migration_analyzer.analyze_table(1);
+-- 3. Analyze table (framework recommends partition strategy)
+EXEC pck_dwh_table_migration_analyzer.analyze_table(1);
 
--- 4. Execute migration
-EXEC table_migration_executor.execute_migration(1);
+-- 4. Apply recommendations automatically
+EXEC pck_dwh_table_migration_executor.apply_recommendations(1);
+
+-- 5. Execute migration
+EXEC pck_dwh_table_migration_executor.execute_migration(1);
+```
+
+Or use manual control:
+```sql
+-- After analysis, review recommendations
+SELECT recommendation_summary, partition_type, partition_key
+FROM cmr.dwh_migration_analysis WHERE task_id = 1;
+
+-- Manually set your preferences (overrides recommendations)
+UPDATE cmr.dwh_migration_tasks
+SET partition_type = 'RANGE',
+    partition_key = 'sale_date',
+    partition_interval = 'MONTHLY'
+WHERE task_id = 1;
+
+-- Then execute migration
+EXEC pck_dwh_table_migration_executor.execute_migration(1);
 ```
 
 ## Examples

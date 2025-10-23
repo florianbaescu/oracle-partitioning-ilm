@@ -2567,25 +2567,83 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_policies_skipped NUMBER := 0;
         v_policy_id NUMBER;
         v_error_msg VARCHAR2(4000);
+        v_detected_template VARCHAR2(100);
+        v_auto_detected BOOLEAN := FALSE;
     BEGIN
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
+        -- Auto-detect template if not specified
         IF v_task.ilm_policy_template IS NULL THEN
-            DBMS_OUTPUT.PUT_LINE('No ILM policy template specified - skipping');
-            RETURN;
+            DBMS_OUTPUT.PUT_LINE('No ILM policy template specified - attempting auto-detection...');
+
+            -- Auto-detect based on table naming patterns
+            v_detected_template := CASE
+                -- SCD2 patterns
+                WHEN REGEXP_LIKE(v_task.source_table, '_SCD2$|_HIST$|_HISTORICAL$', 'i') THEN
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM all_tab_columns
+                            WHERE owner = v_task.source_owner
+                            AND table_name = v_task.source_table
+                            AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM')
+                        ) THEN 'SCD2_EFFECTIVE_DATE'
+                        WHEN EXISTS (
+                            SELECT 1 FROM all_tab_columns
+                            WHERE owner = v_task.source_owner
+                            AND table_name = v_task.source_table
+                            AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO')
+                        ) THEN 'SCD2_VALID_FROM_TO'
+                        ELSE 'HIST_TABLE'
+                    END
+                -- Events patterns
+                WHEN REGEXP_LIKE(v_task.source_table, '_EVENTS$|_EVENT$|_LOG$|_AUDIT$', 'i') THEN
+                    'EVENTS_SHORT_RETENTION'
+                -- Staging patterns
+                WHEN REGEXP_LIKE(v_task.source_table, '^STG_|_STG$|_STAGING$|^STAGING_', 'i') THEN
+                    CASE
+                        WHEN REGEXP_LIKE(v_task.source_table, 'CDC|CHANGE', 'i') THEN 'STAGING_CDC'
+                        WHEN REGEXP_LIKE(v_task.source_table, 'ERROR|ERR', 'i') THEN 'STAGING_ERROR_QUARANTINE'
+                        ELSE 'STAGING_7DAY'
+                    END
+                -- HIST pattern
+                WHEN REGEXP_LIKE(v_task.source_table, '^HIST_|_HIST_', 'i') THEN
+                    'HIST_TABLE'
+                ELSE NULL
+            END;
+
+            IF v_detected_template IS NOT NULL THEN
+                DBMS_OUTPUT.PUT_LINE('  ✓ Auto-detected template: ' || v_detected_template);
+                DBMS_OUTPUT.PUT_LINE('    Based on table naming pattern and column analysis');
+                v_auto_detected := TRUE;
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  ✗ Could not auto-detect template');
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('Available templates:');
+                FOR tmpl IN (SELECT template_name, description FROM cmr.dwh_migration_ilm_templates ORDER BY template_name) LOOP
+                    DBMS_OUTPUT.PUT_LINE('  - ' || tmpl.template_name || ': ' || tmpl.description);
+                END LOOP;
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('To apply ILM policies, update task with template:');
+                DBMS_OUTPUT.PUT_LINE('  UPDATE cmr.dwh_migration_tasks');
+                DBMS_OUTPUT.PUT_LINE('  SET ilm_policy_template = ''<template_name>''');
+                DBMS_OUTPUT.PUT_LINE('  WHERE task_id = ' || p_task_id || ';');
+                RETURN;
+            END IF;
+        ELSE
+            v_detected_template := v_task.ilm_policy_template;
         END IF;
 
         SELECT * INTO v_template
         FROM cmr.dwh_migration_ilm_templates
-        WHERE template_name = v_task.ilm_policy_template;
+        WHERE template_name = v_detected_template;
 
         DBMS_OUTPUT.PUT_LINE('');
         DBMS_OUTPUT.PUT_LINE('========================================');
         DBMS_OUTPUT.PUT_LINE('Applying ILM Policies');
         DBMS_OUTPUT.PUT_LINE('========================================');
-        DBMS_OUTPUT.PUT_LINE('Template: ' || v_template.template_name);
+        DBMS_OUTPUT.PUT_LINE('Template: ' || v_template.template_name || CASE WHEN v_auto_detected THEN ' (auto-detected)' ELSE '' END);
         DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
         DBMS_OUTPUT.PUT_LINE('');
 

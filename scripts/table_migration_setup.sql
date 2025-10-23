@@ -648,6 +648,37 @@ COMMENT ON VIEW cmr.dwh_v_date_column_analysis IS 'Comprehensive date column ana
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
+-- Create configuration table if it doesn't exist (for standalone migration installation)
+-- -----------------------------------------------------------------------------
+
+DECLARE
+    v_table_exists NUMBER;
+BEGIN
+    -- Check if config table exists
+    SELECT COUNT(*) INTO v_table_exists
+    FROM all_tables
+    WHERE owner = 'CMR'
+    AND table_name = 'DWH_ILM_CONFIG';
+
+    -- Create table if it doesn't exist
+    IF v_table_exists = 0 THEN
+        EXECUTE IMMEDIATE '
+            CREATE TABLE cmr.dwh_ilm_config (
+                config_key          VARCHAR2(100) PRIMARY KEY,
+                config_value        VARCHAR2(4000),
+                description         VARCHAR2(500),
+                modified_by         VARCHAR2(50),
+                modified_date       TIMESTAMP DEFAULT SYSTIMESTAMP
+            )';
+
+        DBMS_OUTPUT.PUT_LINE('Created cmr.dwh_ilm_config table for standalone migration framework');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Config table cmr.dwh_ilm_config already exists (ILM framework installed)');
+    END IF;
+END;
+/
+
+-- -----------------------------------------------------------------------------
 -- Add migration configuration to ILM config (using MERGE for rerunnable script)
 -- NOTE: These configurations are also defined in custom_ilm_setup.sql
 --       This section ensures they exist even if custom_ilm_setup.sql is not run
