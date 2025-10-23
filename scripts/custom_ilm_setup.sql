@@ -589,7 +589,7 @@ SELECT
     MAX(execution_end) AS last_execution
 FROM cmr.dwh_ilm_execution_log
 GROUP BY table_owner, table_name, policy_name, action_type
-ORDER BY total_space_saved_mb DESC NULLS LAST;
+ORDER BY SUM(space_saved_mb) DESC NULLS LAST;
 
 
 -- -----------------------------------------------------------------------------
@@ -645,7 +645,7 @@ LEFT JOIN cmr.dwh_ilm_evaluation_queue q
 LEFT JOIN cmr.dwh_ilm_execution_log e
     ON e.policy_id = p.policy_id
 GROUP BY p.table_owner, p.table_name
-ORDER BY pending_actions DESC, total_space_saved_mb DESC;
+ORDER BY COUNT(DISTINCT q.queue_id) DESC, SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) DESC;
 
 COMMENT ON VIEW cmr.dwh_v_ilm_policy_summary IS 'Summary of ILM policies per table for dashboard';
 
@@ -720,7 +720,7 @@ SELECT
 FROM cmr.dwh_ilm_execution_log e
 WHERE e.status IN ('SUCCESS', 'FAILED')
 GROUP BY e.table_owner, e.table_name, e.policy_name, e.action_type, TRUNC(e.execution_end)
-ORDER BY execution_date DESC, total_space_saved_mb DESC;
+ORDER BY TRUNC(e.execution_end) DESC, SUM(e.space_saved_mb) DESC;
 
 COMMENT ON VIEW cmr.dwh_v_ilm_space_savings IS 'Historical space savings achieved by ILM policies';
 
@@ -1042,7 +1042,9 @@ LEFT JOIN cmr.dwh_ilm_execution_log e ON e.policy_id = p.policy_id
 GROUP BY
     p.policy_id, p.policy_name, p.table_owner, p.table_name, p.policy_type,
     p.action_type, p.priority, p.enabled, p.created_date
-ORDER BY total_space_saved_gb DESC NULLS LAST, success_rate_pct DESC NULLS LAST;
+ORDER BY
+    ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024, 2) DESC NULLS LAST,
+    CASE WHEN COUNT(e.execution_id) > 0 THEN ROUND((SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) / COUNT(e.execution_id)) * 100, 2) ELSE NULL END DESC NULLS LAST;
 
 COMMENT ON VIEW cmr.dwh_v_ilm_policy_effectiveness IS 'Policy effectiveness metrics including ROI and success rates';
 
@@ -1093,7 +1095,7 @@ GROUP BY
     TO_CHAR(e.execution_end, 'YYYY-MM'),
     TO_CHAR(e.execution_end, 'YYYY-IW'),
     TRUNC(e.execution_end)
-ORDER BY execution_date DESC;
+ORDER BY TRUNC(e.execution_end) DESC;
 
 COMMENT ON VIEW cmr.dwh_v_ilm_resource_trends IS 'Historical resource utilization trends for capacity planning';
 
@@ -1157,7 +1159,7 @@ GROUP BY
         WHEN e.error_message LIKE '%lock%' THEN 'Lock Related Error'
         ELSE 'Other Error'
     END
-ORDER BY failure_count DESC, last_failure DESC;
+ORDER BY COUNT(*) DESC, MAX(e.execution_start) DESC;
 
 COMMENT ON VIEW cmr.dwh_v_ilm_failure_analysis IS 'Categorized failure analysis with recommended actions';
 
