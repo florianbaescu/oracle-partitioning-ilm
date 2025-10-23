@@ -607,12 +607,13 @@ SELECT
     a.last_write_time,
     a.days_since_write,
     a.temperature,
+    -- Generic recommendations using configurable global thresholds from dwh_ilm_config
+    -- Note: Actual policies use age_days/age_months from dwh_ilm_policies table per policy
     CASE
-        WHEN a.days_since_write < 90 THEN 'No action needed'
-        WHEN a.days_since_write BETWEEN 90 AND 365 THEN 'Compression candidate'
-        WHEN a.days_since_write BETWEEN 365 AND 1095 THEN 'Archival candidate'
-        WHEN a.days_since_write > 1095 THEN 'Purge candidate'
-        ELSE 'Unknown'
+        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') THEN 'No action needed'
+        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') THEN 'Compression candidate'
+        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') THEN 'Archival candidate'
+        ELSE 'Purge candidate'
     END AS recommendation
 FROM cmr.dwh_ilm_partition_access a
 ORDER BY a.days_since_write DESC;
@@ -793,21 +794,20 @@ SELECT
     a.temperature,
     a.last_write_time,
     a.last_read_time,
-    -- Determine current lifecycle stage
+    -- Determine current lifecycle stage using configurable thresholds
     CASE
-        WHEN NVL(a.days_since_write, 0) < 90 THEN 'HOT - Active'
-        WHEN NVL(a.days_since_write, 0) BETWEEN 90 AND 365 THEN 'WARM - Aging'
-        WHEN NVL(a.days_since_write, 0) BETWEEN 365 AND 1095 THEN 'COLD - Archive'
-        WHEN NVL(a.days_since_write, 0) > 1095 THEN 'FROZEN - Purge Candidate'
-        ELSE 'UNKNOWN'
+        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') THEN 'HOT - Active'
+        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') THEN 'WARM - Aging'
+        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') THEN 'COLD - Archive'
+        ELSE 'FROZEN - Purge Candidate'
     END AS lifecycle_stage,
-    -- Next recommended action
+    -- Next recommended action using configurable thresholds
     CASE
         WHEN tp.read_only = 'YES' THEN 'Already Read-Only'
         WHEN tp.compression LIKE '%ARCHIVE%' THEN 'Already Archived'
-        WHEN NVL(a.days_since_write, 0) > 1095 AND tp.read_only = 'NO' THEN 'Make Read-Only / Drop'
-        WHEN NVL(a.days_since_write, 0) BETWEEN 365 AND 1095 AND tp.compression NOT LIKE '%ARCHIVE%' THEN 'Archive Compression'
-        WHEN NVL(a.days_since_write, 0) BETWEEN 90 AND 365 AND tp.compression IS NULL THEN 'Query Compression'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') AND tp.read_only = 'NO' THEN 'Make Read-Only / Drop'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') AND tp.compression NOT LIKE '%ARCHIVE%' THEN 'Archive Compression'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') AND tp.compression IS NULL THEN 'Query Compression'
         ELSE 'No action needed'
     END AS recommended_action,
     -- Check if there's a pending ILM action
