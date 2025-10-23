@@ -128,8 +128,7 @@ EXCEPTION
 END dwh_validate_ilm_policy;
 /
 
-COMMENT ON PROCEDURE cmr.dwh_validate_ilm_policy IS
-    'Validates an existing ILM policy by testing evaluation and checking configuration';
+-- Note: Procedure validates an existing ILM policy by testing evaluation and checking configuration
 
 SHOW ERRORS
 

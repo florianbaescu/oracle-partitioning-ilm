@@ -520,8 +520,7 @@ EXCEPTION
 END;
 /
 
-COMMENT ON TRIGGER cmr.trg_validate_dwh_ilm_policy IS
-    'Validates ILM policy configuration before insert/update';
+-- Note: Trigger validates ILM policy configuration before insert/update
 
 
 -- -----------------------------------------------------------------------------
@@ -1628,8 +1627,7 @@ EXCEPTION
 END;
 /
 
-COMMENT ON PROCEDURE cmr.dwh_sync_heatmap_to_tracking IS
-    'Syncs real partition access data from Oracle Heat Map (Enterprise Edition required)';
+-- Note: Procedure syncs real partition access data from Oracle Heat Map (Enterprise Edition required)
 
 
 -- -----------------------------------------------------------------------------
