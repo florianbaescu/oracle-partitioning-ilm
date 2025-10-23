@@ -134,6 +134,11 @@ BEGIN
     @unit_tests_policy_evaluation.sql
     DBMS_OUTPUT.PUT_LINE('');
 
+    -- Run Unit Tests - Threshold Profiles
+    DBMS_OUTPUT.PUT_LINE('--- UNIT TESTS: Threshold Profiles ---');
+    @unit_tests_threshold_profiles.sql
+    DBMS_OUTPUT.PUT_LINE('');
+
     -- Run Integration Tests
     DBMS_OUTPUT.PUT_LINE('--- INTEGRATION TESTS ---');
     @integration_tests_ilm_workflow.sql
