@@ -36,7 +36,7 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
-    -- Drop parent tables (except dwh_ilm_config which is preserved)
+    -- Drop parent tables (except dwh_ilm_config and dwh_ilm_threshold_profiles which are preserved)
     BEGIN
         EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_policies CASCADE CONSTRAINTS PURGE';
         DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_policies');
@@ -45,15 +45,7 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
-    BEGIN
-        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_threshold_profiles CASCADE CONSTRAINTS PURGE';
-        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_threshold_profiles');
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLCODE != -942 THEN RAISE; END IF;
-    END;
-
-    DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully (dwh_ilm_config preserved)');
+    DBMS_OUTPUT.PUT_LINE('Cleanup completed successfully (dwh_ilm_config and dwh_ilm_threshold_profiles preserved)');
 END;
 /
 
@@ -386,32 +378,56 @@ COMMENT ON TABLE cmr.dwh_ilm_config IS 'Configuration parameters for custom ILM 
 -- -----------------------------------------------------------------------------
 -- Reusable threshold profiles for temperature-based ILM classification
 -- Policies can reference a profile or fall back to global config
+-- Create table only if it doesn't exist (preserves custom profiles on rerun)
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_ilm_threshold_profiles (
-    profile_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    profile_name        VARCHAR2(100) NOT NULL UNIQUE,
-    description         VARCHAR2(500),
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_ilm_threshold_profiles (
+            profile_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            profile_name        VARCHAR2(100) NOT NULL UNIQUE,
+            description         VARCHAR2(500),
 
-    -- Temperature thresholds in days
-    hot_threshold_days  NUMBER NOT NULL,
-    warm_threshold_days NUMBER NOT NULL,
-    cold_threshold_days NUMBER NOT NULL,
+            -- Temperature thresholds in days
+            hot_threshold_days  NUMBER NOT NULL,
+            warm_threshold_days NUMBER NOT NULL,
+            cold_threshold_days NUMBER NOT NULL,
 
-    -- Audit fields
-    created_by          VARCHAR2(50) DEFAULT USER,
-    created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
-    modified_by         VARCHAR2(50),
-    modified_date       TIMESTAMP,
+            -- Audit fields
+            created_by          VARCHAR2(50) DEFAULT USER,
+            created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
+            modified_by         VARCHAR2(50),
+            modified_date       TIMESTAMP,
 
-    -- Validation: ensure thresholds are in ascending order
-    CONSTRAINT chk_profile_thresholds CHECK (
-        hot_threshold_days < warm_threshold_days
-        AND warm_threshold_days < cold_threshold_days
-    )
-);
+            -- Validation: ensure thresholds are in ascending order
+            CONSTRAINT chk_profile_thresholds CHECK (
+                hot_threshold_days < warm_threshold_days
+                AND warm_threshold_days < cold_threshold_days
+            )
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_ilm_threshold_profiles');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_ilm_threshold_profiles already exists - preserving existing data');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
 
-CREATE INDEX idx_ilm_profiles_name ON cmr.dwh_ilm_threshold_profiles(profile_name);
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_ilm_profiles_name ON cmr.dwh_ilm_threshold_profiles(profile_name)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_ilm_profiles_name');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_ilm_profiles_name already exists');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_ilm_threshold_profiles IS
     'Reusable threshold profiles for ILM temperature-based classification';
@@ -468,15 +484,51 @@ WHEN NOT MATCHED THEN
 COMMIT;
 
 -- Add foreign key to threshold profiles in dwh_ilm_policies table
-ALTER TABLE cmr.dwh_ilm_policies
-ADD (
-    threshold_profile_id NUMBER,
-    CONSTRAINT fk_ilm_policy_profile
-        FOREIGN KEY (threshold_profile_id)
-        REFERENCES cmr.dwh_ilm_threshold_profiles(profile_id)
-);
+DECLARE
+    v_count NUMBER;
+BEGIN
+    -- Check if column already exists
+    SELECT COUNT(*) INTO v_count
+    FROM user_tab_columns
+    WHERE table_name = 'DWH_ILM_POLICIES'
+    AND column_name = 'THRESHOLD_PROFILE_ID';
 
-CREATE INDEX idx_ilm_policies_profile ON cmr.dwh_ilm_policies(threshold_profile_id);
+    IF v_count = 0 THEN
+        EXECUTE IMMEDIATE '
+            ALTER TABLE cmr.dwh_ilm_policies
+            ADD (
+                threshold_profile_id NUMBER,
+                CONSTRAINT fk_ilm_policy_profile
+                    FOREIGN KEY (threshold_profile_id)
+                    REFERENCES cmr.dwh_ilm_threshold_profiles(profile_id)
+            )';
+        DBMS_OUTPUT.PUT_LINE('Added column threshold_profile_id to dwh_ilm_policies');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Column threshold_profile_id already exists in dwh_ilm_policies');
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        -- If FK constraint already exists, catch that error too
+        IF SQLCODE = -2275 THEN
+            DBMS_OUTPUT.PUT_LINE('Foreign key constraint fk_ilm_policy_profile already exists');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_ilm_policies_profile ON cmr.dwh_ilm_policies(threshold_profile_id)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_ilm_policies_profile');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_ilm_policies_profile already exists');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
 
 
 -- =============================================================================
