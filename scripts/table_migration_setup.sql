@@ -603,8 +603,8 @@ LEFT JOIN (
     FROM dba_segments
     GROUP BY owner, segment_name
 ) s ON s.owner = t.owner AND s.segment_name = t.table_name
-LEFT JOIN all_indexes i ON i.table_owner = t.owner AND i.table_name = t.table_name
-LEFT JOIN all_constraints c ON c.owner = t.owner AND c.table_name = t.table_name
+LEFT JOIN dba_indexes i ON i.table_owner = t.owner AND i.table_name = t.table_name
+LEFT JOIN dba_constraints c ON c.owner = t.owner AND c.table_name = t.table_name
 WHERE t.owner = USER
 AND t.partitioned = 'NO'
 AND t.temporary = 'N'
@@ -656,7 +656,7 @@ DECLARE
 BEGIN
     -- Check if config table exists
     SELECT COUNT(*) INTO v_table_exists
-    FROM all_tables
+    FROM dba_tables
     WHERE owner = 'CMR'
     AND table_name = 'DWH_ILM_CONFIG';
 

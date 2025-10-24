@@ -2234,7 +2234,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             BEGIN
                 SELECT cc.column_name INTO v_best_column
                 FROM dba_constraints c
-                JOIN all_cons_columns cc
+                JOIN dba_cons_columns cc
                     ON cc.owner = c.owner
                     AND cc.constraint_name = c.constraint_name
                 WHERE c.owner = p_owner

@@ -48,7 +48,7 @@ BEGIN
     BEGIN
         SELECT COUNT(*)
         INTO v_table_exists
-        FROM all_tables
+        FROM dba_tables
         WHERE owner = v_table_owner
         AND table_name = v_table_name;
 

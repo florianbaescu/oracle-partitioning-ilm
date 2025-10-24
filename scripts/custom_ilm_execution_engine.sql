@@ -153,7 +153,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         FOR idx IN (
             SELECT ip.index_owner, ip.index_name, ip.partition_name
             FROM dba_ind_partitions ip
-            JOIN all_indexes i
+            JOIN dba_indexes i
                 ON i.owner = ip.index_owner
                 AND i.index_name = ip.index_name
             WHERE i.table_owner = p_table_owner
