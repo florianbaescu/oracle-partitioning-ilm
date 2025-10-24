@@ -1614,20 +1614,6 @@ END;
 
 
 -- -----------------------------------------------------------------------------
--- Wrapper procedure for policy engine compatibility
--- -----------------------------------------------------------------------------
-
-CREATE OR REPLACE PROCEDURE refresh_partition_access_tracking(
-    p_table_owner VARCHAR2 DEFAULT USER,
-    p_table_name VARCHAR2 DEFAULT NULL
-) AS
-BEGIN
-    dwh_refresh_partition_access_tracking(p_table_owner, p_table_name);
-END;
-/
-
-
--- -----------------------------------------------------------------------------
 -- Initialize partition access tracking for newly migrated table
 -- -----------------------------------------------------------------------------
 
