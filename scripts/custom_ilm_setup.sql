@@ -1374,9 +1374,9 @@ SELECT
     END AS recommendation
 FROM dba_tables t
 LEFT JOIN (
-    SELECT table_owner, table_name, COUNT(*) AS partition_count, partitioning_type
+    SELECT owner AS table_owner, table_name, COUNT(*) AS partition_count, partitioning_type
     FROM dba_part_tables
-    GROUP BY table_owner, table_name, partitioning_type
+    GROUP BY owner, table_name, partitioning_type
 ) tp ON tp.table_owner = t.owner AND tp.table_name = t.table_name
 LEFT JOIN (
     SELECT owner, segment_name, SUM(bytes/1024/1024) AS total_size_mb
