@@ -395,15 +395,19 @@ BEGIN
     -- Convert CLOB to VARCHAR2 (truncate if necessary)
     v_message_text := SUBSTR(p_message, 1, 32767);
 
-    -- Send email using UTL_MAIL
+    -- Send email using UTL_MAIL (using dynamic SQL for compatibility)
     BEGIN
-        UTL_MAIL.SEND(
-            sender => v_sender,
-            recipients => v_recipients,
-            subject => v_final_subject,
-            message => v_message_text,
-            mime_type => 'text/plain; charset=utf-8'
-        );
+        EXECUTE IMMEDIATE '
+            BEGIN
+                UTL_MAIL.SEND(
+                    sender => :1,
+                    recipients => :2,
+                    subject => :3,
+                    message => :4,
+                    mime_type => ''text/plain; charset=utf-8''
+                );
+            END;'
+        USING v_sender, v_recipients, v_final_subject, v_message_text;
 
         DBMS_OUTPUT.PUT_LINE('Alert email sent successfully');
         DBMS_OUTPUT.PUT_LINE('  To: ' || v_recipients);
@@ -414,10 +418,12 @@ BEGIN
             DBMS_OUTPUT.PUT_LINE('ERROR sending email: ' || SQLERRM);
             -- Log to execution log as well
             INSERT INTO cmr.dwh_ilm_execution_log (
-                policy_id, policy_name, action_type,
+                policy_id, policy_name, table_owner, table_name, partition_name,
+                action_type, execution_start, execution_end,
                 status, error_message
             ) VALUES (
-                -1, 'EMAIL_NOTIFICATION', 'NOTIFY',
+                -1, 'EMAIL_NOTIFICATION', 'SYSTEM', 'N/A', 'N/A',
+                'NOTIFY', SYSTIMESTAMP, SYSTIMESTAMP,
                 'FAILED', 'Failed to send email: ' || SQLERRM
             );
             COMMIT;
@@ -551,12 +557,13 @@ BEGIN
 
         -- Log that alert was sent
         INSERT INTO cmr.dwh_ilm_execution_log (
-            policy_id, policy_name, action_type,
-            execution_start, status, error_message
+            policy_id, policy_name, table_owner, table_name, partition_name,
+            action_type, execution_start, execution_end,
+            status, error_message
         ) VALUES (
-            -1, 'FAILURE_ALERT', 'NOTIFY',
-            SYSTIMESTAMP, 'SUCCESS',
-            'Sent alert for ' || v_failure_count || ' failures'
+            -1, 'FAILURE_ALERT', 'SYSTEM', 'N/A', 'N/A',
+            'NOTIFY', SYSTIMESTAMP, SYSTIMESTAMP,
+            'SUCCESS', 'Sent alert for ' || v_failure_count || ' failures'
         );
         COMMIT;
 
