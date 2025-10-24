@@ -423,6 +423,8 @@ EXCEPTION
     WHEN OTHERS THEN
         IF SQLCODE = -955 THEN
             DBMS_OUTPUT.PUT_LINE('Index idx_ilm_profiles_name already exists');
+        ELSIF SQLCODE = -1408 THEN
+            DBMS_OUTPUT.PUT_LINE('Column profile_name already indexed (by UNIQUE constraint)');
         ELSE
             RAISE;
         END IF;
@@ -524,6 +526,8 @@ EXCEPTION
     WHEN OTHERS THEN
         IF SQLCODE = -955 THEN
             DBMS_OUTPUT.PUT_LINE('Index idx_ilm_policies_profile already exists');
+        ELSIF SQLCODE = -1408 THEN
+            DBMS_OUTPUT.PUT_LINE('Column threshold_profile_id already indexed');
         ELSE
             RAISE;
         END IF;
