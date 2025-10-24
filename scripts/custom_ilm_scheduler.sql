@@ -13,7 +13,7 @@
 
 BEGIN
     DBMS_SCHEDULER.CREATE_PROGRAM(
-        program_name => 'ILM_REFRESH_ACCESS_TRACKING',
+        program_name => 'DWH_ILM_REFRESH_ACCESS_TRACKING',
         program_type => 'PLSQL_BLOCK',
         program_action => '
             BEGIN
@@ -32,7 +32,7 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_PROGRAM(
-        program_name => 'ILM_EVALUATE_POLICIES',
+        program_name => 'DWH_ILM_EVALUATE_POLICIES',
         program_type => 'PLSQL_BLOCK',
         program_action => '
             BEGIN
@@ -51,7 +51,7 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_PROGRAM(
-        program_name => 'ILM_EXECUTE_ACTIONS',
+        program_name => 'DWH_ILM_EXECUTE_ACTIONS',
         program_type => 'PLSQL_BLOCK',
         program_action => '
             DECLARE
@@ -81,7 +81,7 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_PROGRAM(
-        program_name => 'ILM_CLEANUP_LOGS',
+        program_name => 'DWH_ILM_CLEANUP_LOGS',
         program_type => 'PLSQL_BLOCK',
         program_action => '
             BEGIN
@@ -104,8 +104,8 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
-        job_name => 'ILM_JOB_REFRESH_ACCESS',
-        program_name => 'ILM_REFRESH_ACCESS_TRACKING',
+        job_name => 'DWH_ILM_JOB_REFRESH_ACCESS',
+        program_name => 'DWH_ILM_REFRESH_ACCESS_TRACKING',
         start_date => SYSTIMESTAMP,
         repeat_interval => 'FREQ=DAILY; BYHOUR=1; BYMINUTE=0',
         enabled => TRUE,
@@ -121,8 +121,8 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
-        job_name => 'ILM_JOB_EVALUATE',
-        program_name => 'ILM_EVALUATE_POLICIES',
+        job_name => 'DWH_ILM_JOB_EVALUATE',
+        program_name => 'DWH_ILM_EVALUATE_POLICIES',
         start_date => SYSTIMESTAMP,
         repeat_interval => 'FREQ=DAILY; BYHOUR=2; BYMINUTE=0',
         enabled => TRUE,
@@ -138,8 +138,8 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
-        job_name => 'ILM_JOB_EXECUTE',
-        program_name => 'ILM_EXECUTE_ACTIONS',
+        job_name => 'DWH_ILM_JOB_EXECUTE',
+        program_name => 'DWH_ILM_EXECUTE_ACTIONS',
         start_date => SYSTIMESTAMP,
         repeat_interval => 'FREQ=HOURLY; INTERVAL=2',
         enabled => TRUE,
@@ -155,8 +155,8 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
-        job_name => 'ILM_JOB_CLEANUP',
-        program_name => 'ILM_CLEANUP_LOGS',
+        job_name => 'DWH_ILM_JOB_CLEANUP',
+        program_name => 'DWH_ILM_CLEANUP_LOGS',
         start_date => SYSTIMESTAMP,
         repeat_interval => 'FREQ=WEEKLY; BYDAY=SUN; BYHOUR=3; BYMINUTE=0',
         enabled => TRUE,
@@ -190,7 +190,7 @@ SELECT
         ELSE 0
     END AS failure_rate_pct
 FROM user_scheduler_jobs
-WHERE job_name LIKE 'ILM_JOB_%'
+WHERE job_name LIKE 'DWH_ILM_JOB_%'
 ORDER BY job_name;
 
 
@@ -210,7 +210,7 @@ SELECT
     error#,
     SUBSTR(additional_info, 1, 200) AS additional_info
 FROM user_scheduler_job_run_details
-WHERE job_name LIKE 'ILM_JOB_%'
+WHERE job_name LIKE 'DWH_ILM_JOB_%'
 ORDER BY log_date DESC;
 
 
@@ -227,7 +227,7 @@ BEGIN
     FOR job IN (
         SELECT job_name
         FROM user_scheduler_jobs
-        WHERE job_name LIKE 'ILM_JOB_%'
+        WHERE job_name LIKE 'DWH_ILM_JOB_%'
         AND enabled = 'TRUE'
     ) LOOP
         DBMS_SCHEDULER.DISABLE(name => job.job_name);
@@ -248,7 +248,7 @@ BEGIN
     FOR job IN (
         SELECT job_name
         FROM user_scheduler_jobs
-        WHERE job_name LIKE 'ILM_JOB_%'
+        WHERE job_name LIKE 'DWH_ILM_JOB_%'
         AND enabled = 'FALSE'
     ) LOOP
         DBMS_SCHEDULER.ENABLE(name => job.job_name);
@@ -274,7 +274,7 @@ BEGIN
     );
 
     DBMS_OUTPUT.PUT_LINE('Job started: ' || p_job_name);
-    DBMS_OUTPUT.PUT_LINE('Check v_ilm_job_history for status');
+    DBMS_OUTPUT.PUT_LINE('Check v_dwh_ilm_job_history for status');
 END;
 /
 
@@ -543,8 +543,8 @@ BEGIN
             'Recommended Actions:' || CHR(10) ||
             '-------------------' || CHR(10) ||
             '1. Review execution logs: SELECT * FROM cmr.dwh_ilm_execution_log WHERE status = ''FAILED''' || CHR(10) ||
-            '2. Check job history: SELECT * FROM v_ilm_job_history WHERE status != ''SUCCEEDED''' || CHR(10) ||
-            '3. Verify scheduler jobs: SELECT * FROM v_ilm_scheduler_status' || CHR(10) ||
+            '2. Check job history: SELECT * FROM v_dwh_ilm_job_history WHERE status != ''SUCCEEDED''' || CHR(10) ||
+            '3. Verify scheduler jobs: SELECT * FROM v_dwh_ilm_scheduler_status' || CHR(10) ||
             '4. Review operations runbook: docs/operations/OPERATIONS_RUNBOOK.md' || CHR(10)
         );
 
@@ -621,8 +621,8 @@ BEGIN
         SUBSTR(p_error_message, 1, 1000) || CHR(10) || CHR(10) ||
         'Recommended Actions:' || CHR(10) ||
         '-------------------' || CHR(10) ||
-        '1. Check job history: SELECT * FROM v_ilm_job_history WHERE job_name = ''' || p_job_name || '''' || CHR(10) ||
-        '2. Review scheduler status: SELECT * FROM v_ilm_scheduler_status' || CHR(10) ||
+        '1. Check job history: SELECT * FROM v_dwh_ilm_job_history WHERE job_name = ''' || p_job_name || '''' || CHR(10) ||
+        '2. Review scheduler status: SELECT * FROM v_dwh_ilm_scheduler_status' || CHR(10) ||
         '3. Check execution logs: SELECT * FROM cmr.dwh_ilm_execution_log WHERE status = ''FAILED''' || CHR(10) ||
         '4. If persistent, disable job: EXEC DBMS_SCHEDULER.DISABLE(''' || p_job_name || ''')' || CHR(10)
     );
@@ -653,7 +653,7 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_PROGRAM(
-        program_name => 'ILM_CHECK_FAILURES',
+        program_name => 'DWH_ILM_CHECK_FAILURES',
         program_type => 'PLSQL_BLOCK',
         program_action => '
             BEGIN
@@ -672,8 +672,8 @@ END;
 
 BEGIN
     DBMS_SCHEDULER.CREATE_JOB(
-        job_name => 'ILM_JOB_MONITOR_FAILURES',
-        program_name => 'ILM_CHECK_FAILURES',
+        job_name => 'DWH_ILM_JOB_MONITOR_FAILURES',
+        program_name => 'DWH_ILM_CHECK_FAILURES',
         start_date => SYSTIMESTAMP,
         repeat_interval => 'FREQ=HOURLY; INTERVAL=4',
         enabled => FALSE, -- Disabled by default, enable after email config
@@ -700,7 +700,7 @@ SELECT
     next_run_date,
     repeat_interval
 FROM user_scheduler_jobs
-WHERE job_name LIKE 'ILM_JOB_%'
+WHERE job_name LIKE 'DWH_ILM_JOB_%'
 ORDER BY job_name;
 
 PROMPT
@@ -712,7 +712,7 @@ PROMPT -- Run ILM cycle manually:
 PROMPT EXEC dwh_run_ilm_cycle();
 PROMPT
 PROMPT -- Run specific job now:
-PROMPT EXEC dwh_run_ilm_job_now('ILM_JOB_EVALUATE');
+PROMPT EXEC dwh_run_ilm_job_now('DWH_ILM_JOB_EVALUATE');
 PROMPT
 PROMPT -- Stop all ILM jobs:
 PROMPT EXEC dwh_stop_ilm_jobs();
@@ -721,9 +721,9 @@ PROMPT -- Start all ILM jobs:
 PROMPT EXEC dwh_start_ilm_jobs();
 PROMPT
 PROMPT -- Check job status:
-PROMPT SELECT * FROM v_ilm_scheduler_status;
+PROMPT SELECT * FROM v_dwh_ilm_scheduler_status;
 PROMPT
 PROMPT -- Check job history:
-PROMPT SELECT * FROM v_ilm_job_history;
+PROMPT SELECT * FROM v_dwh_ilm_job_history;
 PROMPT
 PROMPT ========================================
