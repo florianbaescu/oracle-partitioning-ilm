@@ -1459,32 +1459,7 @@ CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
     v_warm_count NUMBER := 0;
     v_cold_count NUMBER := 0;
 
-    -- Function to extract date from partition high_value
-    FUNCTION get_partition_date(
-        p_owner VARCHAR2,
-        p_table VARCHAR2,
-        p_partition VARCHAR2
-    ) RETURN DATE
-    IS
-        v_high_value LONG;
-        v_date DATE;
-    BEGIN
-        SELECT high_value INTO v_high_value
-        FROM dba_tab_partitions
-        WHERE table_owner = p_owner
-        AND table_name = p_table
-        AND partition_name = p_partition;
-
-        -- Try to evaluate high_value as date
-        BEGIN
-            EXECUTE IMMEDIATE 'SELECT ' || v_high_value || ' FROM DUAL'
-            INTO v_date;
-            RETURN v_date;
-        EXCEPTION
-            WHEN OTHERS THEN
-                RETURN NULL;
-        END;
-    END;
+    -- Note: get_partition_date is now a standalone function (see SECTION 4)
 
 BEGIN
     -- Get thresholds from DEFAULT profile
@@ -1915,6 +1890,46 @@ EXCEPTION
     WHEN OTHERS THEN
         RETURN NULL;
 END get_partition_high_value;
+/
+
+
+-- -----------------------------------------------------------------------------
+-- Extract Date from Partition High Value
+-- -----------------------------------------------------------------------------
+-- Converts partition high_value to DATE for age calculations
+-- Returns NULL if high_value cannot be evaluated as a date
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_partition_date(
+    p_owner VARCHAR2,
+    p_table VARCHAR2,
+    p_partition VARCHAR2
+) RETURN DATE
+AS
+    v_high_value LONG;
+    v_date DATE;
+BEGIN
+    SELECT high_value INTO v_high_value
+    FROM dba_tab_partitions
+    WHERE table_owner = p_owner
+    AND table_name = p_table
+    AND partition_name = p_partition;
+
+    -- Try to evaluate high_value as date
+    BEGIN
+        EXECUTE IMMEDIATE 'SELECT ' || v_high_value || ' FROM DUAL'
+        INTO v_date;
+        RETURN v_date;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+    WHEN OTHERS THEN
+        RETURN NULL;
+END get_partition_date;
 /
 
 
