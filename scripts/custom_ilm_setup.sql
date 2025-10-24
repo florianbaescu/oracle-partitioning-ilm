@@ -1866,7 +1866,7 @@ END;
 -- Cleanup old execution logs
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE PROCEDURE cleanup_execution_logs AS
+CREATE OR REPLACE PROCEDURE dwh_cleanup_execution_logs AS
     v_retention_days NUMBER;
     v_deleted NUMBER;
 BEGIN

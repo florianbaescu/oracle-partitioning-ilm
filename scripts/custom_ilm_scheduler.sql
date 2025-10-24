@@ -85,7 +85,7 @@ BEGIN
         program_type => 'PLSQL_BLOCK',
         program_action => '
             BEGIN
-                cleanup_execution_logs();
+                dwh_cleanup_execution_logs();
             END;',
         enabled => TRUE,
         comments => 'Cleans up old execution logs based on retention policy'
