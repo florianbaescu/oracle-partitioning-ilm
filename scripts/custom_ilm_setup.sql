@@ -292,29 +292,8 @@ WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES (s.config_key, s.config_value, s.description);
 
-MERGE INTO cmr.dwh_ilm_config t
-USING (SELECT 'HOT_THRESHOLD_DAYS' AS config_key, '90' AS config_value,
-              'Days threshold for HOT classification' AS description FROM dual) s
-ON (t.config_key = s.config_key)
-WHEN NOT MATCHED THEN
-    INSERT (config_key, config_value, description)
-    VALUES (s.config_key, s.config_value, s.description);
-
-MERGE INTO cmr.dwh_ilm_config t
-USING (SELECT 'WARM_THRESHOLD_DAYS' AS config_key, '365' AS config_value,
-              'Days threshold for WARM classification' AS description FROM dual) s
-ON (t.config_key = s.config_key)
-WHEN NOT MATCHED THEN
-    INSERT (config_key, config_value, description)
-    VALUES (s.config_key, s.config_value, s.description);
-
-MERGE INTO cmr.dwh_ilm_config t
-USING (SELECT 'COLD_THRESHOLD_DAYS' AS config_key, '1095' AS config_value,
-              'Days threshold for COLD classification (3 years)' AS description FROM dual) s
-ON (t.config_key = s.config_key)
-WHEN NOT MATCHED THEN
-    INSERT (config_key, config_value, description)
-    VALUES (s.config_key, s.config_value, s.description);
+-- Note: HOT/WARM/COLD thresholds removed from config (v3.1.1)
+-- Use dwh_ilm_threshold_profiles.DEFAULT profile as the global default
 
 MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'LOG_RETENTION_DAYS' AS config_key, '365' AS config_value,
@@ -712,12 +691,12 @@ SELECT
     a.last_write_time,
     a.days_since_write,
     a.temperature,
-    -- Generic recommendations using configurable global thresholds from dwh_ilm_config
+    -- Generic recommendations using DEFAULT profile thresholds
     -- Note: Actual policies use age_days/age_months from dwh_ilm_policies table per policy
     CASE
-        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') THEN 'No action needed'
-        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') THEN 'Compression candidate'
-        WHEN a.days_since_write < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') THEN 'Archival candidate'
+        WHEN a.days_since_write < (SELECT hot_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'No action needed'
+        WHEN a.days_since_write < (SELECT warm_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'Compression candidate'
+        WHEN a.days_since_write < (SELECT cold_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'Archival candidate'
         ELSE 'Purge candidate'
     END AS recommendation
 FROM cmr.dwh_ilm_partition_access a
@@ -735,27 +714,20 @@ SELECT
     p.table_owner,
     p.table_name,
     p.threshold_profile_id,
-    prof.profile_name,
-    -- Show effective thresholds
-    CASE
-        WHEN p.threshold_profile_id IS NOT NULL THEN prof.hot_threshold_days
-        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS')
-    END AS effective_hot_threshold_days,
-    CASE
-        WHEN p.threshold_profile_id IS NOT NULL THEN prof.warm_threshold_days
-        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS')
-    END AS effective_warm_threshold_days,
-    CASE
-        WHEN p.threshold_profile_id IS NOT NULL THEN prof.cold_threshold_days
-        ELSE (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS')
-    END AS effective_cold_threshold_days,
+    COALESCE(prof.profile_name, 'DEFAULT') AS profile_name,
+    -- Show effective thresholds (use profile if set, otherwise DEFAULT profile)
+    COALESCE(prof.hot_threshold_days, defprof.hot_threshold_days) AS effective_hot_threshold_days,
+    COALESCE(prof.warm_threshold_days, defprof.warm_threshold_days) AS effective_warm_threshold_days,
+    COALESCE(prof.cold_threshold_days, defprof.cold_threshold_days) AS effective_cold_threshold_days,
     CASE
         WHEN p.threshold_profile_id IS NOT NULL THEN 'CUSTOM'
-        ELSE 'GLOBAL'
+        ELSE 'DEFAULT'
     END AS threshold_source
 FROM cmr.dwh_ilm_policies p
 LEFT JOIN cmr.dwh_ilm_threshold_profiles prof
-    ON prof.profile_id = p.threshold_profile_id;
+    ON prof.profile_id = p.threshold_profile_id
+CROSS JOIN (SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
+            FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') defprof;
 
 COMMENT ON TABLE cmr.dwh_v_ilm_policy_thresholds IS
     'Shows effective threshold values for each ILM policy';
@@ -936,20 +908,20 @@ SELECT
     a.temperature,
     a.last_write_time,
     a.last_read_time,
-    -- Determine current lifecycle stage using configurable thresholds
+    -- Determine current lifecycle stage using DEFAULT profile thresholds
     CASE
-        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') THEN 'HOT - Active'
-        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') THEN 'WARM - Aging'
-        WHEN NVL(a.days_since_write, 0) < (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') THEN 'COLD - Archive'
+        WHEN NVL(a.days_since_write, 0) < (SELECT hot_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'HOT - Active'
+        WHEN NVL(a.days_since_write, 0) < (SELECT warm_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'WARM - Aging'
+        WHEN NVL(a.days_since_write, 0) < (SELECT cold_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') THEN 'COLD - Archive'
         ELSE 'FROZEN - Purge Candidate'
     END AS lifecycle_stage,
-    -- Next recommended action using configurable thresholds
+    -- Next recommended action using DEFAULT profile thresholds
     CASE
         WHEN tp.read_only = 'YES' THEN 'Already Read-Only'
         WHEN tp.compression LIKE '%ARCHIVE%' THEN 'Already Archived'
-        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS') AND tp.read_only = 'NO' THEN 'Make Read-Only / Drop'
-        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS') AND tp.compression NOT LIKE '%ARCHIVE%' THEN 'Archive Compression'
-        WHEN NVL(a.days_since_write, 0) >= (SELECT TO_NUMBER(config_value) FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS') AND tp.compression IS NULL THEN 'Query Compression'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT cold_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') AND tp.read_only = 'NO' THEN 'Make Read-Only / Drop'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT warm_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') AND tp.compression NOT LIKE '%ARCHIVE%' THEN 'Archive Compression'
+        WHEN NVL(a.days_since_write, 0) >= (SELECT hot_threshold_days FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') AND tp.compression IS NULL THEN 'Query Compression'
         ELSE 'No action needed'
     END AS recommended_action,
     -- Check if there's a pending ILM action
@@ -1446,15 +1418,11 @@ CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
     END;
 
 BEGIN
-    -- Get thresholds from config
-    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_cold_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
+    -- Get thresholds from DEFAULT profile
+    SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
+    INTO v_hot_threshold, v_warm_threshold, v_cold_threshold
+    FROM cmr.dwh_ilm_threshold_profiles
+    WHERE profile_name = 'DEFAULT';
 
     -- Merge partition data with age calculated from high_value
     MERGE INTO cmr.dwh_ilm_partition_access a
@@ -1585,12 +1553,11 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('Initializing partition access tracking for ' ||
                         p_table_owner || '.' || p_table_name);
 
-    -- Get thresholds from config
-    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+    -- Get thresholds from DEFAULT profile
+    SELECT hot_threshold_days, warm_threshold_days
+    INTO v_hot_threshold, v_warm_threshold
+    FROM cmr.dwh_ilm_threshold_profiles
+    WHERE profile_name = 'DEFAULT';
 
     -- Initialize tracking for all partitions with age calculated from high_value
     MERGE INTO cmr.dwh_ilm_partition_access a
@@ -1693,15 +1660,11 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Get thresholds from config
-    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_cold_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'COLD_THRESHOLD_DAYS';
+    -- Get thresholds from DEFAULT profile
+    SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
+    INTO v_hot_threshold, v_warm_threshold, v_cold_threshold
+    FROM cmr.dwh_ilm_threshold_profiles
+    WHERE profile_name = 'DEFAULT';
 
     -- Sync Heat Map data to tracking table
     MERGE INTO cmr.dwh_ilm_partition_access a
@@ -1770,12 +1733,11 @@ CREATE OR REPLACE PROCEDURE dwh_record_partition_access(
     v_hot_threshold NUMBER;
     v_warm_threshold NUMBER;
 BEGIN
-    -- Get thresholds
-    SELECT TO_NUMBER(config_value) INTO v_hot_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'HOT_THRESHOLD_DAYS';
-
-    SELECT TO_NUMBER(config_value) INTO v_warm_threshold
-    FROM cmr.dwh_ilm_config WHERE config_key = 'WARM_THRESHOLD_DAYS';
+    -- Get thresholds from DEFAULT profile
+    SELECT hot_threshold_days, warm_threshold_days
+    INTO v_hot_threshold, v_warm_threshold
+    FROM cmr.dwh_ilm_threshold_profiles
+    WHERE profile_name = 'DEFAULT';
 
     -- Update access tracking
     MERGE INTO cmr.dwh_ilm_partition_access a
@@ -1891,7 +1853,7 @@ END get_partition_high_value;
 -- Get Threshold Values for a Policy
 -- -----------------------------------------------------------------------------
 -- Returns HOT, WARM, COLD thresholds for a given policy
--- Uses policy's profile if specified, otherwise global config
+-- Uses policy's profile if specified, otherwise DEFAULT profile
 -- -----------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION get_policy_thresholds(
@@ -1908,7 +1870,7 @@ BEGIN
     WHERE policy_id = p_policy_id;
 
     IF v_profile_id IS NOT NULL THEN
-        -- Use profile thresholds
+        -- Use specific profile thresholds
         SELECT
             CASE p_threshold_type
                 WHEN 'HOT' THEN hot_threshold_days
@@ -1918,22 +1880,42 @@ BEGIN
         FROM cmr.dwh_ilm_threshold_profiles
         WHERE profile_id = v_profile_id;
     ELSE
-        -- Use global config
-        SELECT TO_NUMBER(config_value) INTO v_threshold
-        FROM cmr.dwh_ilm_config
-        WHERE config_key = p_threshold_type || '_THRESHOLD_DAYS';
+        -- Use DEFAULT profile as global fallback
+        SELECT
+            CASE p_threshold_type
+                WHEN 'HOT' THEN hot_threshold_days
+                WHEN 'WARM' THEN warm_threshold_days
+                WHEN 'COLD' THEN cold_threshold_days
+            END INTO v_threshold
+        FROM cmr.dwh_ilm_threshold_profiles
+        WHERE profile_name = 'DEFAULT';
     END IF;
 
     RETURN v_threshold;
 EXCEPTION
     WHEN NO_DATA_FOUND THEN
-        -- Fallback to global config
-        SELECT TO_NUMBER(config_value) INTO v_threshold
-        FROM cmr.dwh_ilm_config
-        WHERE config_key = p_threshold_type || '_THRESHOLD_DAYS';
-        RETURN v_threshold;
+        -- Fallback to DEFAULT profile if policy not found
+        BEGIN
+            SELECT
+                CASE p_threshold_type
+                    WHEN 'HOT' THEN hot_threshold_days
+                    WHEN 'WARM' THEN warm_threshold_days
+                    WHEN 'COLD' THEN cold_threshold_days
+                END INTO v_threshold
+            FROM cmr.dwh_ilm_threshold_profiles
+            WHERE profile_name = 'DEFAULT';
+            RETURN v_threshold;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Hardcoded fallback if DEFAULT profile missing
+                RETURN CASE p_threshold_type
+                    WHEN 'HOT' THEN 90
+                    WHEN 'WARM' THEN 365
+                    WHEN 'COLD' THEN 1095
+                END;
+        END;
     WHEN OTHERS THEN
-        -- Default fallback values
+        -- Hardcoded fallback for any other errors
         RETURN CASE p_threshold_type
             WHEN 'HOT' THEN 90
             WHEN 'WARM' THEN 365
