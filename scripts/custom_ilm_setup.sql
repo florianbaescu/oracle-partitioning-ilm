@@ -1006,7 +1006,9 @@ LEFT JOIN cmr.dwh_ilm_partition_access a
     ON a.table_owner = tp.table_owner
     AND a.table_name = tp.table_name
     AND a.partition_name = tp.partition_name
-WHERE tp.table_owner = USER
+WHERE tp.table_owner IN (
+    SELECT username FROM dba_users WHERE oracle_maintained = 'N'
+)
 ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
 
 COMMENT ON TABLE cmr.dwh_v_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
@@ -1420,6 +1422,9 @@ LEFT JOIN (
     GROUP BY table_owner, table_name
 ) q ON q.table_owner = t.owner AND q.table_name = t.table_name
 WHERE tp.partition_count > 0  -- Only partitioned tables
+AND t.owner IN (
+    SELECT username FROM dba_users WHERE oracle_maintained = 'N'
+)
 ORDER BY total_table_size_gb DESC NULLS LAST, lifecycle_status, t.table_name;
 
 COMMENT ON TABLE cmr.dwh_v_ilm_table_overview IS 'Comprehensive table lifecycle overview with recommendations';
