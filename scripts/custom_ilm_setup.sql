@@ -1336,7 +1336,7 @@ COMMENT ON TABLE cmr.dwh_v_ilm_failure_analysis IS 'Categorized failure analysis
 
 CREATE OR REPLACE VIEW dwh_v_ilm_table_overview AS
 SELECT
-    t.table_owner,
+    t.owner AS table_owner,
     t.table_name,
     -- Table Metadata
     tp.partition_count,
