@@ -3,7 +3,7 @@
 -- Evaluates partitions against ILM policies and queues eligible actions
 -- =============================================================================
 
-CREATE OR REPLACE PACKAGE pck_dwh_ilm_policy_engine AS
+CREATE OR REPLACE PACKAGE pck_dwh_ilm_policy_engine AUTHID CURRENT_USER AS
     -- Main evaluation procedures
     PROCEDURE evaluate_all_policies;
 

@@ -3,7 +3,7 @@
 -- Executes table migrations from non-partitioned to partitioned
 -- =============================================================================
 
-CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AS
+CREATE OR REPLACE PACKAGE pck_dwh_table_migration_executor AUTHID CURRENT_USER AS
     -- Main execution procedures
     PROCEDURE execute_migration(
         p_task_id NUMBER,

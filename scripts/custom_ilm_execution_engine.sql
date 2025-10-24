@@ -3,7 +3,7 @@
 -- Executes ILM actions on eligible partitions
 -- =============================================================================
 
-CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AS
+CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
     -- Main execution procedures
     PROCEDURE execute_pending_actions(
         p_max_operations NUMBER DEFAULT NULL

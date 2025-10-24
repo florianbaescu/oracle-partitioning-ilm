@@ -1495,7 +1495,9 @@ END get_partition_date;
 CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
     p_table_owner VARCHAR2 DEFAULT USER,
     p_table_name VARCHAR2 DEFAULT NULL
-) AS
+)
+AUTHID CURRENT_USER
+AS
     v_hot_threshold NUMBER;
     v_warm_threshold NUMBER;
     v_cold_threshold NUMBER;
@@ -1620,7 +1622,9 @@ END;
 CREATE OR REPLACE PROCEDURE dwh_init_partition_access_tracking(
     p_table_owner VARCHAR2,
     p_table_name VARCHAR2
-) AS
+)
+AUTHID CURRENT_USER
+AS
     v_hot_threshold NUMBER;
     v_warm_threshold NUMBER;
     v_partitions_initialized NUMBER := 0;
@@ -1700,7 +1704,9 @@ END;
 CREATE OR REPLACE PROCEDURE dwh_sync_heatmap_to_tracking(
     p_table_owner VARCHAR2 DEFAULT USER,
     p_table_name VARCHAR2 DEFAULT NULL
-) AS
+)
+AUTHID CURRENT_USER
+AS
     v_heat_map_available BOOLEAN := FALSE;
     v_count NUMBER;
     v_hot_threshold NUMBER;
