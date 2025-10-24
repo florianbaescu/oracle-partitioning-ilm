@@ -415,18 +415,22 @@ BEGIN
 
     EXCEPTION
         WHEN OTHERS THEN
-            DBMS_OUTPUT.PUT_LINE('ERROR sending email: ' || SQLERRM);
-            -- Log to execution log as well
-            INSERT INTO cmr.dwh_ilm_execution_log (
-                policy_id, policy_name, table_owner, table_name, partition_name,
-                action_type, execution_start, execution_end,
-                status, error_message
-            ) VALUES (
-                -1, 'EMAIL_NOTIFICATION', 'SYSTEM', 'N/A', 'N/A',
-                'NOTIFY', SYSTIMESTAMP, SYSTIMESTAMP,
-                'FAILED', 'Failed to send email: ' || SQLERRM
-            );
-            COMMIT;
+            DECLARE
+                v_error_msg VARCHAR2(4000) := SQLERRM;
+            BEGIN
+                DBMS_OUTPUT.PUT_LINE('ERROR sending email: ' || v_error_msg);
+                -- Log to execution log as well
+                INSERT INTO cmr.dwh_ilm_execution_log (
+                    policy_id, policy_name, table_owner, table_name, partition_name,
+                    action_type, execution_start, execution_end,
+                    status, error_message
+                ) VALUES (
+                    -1, 'EMAIL_NOTIFICATION', 'SYSTEM', 'N/A', 'N/A',
+                    'NOTIFY', SYSTIMESTAMP, SYSTIMESTAMP,
+                    'FAILED', 'Failed to send email: ' || v_error_msg
+                );
+                COMMIT;
+            END;
     END;
 
 EXCEPTION
