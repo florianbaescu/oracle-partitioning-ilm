@@ -606,7 +606,11 @@ LEFT JOIN (
 LEFT JOIN dba_indexes i ON i.table_owner = t.owner AND i.table_name = t.table_name
 LEFT JOIN dba_constraints c ON c.owner = t.owner AND c.table_name = t.table_name
 WHERE t.owner IN (
-    SELECT username FROM dba_users WHERE oracle_maintained = 'N'
+    SELECT username
+    FROM dba_users
+    WHERE oracle_maintained = 'N'
+    AND account_status = 'OPEN'
+    AND default_tablespace NOT LIKE '%USERS%'
 )
 AND t.partitioned = 'NO'
 AND t.temporary = 'N'

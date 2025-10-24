@@ -1007,7 +1007,11 @@ LEFT JOIN cmr.dwh_ilm_partition_access a
     AND a.table_name = tp.table_name
     AND a.partition_name = tp.partition_name
 WHERE tp.table_owner IN (
-    SELECT username FROM dba_users WHERE oracle_maintained = 'N'
+    SELECT username
+    FROM dba_users
+    WHERE oracle_maintained = 'N'
+    AND account_status = 'OPEN'
+    AND default_tablespace NOT LIKE '%USERS%'
 )
 ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
 
@@ -1423,7 +1427,11 @@ LEFT JOIN (
 ) q ON q.table_owner = t.owner AND q.table_name = t.table_name
 WHERE tp.partition_count > 0  -- Only partitioned tables
 AND t.owner IN (
-    SELECT username FROM dba_users WHERE oracle_maintained = 'N'
+    SELECT username
+    FROM dba_users
+    WHERE oracle_maintained = 'N'
+    AND account_status = 'OPEN'
+    AND default_tablespace NOT LIKE '%USERS%'
 )
 ORDER BY total_table_size_gb DESC NULLS LAST, lifecycle_status, t.table_name;
 
