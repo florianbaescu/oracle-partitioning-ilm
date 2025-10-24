@@ -512,7 +512,7 @@ COMMIT;
 -- Migration Dashboard
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW cmr.dwh_v_migration_dashboard AS
+CREATE OR REPLACE VIEW cmr.v_dwh_migration_dashboard AS
 SELECT
     p.project_id,
     p.project_name,
@@ -539,7 +539,7 @@ ORDER BY p.created_date DESC;
 -- Task Status View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW cmr.dwh_v_migration_task_status AS
+CREATE OR REPLACE VIEW cmr.v_dwh_migration_task_status AS
 SELECT
     t.task_id,
     t.task_name,
@@ -575,7 +575,7 @@ ORDER BY t.created_date DESC;
 -- Candidate Tables for Migration
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW cmr.dwh_v_migration_candidates AS
+CREATE OR REPLACE VIEW cmr.v_dwh_migration_candidates AS
 SELECT
     t.owner,
     t.table_name,
@@ -625,7 +625,7 @@ ORDER BY t.num_rows DESC;
 -- Date Column Analysis View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW cmr.dwh_v_date_column_analysis AS
+CREATE OR REPLACE VIEW cmr.v_dwh_date_column_analysis AS
 SELECT
     t.task_id,
     t.task_name,

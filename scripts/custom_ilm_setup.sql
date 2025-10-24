@@ -680,7 +680,7 @@ END;
 -- Active Policies View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW v_ilm_active_policies AS
+CREATE OR REPLACE VIEW v_dwh_ilm_active_policies AS
 SELECT
     p.policy_id,
     p.policy_name,
@@ -714,7 +714,7 @@ ORDER BY p.priority, p.policy_name;
 -- Execution Statistics View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW v_ilm_execution_stats AS
+CREATE OR REPLACE VIEW v_dwh_ilm_execution_stats AS
 SELECT
     e.table_owner,
     e.table_name,
@@ -735,7 +735,7 @@ ORDER BY SUM(e.space_saved_mb) DESC NULLS LAST;
 -- Partition Temperature View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW v_ilm_partition_temperature AS
+CREATE OR REPLACE VIEW v_dwh_ilm_partition_temperature AS
 SELECT
     a.table_owner,
     a.table_name,
@@ -763,7 +763,7 @@ ORDER BY a.days_since_write DESC;
 -- ILM Policy Threshold View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_policy_thresholds AS
+CREATE OR REPLACE VIEW v_dwh_ilm_policy_thresholds AS
 SELECT
     p.policy_id,
     p.policy_name,
@@ -785,7 +785,7 @@ LEFT JOIN cmr.dwh_ilm_threshold_profiles prof
 CROSS JOIN (SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
             FROM cmr.dwh_ilm_threshold_profiles WHERE profile_name = 'DEFAULT') defprof;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_policy_thresholds IS
+COMMENT ON TABLE cmr.v_dwh_ilm_policy_thresholds IS
     'Shows effective threshold values for each ILM policy';
 
 
@@ -793,7 +793,7 @@ COMMENT ON TABLE cmr.dwh_v_ilm_policy_thresholds IS
 -- ILM Policy Summary Dashboard View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_policy_summary AS
+CREATE OR REPLACE VIEW v_dwh_ilm_policy_summary AS
 SELECT
     p.table_owner,
     p.table_name,
@@ -817,14 +817,14 @@ LEFT JOIN cmr.dwh_ilm_execution_log e
 GROUP BY p.table_owner, p.table_name
 ORDER BY COUNT(DISTINCT q.queue_id) DESC, SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) DESC;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_policy_summary IS 'Summary of ILM policies per table for dashboard';
+COMMENT ON TABLE cmr.v_dwh_ilm_policy_summary IS 'Summary of ILM policies per table for dashboard';
 
 
 -- -----------------------------------------------------------------------------
 -- Upcoming ILM Actions View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_upcoming_actions AS
+CREATE OR REPLACE VIEW v_dwh_ilm_upcoming_actions AS
 SELECT
     q.queue_id,
     q.policy_id,
@@ -864,14 +864,14 @@ AND q.execution_status IN ('PENDING', 'SCHEDULED')
 AND q.scheduled_date < SYSTIMESTAMP + INTERVAL '30' DAY
 ORDER BY q.scheduled_date, p.priority, q.table_name, q.partition_name;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_upcoming_actions IS 'Partitions scheduled for ILM actions in next 30 days';
+COMMENT ON TABLE cmr.v_dwh_ilm_upcoming_actions IS 'Partitions scheduled for ILM actions in next 30 days';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Space Savings History View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_space_savings AS
+CREATE OR REPLACE VIEW v_dwh_ilm_space_savings AS
 SELECT
     e.table_owner,
     e.table_name,
@@ -892,14 +892,14 @@ WHERE e.status IN ('SUCCESS', 'FAILED')
 GROUP BY e.table_owner, e.table_name, e.policy_name, e.action_type, TRUNC(e.execution_end)
 ORDER BY TRUNC(e.execution_end) DESC, SUM(e.space_saved_mb) DESC;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_space_savings IS 'Historical space savings achieved by ILM policies';
+COMMENT ON TABLE cmr.v_dwh_ilm_space_savings IS 'Historical space savings achieved by ILM policies';
 
 
 -- -----------------------------------------------------------------------------
 -- ILM Execution History Detail View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_execution_history AS
+CREATE OR REPLACE VIEW v_dwh_ilm_execution_history AS
 SELECT
     e.execution_id,
     e.policy_id,
@@ -940,14 +940,14 @@ FROM cmr.dwh_ilm_execution_log e
 WHERE e.execution_start > SYSTIMESTAMP - INTERVAL '30' DAY
 ORDER BY e.execution_start DESC;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_execution_history IS 'Detailed execution history for last 30 days';
+COMMENT ON TABLE cmr.v_dwh_ilm_execution_history IS 'Detailed execution history for last 30 days';
 
 
 -- -----------------------------------------------------------------------------
 -- Partition Lifecycle Status View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_partition_lifecycle AS
+CREATE OR REPLACE VIEW v_dwh_ilm_partition_lifecycle AS
 SELECT
     tp.table_owner,
     tp.table_name,
@@ -1015,14 +1015,14 @@ WHERE tp.table_owner IN (
 )
 ORDER BY tp.table_owner, tp.table_name, tp.partition_position;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
+COMMENT ON TABLE cmr.v_dwh_ilm_partition_lifecycle IS 'Current lifecycle status of all partitions with recommendations';
 
 
 -- -----------------------------------------------------------------------------
 -- Enhanced Performance Dashboard View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_performance_dashboard AS
+CREATE OR REPLACE VIEW v_dwh_ilm_performance_dashboard AS
 SELECT
     -- Current Status
     (SELECT COUNT(*) FROM cmr.dwh_ilm_policies WHERE enabled = 'Y') AS active_policies_count,
@@ -1054,14 +1054,14 @@ SELECT
     SYSTIMESTAMP AS dashboard_timestamp
 FROM DUAL;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_performance_dashboard IS 'Real-time performance dashboard with key metrics';
+COMMENT ON TABLE cmr.v_dwh_ilm_performance_dashboard IS 'Real-time performance dashboard with key metrics';
 
 
 -- -----------------------------------------------------------------------------
 -- Alerting Metrics View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_alerting_metrics AS
+CREATE OR REPLACE VIEW v_dwh_ilm_alerting_metrics AS
 SELECT
     -- Failure Rate (last 24 hours)
     CASE
@@ -1137,14 +1137,14 @@ FROM (
     FROM DUAL
 );
 
-COMMENT ON TABLE cmr.dwh_v_ilm_alerting_metrics IS 'Pre-calculated alerting metrics with threshold-based status';
+COMMENT ON TABLE cmr.v_dwh_ilm_alerting_metrics IS 'Pre-calculated alerting metrics with threshold-based status';
 
 
 -- -----------------------------------------------------------------------------
 -- Policy Effectiveness View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_policy_effectiveness AS
+CREATE OR REPLACE VIEW v_dwh_ilm_policy_effectiveness AS
 SELECT
     p.policy_id,
     p.policy_name,
@@ -1212,14 +1212,14 @@ ORDER BY
     ROUND(SUM(CASE WHEN e.status = 'SUCCESS' THEN NVL(e.space_saved_mb, 0) ELSE 0 END) / 1024, 2) DESC NULLS LAST,
     CASE WHEN COUNT(e.execution_id) > 0 THEN ROUND((SUM(CASE WHEN e.status = 'SUCCESS' THEN 1 ELSE 0 END) / COUNT(e.execution_id)) * 100, 2) ELSE NULL END DESC NULLS LAST;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_policy_effectiveness IS 'Policy effectiveness metrics including ROI and success rates';
+COMMENT ON TABLE cmr.v_dwh_ilm_policy_effectiveness IS 'Policy effectiveness metrics including ROI and success rates';
 
 
 -- -----------------------------------------------------------------------------
 -- Resource Utilization Trend View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_resource_trends AS
+CREATE OR REPLACE VIEW v_dwh_ilm_resource_trends AS
 SELECT
     TO_CHAR(e.execution_end, 'YYYY-MM') AS year_month,
     TO_CHAR(e.execution_end, 'YYYY-IW') AS year_week,
@@ -1263,14 +1263,14 @@ GROUP BY
     TRUNC(e.execution_end)
 ORDER BY TRUNC(e.execution_end) DESC;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_resource_trends IS 'Historical resource utilization trends for capacity planning';
+COMMENT ON TABLE cmr.v_dwh_ilm_resource_trends IS 'Historical resource utilization trends for capacity planning';
 
 
 -- -----------------------------------------------------------------------------
 -- Failure Analysis View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_failure_analysis AS
+CREATE OR REPLACE VIEW v_dwh_ilm_failure_analysis AS
 SELECT
     e.table_owner,
     e.table_name,
@@ -1327,14 +1327,14 @@ GROUP BY
     END
 ORDER BY COUNT(*) DESC, MAX(e.execution_start) DESC;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_failure_analysis IS 'Categorized failure analysis with recommended actions';
+COMMENT ON TABLE cmr.v_dwh_ilm_failure_analysis IS 'Categorized failure analysis with recommended actions';
 
 
 -- -----------------------------------------------------------------------------
 -- Table Lifecycle Overview View
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW dwh_v_ilm_table_overview AS
+CREATE OR REPLACE VIEW v_dwh_ilm_table_overview AS
 SELECT
     t.owner AS table_owner,
     t.table_name,
@@ -1435,7 +1435,7 @@ AND t.owner IN (
 )
 ORDER BY total_table_size_gb DESC NULLS LAST, lifecycle_status, t.table_name;
 
-COMMENT ON TABLE cmr.dwh_v_ilm_table_overview IS 'Comprehensive table lifecycle overview with recommendations';
+COMMENT ON TABLE cmr.v_dwh_ilm_table_overview IS 'Comprehensive table lifecycle overview with recommendations';
 
 
 -- =============================================================================

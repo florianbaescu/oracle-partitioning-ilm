@@ -174,7 +174,7 @@ END;
 -- View scheduler job status
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW v_ilm_scheduler_status AS
+CREATE OR REPLACE VIEW v_dwh_ilm_scheduler_status AS
 SELECT
     job_name,
     enabled,
@@ -198,7 +198,7 @@ ORDER BY job_name;
 -- View job run history
 -- -----------------------------------------------------------------------------
 
-CREATE OR REPLACE VIEW v_ilm_job_history AS
+CREATE OR REPLACE VIEW v_dwh_ilm_job_history AS
 SELECT
     log_id,
     job_name,
