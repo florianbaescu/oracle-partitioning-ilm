@@ -4,6 +4,245 @@
 -- =============================================================================
 
 -- =============================================================================
+-- SECTION 0: CLEANUP (Make script rerunnable)
+-- =============================================================================
+
+-- Drop scheduler jobs (must be dropped before programs)
+BEGIN
+    DBMS_SCHEDULER.DROP_JOB(job_name => 'DWH_ILM_JOB_REFRESH_ACCESS', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped job: DWH_ILM_JOB_REFRESH_ACCESS');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27475 THEN
+            DBMS_OUTPUT.PUT_LINE('Job DWH_ILM_JOB_REFRESH_ACCESS does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_JOB(job_name => 'DWH_ILM_JOB_EVALUATE', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped job: DWH_ILM_JOB_EVALUATE');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27475 THEN
+            DBMS_OUTPUT.PUT_LINE('Job DWH_ILM_JOB_EVALUATE does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_JOB(job_name => 'DWH_ILM_JOB_EXECUTE', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped job: DWH_ILM_JOB_EXECUTE');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27475 THEN
+            DBMS_OUTPUT.PUT_LINE('Job DWH_ILM_JOB_EXECUTE does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_JOB(job_name => 'DWH_ILM_JOB_CLEANUP', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped job: DWH_ILM_JOB_CLEANUP');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27475 THEN
+            DBMS_OUTPUT.PUT_LINE('Job DWH_ILM_JOB_CLEANUP does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_JOB(job_name => 'DWH_ILM_JOB_MONITOR_FAILURES', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped job: DWH_ILM_JOB_MONITOR_FAILURES');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27475 THEN
+            DBMS_OUTPUT.PUT_LINE('Job DWH_ILM_JOB_MONITOR_FAILURES does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+-- Drop scheduler programs
+BEGIN
+    DBMS_SCHEDULER.DROP_PROGRAM(program_name => 'DWH_ILM_REFRESH_ACCESS_TRACKING', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped program: DWH_ILM_REFRESH_ACCESS_TRACKING');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27476 THEN
+            DBMS_OUTPUT.PUT_LINE('Program DWH_ILM_REFRESH_ACCESS_TRACKING does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_PROGRAM(program_name => 'DWH_ILM_EVALUATE_POLICIES', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped program: DWH_ILM_EVALUATE_POLICIES');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27476 THEN
+            DBMS_OUTPUT.PUT_LINE('Program DWH_ILM_EVALUATE_POLICIES does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_PROGRAM(program_name => 'DWH_ILM_EXECUTE_ACTIONS', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped program: DWH_ILM_EXECUTE_ACTIONS');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27476 THEN
+            DBMS_OUTPUT.PUT_LINE('Program DWH_ILM_EXECUTE_ACTIONS does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_PROGRAM(program_name => 'DWH_ILM_CLEANUP_LOGS', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped program: DWH_ILM_CLEANUP_LOGS');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27476 THEN
+            DBMS_OUTPUT.PUT_LINE('Program DWH_ILM_CLEANUP_LOGS does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    DBMS_SCHEDULER.DROP_PROGRAM(program_name => 'DWH_ILM_CHECK_FAILURES', force => TRUE);
+    DBMS_OUTPUT.PUT_LINE('Dropped program: DWH_ILM_CHECK_FAILURES');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -27476 THEN
+            DBMS_OUTPUT.PUT_LINE('Program DWH_ILM_CHECK_FAILURES does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+-- Drop procedures
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_stop_ilm_jobs';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_stop_ilm_jobs');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_stop_ilm_jobs does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_start_ilm_jobs';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_start_ilm_jobs');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_start_ilm_jobs does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_run_ilm_job_now';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_run_ilm_job_now');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_run_ilm_job_now does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_run_ilm_cycle';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_run_ilm_cycle');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_run_ilm_cycle does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_send_ilm_alert';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_send_ilm_alert');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_send_ilm_alert does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_check_ilm_failures';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_check_ilm_failures');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_check_ilm_failures does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP PROCEDURE dwh_notify_job_failure';
+    DBMS_OUTPUT.PUT_LINE('Dropped procedure: dwh_notify_job_failure');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -4043 THEN
+            DBMS_OUTPUT.PUT_LINE('Procedure dwh_notify_job_failure does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+-- Drop views (CREATE OR REPLACE handles these, but explicit drop for clarity)
+BEGIN
+    EXECUTE IMMEDIATE 'DROP VIEW v_dwh_ilm_scheduler_status';
+    DBMS_OUTPUT.PUT_LINE('Dropped view: v_dwh_ilm_scheduler_status');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('View v_dwh_ilm_scheduler_status does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP VIEW v_dwh_ilm_job_history';
+    DBMS_OUTPUT.PUT_LINE('Dropped view: v_dwh_ilm_job_history');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('View v_dwh_ilm_job_history does not exist');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+PROMPT Cleanup complete - ready to recreate scheduler objects
+PROMPT
+
+-- =============================================================================
 -- SECTION 1: SCHEDULER PROGRAMS
 -- =============================================================================
 
