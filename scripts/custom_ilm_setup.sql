@@ -1170,7 +1170,7 @@ SELECT
     -- Activity Metrics
     MIN(e.execution_start) AS first_execution,
     MAX(e.execution_end) AS last_execution,
-    TRUNC(SYSDATE - MAX(e.execution_end)) AS days_since_last_execution,
+    TRUNC(SYSDATE - CAST(MAX(e.execution_end) AS DATE)) AS days_since_last_execution,
     -- ROI Calculation (GB saved per hour of execution time)
     CASE
         WHEN SUM(CASE WHEN e.status = 'SUCCESS' THEN e.duration_seconds ELSE 0 END) > 0 THEN
