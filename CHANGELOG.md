@@ -4,6 +4,97 @@ All notable changes to the Oracle Custom ILM Framework project.
 
 ---
 
+## [3.1.1] - 2025-10-23
+
+**Refactoring Release: DEFAULT Profile as Single Source of Truth**
+
+### Changed
+
+- **Removed Redundant Config Entries** - Eliminated duplicate threshold storage
+  - Removed `HOT_THRESHOLD_DAYS` from `dwh_ilm_config` (was: 90)
+  - Removed `WARM_THRESHOLD_DAYS` from `dwh_ilm_config` (was: 365)
+  - Removed `COLD_THRESHOLD_DAYS` from `dwh_ilm_config` (was: 1095)
+  - **Reason**: DEFAULT profile in `dwh_ilm_threshold_profiles` now serves as global config
+
+- **Updated `get_policy_thresholds()` Function** - Simplified fallback logic
+  - NULL `profile_id` → Query DEFAULT profile (instead of config table)
+  - Fallback chain: Policy profile → DEFAULT profile → Hardcoded (90/365/1095)
+  - Combined 3 SELECT statements into 1 for better performance
+
+- **Updated All Views** - Now use DEFAULT profile for threshold queries
+  - `v_ilm_partition_temperature` - Generic recommendations
+  - `dwh_v_ilm_policy_thresholds` - Effective thresholds display (uses COALESCE)
+  - `dwh_v_ilm_upcoming_actions` - Lifecycle stage classification
+
+- **Updated All Procedures** - Now query DEFAULT profile for thresholds
+  - `dwh_refresh_partition_access_tracking` - Temperature calculation
+  - `dwh_init_partition_access_tracking` - Initial temperature assignment
+  - `dwh_sync_heatmap_to_tracking` - Heat Map sync
+  - `dwh_track_partition_access` - Access tracking updates
+
+### Benefits
+
+- ✅ **Single Source of Truth** - DEFAULT profile is now the only place to define global thresholds
+- ✅ **Eliminated Redundancy** - No more duplicate threshold values in two tables
+- ✅ **Cleaner Architecture** - Profiles table (structured) instead of key-value config
+- ✅ **Simpler Management** - Modify DEFAULT profile to change global thresholds
+- ✅ **Consistent Behavior** - All policies without profile_id use DEFAULT
+
+### Migration from v3.1
+
+**Option 1: Fresh Install** - Use updated setup script (config entries removed automatically)
+```sql
+@scripts/custom_ilm_setup.sql  -- No longer creates threshold config entries
+```
+
+**Option 2: Upgrade Existing Installation** - Run migration script
+```sql
+@scripts/migration/upgrade_to_v3.1.1_remove_config_thresholds.sql
+-- Verifies DEFAULT profile exists, then removes config entries
+```
+
+### Modifying Global Thresholds
+
+**Old way (v3.1):**
+```sql
+UPDATE cmr.dwh_ilm_config SET config_value = '120' WHERE config_key = 'HOT_THRESHOLD_DAYS';
+UPDATE cmr.dwh_ilm_config SET config_value = '400' WHERE config_key = 'WARM_THRESHOLD_DAYS';
+UPDATE cmr.dwh_ilm_config SET config_value = '1200' WHERE config_key = 'COLD_THRESHOLD_DAYS';
+```
+
+**New way (v3.1.1):**
+```sql
+UPDATE cmr.dwh_ilm_threshold_profiles
+SET hot_threshold_days = 120,
+    warm_threshold_days = 400,
+    cold_threshold_days = 1200
+WHERE profile_name = 'DEFAULT';
+```
+
+### Backward Compatibility
+
+- ✅ Existing policies without `profile_id` continue using DEFAULT values (90/365/1095)
+- ✅ DEFAULT profile has same values as removed config entries
+- ✅ No behavioral changes - policies evaluate exactly the same
+- ✅ Views and procedures produce identical results
+- ✅ No data loss or migration issues
+
+### Technical Details
+
+- **Files Modified**: 1 file
+  - `scripts/custom_ilm_setup.sql` - Removed config MERGEs, updated function, views, procedures (-93 lines, +140 lines)
+
+- **Files Created**: 1 file
+  - `scripts/migration/upgrade_to_v3.1.1_remove_config_thresholds.sql` - Migration script (154 lines)
+
+- **Code Quality Improvements**:
+  - Combined 3 SELECTs into 1 in 4 procedures (performance improvement)
+  - Simplified view logic with COALESCE and CROSS JOIN
+  - Consistent terminology: "DEFAULT profile" replaces "global config"
+  - All threshold queries now use structured profile table
+
+---
+
 ## [3.1] - 2025-10-23
 
 **Feature Release: Configurable Threshold Profiles for Temperature-Based ILM**
