@@ -730,7 +730,7 @@ JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE a.all_date_columns_analysis IS NOT NULL
 ORDER BY a.analysis_date DESC;
 
-COMMENT ON VIEW cmr.dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
+COMMENT ON TABLE cmr.dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
 
 
 -- =============================================================================

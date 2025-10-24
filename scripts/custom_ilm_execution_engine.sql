@@ -156,9 +156,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             JOIN dba_indexes i
                 ON i.owner = ip.index_owner
                 AND i.index_name = ip.index_name
+            JOIN dba_part_indexes pi
+                ON pi.owner = i.owner
+                AND pi.index_name = i.index_name
             WHERE i.table_owner = p_table_owner
             AND i.table_name = p_table_name
-            AND i.locality = 'LOCAL'
+            AND pi.locality = 'LOCAL'
             AND ip.partition_name = p_partition_name
         ) LOOP
             v_sql := 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
