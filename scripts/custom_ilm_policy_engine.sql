@@ -400,7 +400,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_policy_engine AS
         COMMIT;
 
         -- Refresh partition access tracking
-        refresh_partition_access_tracking;
+        dwh_refresh_partition_access_tracking;
 
         -- Evaluate each enabled policy
         FOR pol IN (
