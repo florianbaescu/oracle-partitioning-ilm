@@ -1767,7 +1767,7 @@ BEGIN
             TRUNC(SYSDATE - NVL(h.segment_write_time, SYSDATE - 10000)) AS days_since_write,
             TRUNC(SYSDATE - NVL(h.segment_read_time, SYSDATE - 10000)) AS days_since_read
         FROM dba_heat_map_segment h
-        WHERE h.object_type = 'TABLE PARTITION'
+        WHERE h.subobject_name IS NOT NULL  -- Partitions have subobject names
         AND h.owner = p_table_owner
         AND (p_table_name IS NULL OR h.object_name = p_table_name)
     ) src
