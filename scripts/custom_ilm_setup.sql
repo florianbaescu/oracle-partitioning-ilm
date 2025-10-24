@@ -1439,6 +1439,51 @@ COMMENT ON TABLE cmr.dwh_v_ilm_table_overview IS 'Comprehensive table lifecycle 
 
 
 -- =============================================================================
+-- SECTION 2B: UTILITY FUNCTIONS (must be before procedures that call them)
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- Extract Date from Partition High Value
+-- -----------------------------------------------------------------------------
+-- Converts partition high_value to DATE for age calculations
+-- Returns NULL if high_value cannot be evaluated as a date
+-- Must be defined before procedures that call it (dwh_refresh_partition_access_tracking)
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_partition_date(
+    p_owner VARCHAR2,
+    p_table VARCHAR2,
+    p_partition VARCHAR2
+) RETURN DATE
+AS
+    v_high_value LONG;
+    v_date DATE;
+BEGIN
+    SELECT high_value INTO v_high_value
+    FROM dba_tab_partitions
+    WHERE table_owner = p_owner
+    AND table_name = p_table
+    AND partition_name = p_partition;
+
+    -- Try to evaluate high_value as date
+    BEGIN
+        EXECUTE IMMEDIATE 'SELECT ' || v_high_value || ' FROM DUAL'
+        INTO v_date;
+        RETURN v_date;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END;
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+    WHEN OTHERS THEN
+        RETURN NULL;
+END get_partition_date;
+/
+
+
+-- =============================================================================
 -- SECTION 3: INITIALIZATION PROCEDURES
 -- =============================================================================
 
@@ -1714,7 +1759,7 @@ BEGIN
     MERGE INTO cmr.dwh_ilm_partition_access a
     USING (
         SELECT
-            h.object_owner,
+            h.owner AS object_owner,
             h.object_name,
             h.subobject_name AS partition_name,
             h.segment_write_time,
@@ -1723,7 +1768,7 @@ BEGIN
             TRUNC(SYSDATE - NVL(h.segment_read_time, SYSDATE - 10000)) AS days_since_read
         FROM dba_heat_map_segment h
         WHERE h.object_type = 'TABLE PARTITION'
-        AND h.object_owner = p_table_owner
+        AND h.owner = p_table_owner
         AND (p_table_name IS NULL OR h.object_name = p_table_name)
     ) src
     ON (a.table_owner = src.object_owner
@@ -1893,45 +1938,7 @@ END get_partition_high_value;
 /
 
 
--- -----------------------------------------------------------------------------
--- Extract Date from Partition High Value
--- -----------------------------------------------------------------------------
--- Converts partition high_value to DATE for age calculations
--- Returns NULL if high_value cannot be evaluated as a date
--- -----------------------------------------------------------------------------
-
-CREATE OR REPLACE FUNCTION get_partition_date(
-    p_owner VARCHAR2,
-    p_table VARCHAR2,
-    p_partition VARCHAR2
-) RETURN DATE
-AS
-    v_high_value LONG;
-    v_date DATE;
-BEGIN
-    SELECT high_value INTO v_high_value
-    FROM dba_tab_partitions
-    WHERE table_owner = p_owner
-    AND table_name = p_table
-    AND partition_name = p_partition;
-
-    -- Try to evaluate high_value as date
-    BEGIN
-        EXECUTE IMMEDIATE 'SELECT ' || v_high_value || ' FROM DUAL'
-        INTO v_date;
-        RETURN v_date;
-    EXCEPTION
-        WHEN OTHERS THEN
-            RETURN NULL;
-    END;
-EXCEPTION
-    WHEN NO_DATA_FOUND THEN
-        RETURN NULL;
-    WHEN OTHERS THEN
-        RETURN NULL;
-END get_partition_date;
-/
-
+-- Note: get_partition_date function is now defined in SECTION 2B (before procedures)
 
 -- -----------------------------------------------------------------------------
 -- Get Threshold Values for a Policy
