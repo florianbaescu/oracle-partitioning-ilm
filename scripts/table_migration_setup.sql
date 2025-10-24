@@ -4,51 +4,6 @@
 -- =============================================================================
 
 -- =============================================================================
--- SECTION 0: CLEANUP (FOR RERUNNABLE SCRIPT)
--- =============================================================================
-
--- Drop tables in reverse dependency order
-BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_execution_log CASCADE CONSTRAINTS';
-    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_execution_log');
-EXCEPTION WHEN OTHERS THEN
-    IF SQLCODE != -942 THEN RAISE; END IF;
-END;
-/
-
-BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_analysis CASCADE CONSTRAINTS';
-    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_analysis');
-EXCEPTION WHEN OTHERS THEN
-    IF SQLCODE != -942 THEN RAISE; END IF;
-END;
-/
-
-BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_tasks CASCADE CONSTRAINTS';
-    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_tasks');
-EXCEPTION WHEN OTHERS THEN
-    IF SQLCODE != -942 THEN RAISE; END IF;
-END;
-/
-
-BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_projects CASCADE CONSTRAINTS';
-    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_projects');
-EXCEPTION WHEN OTHERS THEN
-    IF SQLCODE != -942 THEN RAISE; END IF;
-END;
-/
-
-BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_migration_ilm_templates CASCADE CONSTRAINTS';
-    DBMS_OUTPUT.PUT_LINE('Dropped dwh_migration_ilm_templates');
-EXCEPTION WHEN OTHERS THEN
-    IF SQLCODE != -942 THEN RAISE; END IF;
-END;
-/
-
--- =============================================================================
 -- SECTION 1: MIGRATION METADATA TABLES
 -- =============================================================================
 
@@ -56,18 +11,29 @@ END;
 -- Migration Projects - Track migration initiatives
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_migration_projects (
-    project_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    project_name        VARCHAR2(100) NOT NULL UNIQUE,
-    description         VARCHAR2(500),
-    status              VARCHAR2(30) DEFAULT 'PLANNING',  -- PLANNING, ANALYSIS, READY, IN_PROGRESS, COMPLETED, FAILED, ROLLED_BACK
-    created_by          VARCHAR2(50) DEFAULT USER,
-    created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
-    started_date        TIMESTAMP,
-    completed_date      TIMESTAMP,
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_migration_projects (
+            project_id          NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            project_name        VARCHAR2(100) NOT NULL UNIQUE,
+            description         VARCHAR2(500),
+            status              VARCHAR2(30) DEFAULT ''PLANNING'',  -- PLANNING, ANALYSIS, READY, IN_PROGRESS, COMPLETED, FAILED, ROLLED_BACK
+            created_by          VARCHAR2(50) DEFAULT USER,
+            created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
+            started_date        TIMESTAMP,
+            completed_date      TIMESTAMP,
 
-    CONSTRAINT chk_proj_status CHECK (status IN ('PLANNING', 'ANALYSIS', 'READY', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'ROLLED_BACK'))
-);
+            CONSTRAINT chk_proj_status CHECK (status IN (''PLANNING'', ''ANALYSIS'', ''READY'', ''IN_PROGRESS'', ''COMPLETED'', ''FAILED'', ''ROLLED_BACK''))
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_projects');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_migration_projects already exists - preserving existing data');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_migration_projects IS 'Migration project tracking';
 
@@ -76,69 +42,113 @@ COMMENT ON TABLE cmr.dwh_migration_projects IS 'Migration project tracking';
 -- Migration Tasks - Individual table migrations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_migration_tasks (
-    task_id             NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    project_id          NUMBER,
-    task_name           VARCHAR2(100) NOT NULL,
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_migration_tasks (
+            task_id             NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            project_id          NUMBER,
+            task_name           VARCHAR2(100) NOT NULL,
 
-    -- Source table
-    source_owner        VARCHAR2(30) DEFAULT USER,
-    source_table        VARCHAR2(128) NOT NULL,
+            -- Source table
+            source_owner        VARCHAR2(30) DEFAULT USER,
+            source_table        VARCHAR2(128) NOT NULL,
 
-    -- Target partitioning strategy
-    partition_type      VARCHAR2(30),          -- RANGE, LIST, HASH, RANGE-HASH, RANGE-LIST, etc.
-    partition_key       VARCHAR2(500),         -- Column(s) for partitioning
-    subpartition_type   VARCHAR2(30),
-    subpartition_key    VARCHAR2(500),
-    interval_clause     VARCHAR2(200),         -- For interval partitioning
+            -- Target partitioning strategy
+            partition_type      VARCHAR2(30),
+            partition_key       VARCHAR2(500),
+            subpartition_type   VARCHAR2(30),
+            subpartition_key    VARCHAR2(500),
+            interval_clause     VARCHAR2(200),
 
-    -- Migration strategy
-    migration_method    VARCHAR2(30) DEFAULT 'CTAS',  -- CTAS, ONLINE, EXCHANGE
-    use_compression     CHAR(1) DEFAULT 'Y',
-    compression_type    VARCHAR2(50) DEFAULT 'QUERY HIGH',
-    target_tablespace   VARCHAR2(30),
-    parallel_degree     NUMBER DEFAULT 4,
-    enable_row_movement CHAR(1) DEFAULT 'Y',   -- Enable row movement for partitioned table
-    automatic_list      CHAR(1) DEFAULT 'N',   -- Enable AUTOMATIC LIST partitioning (Oracle 12.2+)
-    list_default_values VARCHAR2(4000),        -- Default values for P_XDEF partition
+            -- Migration strategy
+            migration_method    VARCHAR2(30) DEFAULT ''CTAS'',
+            use_compression     CHAR(1) DEFAULT ''Y'',
+            compression_type    VARCHAR2(50) DEFAULT ''QUERY HIGH'',
+            target_tablespace   VARCHAR2(30),
+            parallel_degree     NUMBER DEFAULT 4,
+            enable_row_movement CHAR(1) DEFAULT ''Y'',
+            automatic_list      CHAR(1) DEFAULT ''N'',
+            list_default_values VARCHAR2(4000),
 
-    -- ILM integration
-    apply_ilm_policies  CHAR(1) DEFAULT 'Y',
-    ilm_policy_template VARCHAR2(100),         -- Reference to policy template
+            -- ILM integration
+            apply_ilm_policies  CHAR(1) DEFAULT ''Y'',
+            ilm_policy_template VARCHAR2(100),
 
-    -- Status tracking
-    status              VARCHAR2(30) DEFAULT 'PENDING',
-    validation_status   VARCHAR2(30),
-    error_message       VARCHAR2(4000),
+            -- Status tracking
+            status              VARCHAR2(30) DEFAULT ''PENDING'',
+            validation_status   VARCHAR2(30),
+            error_message       VARCHAR2(4000),
 
-    -- Execution details
-    analysis_date       TIMESTAMP,
-    execution_start     TIMESTAMP,
-    execution_end       TIMESTAMP,
-    duration_seconds    NUMBER,
+            -- Execution details
+            analysis_date       TIMESTAMP,
+            execution_start     TIMESTAMP,
+            execution_end       TIMESTAMP,
+            duration_seconds    NUMBER,
 
-    -- Metrics
-    source_rows         NUMBER,
-    source_size_mb      NUMBER,
-    target_size_mb      NUMBER,
-    space_saved_mb      NUMBER,
+            -- Metrics
+            source_rows         NUMBER,
+            source_size_mb      NUMBER,
+            target_size_mb      NUMBER,
+            space_saved_mb      NUMBER,
 
-    -- Rollback info
-    backup_table_name   VARCHAR2(128),
-    can_rollback        CHAR(1) DEFAULT 'N',
+            -- Rollback info
+            backup_table_name   VARCHAR2(128),
+            can_rollback        CHAR(1) DEFAULT ''N'',
 
-    created_by          VARCHAR2(50) DEFAULT USER,
-    created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
+            created_by          VARCHAR2(50) DEFAULT USER,
+            created_date        TIMESTAMP DEFAULT SYSTIMESTAMP,
 
-    CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
-    CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'ANALYZING', 'ANALYZED', 'READY', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')),
-    CONSTRAINT chk_mig_method CHECK (migration_method IN ('CTAS', 'ONLINE', 'EXCHANGE')),
-    CONSTRAINT chk_automatic_list CHECK (automatic_list IN ('Y', 'N'))
-);
+            CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
+            CONSTRAINT chk_task_status CHECK (status IN (''PENDING'', ''ANALYZING'', ''ANALYZED'', ''READY'', ''RUNNING'', ''COMPLETED'', ''FAILED'', ''ROLLED_BACK'')),
+            CONSTRAINT chk_mig_method CHECK (migration_method IN (''CTAS'', ''ONLINE'', ''EXCHANGE'')),
+            CONSTRAINT chk_automatic_list CHECK (automatic_list IN (''Y'', ''N''))
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_tasks');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_migration_tasks already exists - preserving existing data');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
-CREATE INDEX idx_mig_task_project ON cmr.dwh_migration_tasks(project_id);
-CREATE INDEX idx_mig_task_source ON cmr.dwh_migration_tasks(source_owner, source_table);
-CREATE INDEX idx_mig_task_status ON cmr.dwh_migration_tasks(status);
+-- Create indexes
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_task_project ON cmr.dwh_migration_tasks(project_id)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_task_project');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_task_project already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_task_source ON cmr.dwh_migration_tasks(source_owner, source_table)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_task_source');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_task_source already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_task_status ON cmr.dwh_migration_tasks(status)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_task_status');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_task_status already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.enable_row_movement IS 'Enable row movement for partitioned table - allows Oracle to move rows between partitions when partition key values change (recommended for partitioned tables)';
@@ -150,88 +160,109 @@ COMMENT ON COLUMN cmr.dwh_migration_tasks.list_default_values IS 'Default values
 -- Migration Analysis Results - Store analysis recommendations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_migration_analysis (
-    analysis_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    task_id             NUMBER NOT NULL,
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_migration_analysis (
+            analysis_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            task_id             NUMBER NOT NULL,
 
-    -- Table statistics
-    table_rows          NUMBER,
-    table_size_mb       NUMBER,
-    num_indexes         NUMBER,
-    num_constraints     NUMBER,
-    num_triggers        NUMBER,
-    has_lobs            CHAR(1),
-    has_foreign_keys    CHAR(1),
+            -- Table statistics
+            table_rows          NUMBER,
+            table_size_mb       NUMBER,
+            num_indexes         NUMBER,
+            num_constraints     NUMBER,
+            num_triggers        NUMBER,
+            has_lobs            CHAR(1),
+            has_foreign_keys    CHAR(1),
 
-    -- Data distribution analysis
-    candidate_columns   CLOB,                  -- JSON or list of candidate partition keys
-    recommended_strategy VARCHAR2(100),
-    recommendation_reason VARCHAR2(1000),
+            -- Data distribution analysis
+            candidate_columns   CLOB,
+            recommended_strategy VARCHAR2(100),
+            recommendation_reason VARCHAR2(1000),
 
-    -- Date column conversion (for non-standard date formats)
-    date_column_name    VARCHAR2(128),         -- Primary date column selected for partitioning
-    date_column_type    VARCHAR2(30),          -- Original data type (NUMBER, VARCHAR2, etc.)
-    date_format_detected VARCHAR2(50),         -- Detected format (YYYYMMDD, UNIX_TIMESTAMP, etc.)
-    date_conversion_expr VARCHAR2(500),        -- Conversion expression for migration
-    requires_conversion CHAR(1) DEFAULT 'N',   -- Y if date conversion needed
+            -- Date column conversion (for non-standard date formats)
+            date_column_name    VARCHAR2(128),
+            date_column_type    VARCHAR2(30),
+            date_format_detected VARCHAR2(50),
+            date_conversion_expr VARCHAR2(500),
+            requires_conversion CHAR(1) DEFAULT ''N'',
 
-    -- Comprehensive date column analysis (JSON format)
-    all_date_columns_analysis CLOB,            -- JSON array of all date columns analyzed
+            -- Comprehensive date column analysis (JSON format)
+            all_date_columns_analysis CLOB,
 
-    -- Partition estimates
-    estimated_partitions NUMBER,
-    avg_partition_size_mb NUMBER,
-    estimated_compression_ratio NUMBER,
-    estimated_space_savings_mb NUMBER,
+            -- Partition estimates
+            estimated_partitions NUMBER,
+            avg_partition_size_mb NUMBER,
+            estimated_compression_ratio NUMBER,
+            estimated_space_savings_mb NUMBER,
 
-    -- Complexity assessment
-    complexity_score    NUMBER,                -- 1-10, higher = more complex
-    complexity_factors  VARCHAR2(2000),
-    estimated_downtime_minutes NUMBER,
+            -- Complexity assessment
+            complexity_score    NUMBER,
+            complexity_factors  VARCHAR2(2000),
+            estimated_downtime_minutes NUMBER,
 
-    -- Online redefinition capability
-    supports_online_redef CHAR(1) DEFAULT 'N', -- Y if DBMS_REDEFINITION supported
-    online_redef_method VARCHAR2(30),          -- CONS_USE_PK, CONS_USE_ROWID, or NULL
-    recommended_method  VARCHAR2(30),          -- CTAS, ONLINE, EXCHANGE
+            -- Online redefinition capability
+            supports_online_redef CHAR(1) DEFAULT ''N'',
+            online_redef_method VARCHAR2(30),
+            recommended_method  VARCHAR2(30),
 
-    -- Dependencies
-    dependent_objects   CLOB,                  -- JSON list of dependent objects
-    blocking_issues     CLOB,                  -- Issues that must be resolved
-    warnings            CLOB,                  -- Non-blocking warnings
+            -- Dependencies
+            dependent_objects   CLOB,
+            blocking_issues     CLOB,
+            warnings            CLOB,
 
-    -- Tablespace configuration (detected during analysis)
-    target_tablespace           VARCHAR2(128),  -- Which tablespace will be used
-    tablespace_extent_mgmt      VARCHAR2(30),   -- LOCAL or DICTIONARY
-    tablespace_allocation       VARCHAR2(30),   -- UNIFORM or SYSTEM (autoallocate)
-    tablespace_ssm              VARCHAR2(30),   -- AUTO (ASSM) or MANUAL
-    tablespace_uniform_size     NUMBER,         -- If UNIFORM, size in bytes
+            -- Tablespace configuration (detected during analysis)
+            target_tablespace           VARCHAR2(128),
+            tablespace_extent_mgmt      VARCHAR2(30),
+            tablespace_allocation       VARCHAR2(30),
+            tablespace_ssm              VARCHAR2(30),
+            tablespace_uniform_size     NUMBER,
 
-    -- Storage recommendations (calculated based on table size + tablespace type)
-    recommended_initial_extent  NUMBER,         -- Calculated INITIAL size in bytes
-    recommended_next_extent     NUMBER,         -- Calculated NEXT size (or NULL if not needed)
-    recommended_storage_clause  VARCHAR2(500),  -- Complete STORAGE(...) or NULL
-    storage_recommendation_reason VARCHAR2(1000), -- Why this was recommended
+            -- Storage recommendations (calculated based on table size + tablespace type)
+            recommended_initial_extent  NUMBER,
+            recommended_next_extent     NUMBER,
+            recommended_storage_clause  VARCHAR2(500),
+            storage_recommendation_reason VARCHAR2(1000),
 
-    -- NULL handling for partition key
-    partition_key_null_count    NUMBER,         -- Count of NULL values in partition key column
-    partition_key_null_percentage NUMBER(5,2),  -- Percentage of NULLs (0-100)
-    null_handling_strategy      VARCHAR2(30),   -- UPDATE (update NULLs to default) or ALLOW_NULLS (allow in first/default partition)
-    null_default_value          VARCHAR2(100),  -- Default value for NULLs (if UPDATE strategy selected)
-    null_handling_reason        VARCHAR2(1000), -- Explanation of strategy choice
+            -- NULL handling for partition key
+            partition_key_null_count    NUMBER,
+            partition_key_null_percentage NUMBER(5,2),
+            null_handling_strategy      VARCHAR2(30),
+            null_default_value          VARCHAR2(100),
+            null_handling_reason        VARCHAR2(1000),
 
-    -- Partition boundary dates (actual data range for initial partition)
-    partition_boundary_min_date DATE,           -- Earliest non-NULL date in data
-    partition_boundary_max_date DATE,           -- Latest non-NULL date in data
-    partition_range_years       NUMBER,         -- Date range in years (max - min)
-    partition_boundary_recommendation VARCHAR2(1000), -- How to set initial partition to avoid ORA-14300
+            -- Partition boundary dates (actual data range for initial partition)
+            partition_boundary_min_date DATE,
+            partition_boundary_max_date DATE,
+            partition_range_years       NUMBER,
+            partition_boundary_recommendation VARCHAR2(1000),
 
-    analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
-    analysis_duration_seconds NUMBER,          -- Duration of analysis in seconds
+            analysis_date       TIMESTAMP DEFAULT SYSTIMESTAMP,
+            analysis_duration_seconds NUMBER,
 
-    CONSTRAINT fk_mig_analysis_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
-);
+            CONSTRAINT fk_mig_analysis_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_analysis');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_migration_analysis already exists - preserving existing data');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
-CREATE INDEX idx_mig_analysis_task ON cmr.dwh_migration_analysis(task_id);
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_analysis_task ON cmr.dwh_migration_analysis(task_id)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_analysis_task');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_analysis_task already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_migration_analysis IS 'Analysis results and recommendations for migrations';
 
@@ -240,33 +271,75 @@ COMMENT ON TABLE cmr.dwh_migration_analysis IS 'Analysis results and recommendat
 -- Migration Execution Log - Detailed step-by-step log
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_migration_execution_log (
-    log_id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    execution_id        NUMBER NOT NULL,       -- Groups all steps from one migration execution
-    task_id             NUMBER NOT NULL,
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_migration_execution_log (
+            log_id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            execution_id        NUMBER NOT NULL,
+            task_id             NUMBER NOT NULL,
 
-    step_number         NUMBER,
-    step_name           VARCHAR2(200),
-    step_type           VARCHAR2(50),          -- ANALYZE, VALIDATE, CREATE, COPY, INDEX, CONSTRAINT, etc.
-    sql_statement       CLOB,
+            step_number         NUMBER,
+            step_name           VARCHAR2(200),
+            step_type           VARCHAR2(50),
+            sql_statement       CLOB,
 
-    start_time          TIMESTAMP,
-    end_time            TIMESTAMP,
-    duration_seconds    NUMBER,
-    status              VARCHAR2(20),          -- RUNNING, SUCCESS, FAILED, SKIPPED
+            start_time          TIMESTAMP,
+            end_time            TIMESTAMP,
+            duration_seconds    NUMBER,
+            status              VARCHAR2(20),
 
-    rows_processed      NUMBER,
-    error_code          NUMBER,
-    error_message       VARCHAR2(4000),
+            rows_processed      NUMBER,
+            error_code          NUMBER,
+            error_message       VARCHAR2(4000),
 
-    CONSTRAINT fk_mig_log_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
-);
+            CONSTRAINT fk_mig_log_task FOREIGN KEY (task_id) REFERENCES cmr.dwh_migration_tasks(task_id)
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_execution_log');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_migration_execution_log already exists - preserving existing data');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
-CREATE INDEX idx_mig_log_task ON cmr.dwh_migration_execution_log(task_id, step_number);
-CREATE INDEX idx_mig_log_execution ON cmr.dwh_migration_execution_log(execution_id);
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_log_task ON cmr.dwh_migration_execution_log(task_id, step_number)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_log_task');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_log_task already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE INDEX idx_mig_log_execution ON cmr.dwh_migration_execution_log(execution_id)';
+    DBMS_OUTPUT.PUT_LINE('Created index: idx_mig_log_execution');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE IN (-955, -1408) THEN
+            DBMS_OUTPUT.PUT_LINE('Index idx_mig_log_execution already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 -- Create sequence for execution IDs
-CREATE SEQUENCE cmr.dwh_mig_execution_seq START WITH 1 INCREMENT BY 1 NOCACHE;
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE SEQUENCE cmr.dwh_mig_execution_seq START WITH 1 INCREMENT BY 1 NOCACHE';
+    DBMS_OUTPUT.PUT_LINE('Created sequence: dwh_mig_execution_seq');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Sequence dwh_mig_execution_seq already exists');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_migration_execution_log IS 'Detailed execution log for migrations';
 COMMENT ON COLUMN cmr.dwh_migration_execution_log.execution_id IS 'Groups all log entries from a single migration execution. All steps in one run share the same execution_id.';
@@ -276,18 +349,29 @@ COMMENT ON COLUMN cmr.dwh_migration_execution_log.execution_id IS 'Groups all lo
 -- ILM Policy Templates for Migrations
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE cmr.dwh_migration_ilm_templates (
-    template_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    template_name       VARCHAR2(100) NOT NULL UNIQUE,
-    description         VARCHAR2(500),
-    table_type          VARCHAR2(50),          -- FACT, DIMENSION, STAGING, etc.
+BEGIN
+    EXECUTE IMMEDIATE '
+        CREATE TABLE cmr.dwh_migration_ilm_templates (
+            template_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            template_name       VARCHAR2(100) NOT NULL UNIQUE,
+            description         VARCHAR2(500),
+            table_type          VARCHAR2(50),
 
-    -- Default policies to create
-    policies_json       CLOB,                  -- JSON array of policy definitions
+            -- Default policies to create
+            policies_json       CLOB,
 
-    created_by          VARCHAR2(50) DEFAULT USER,
-    created_date        TIMESTAMP DEFAULT SYSTIMESTAMP
-);
+            created_by          VARCHAR2(50) DEFAULT USER,
+            created_date        TIMESTAMP DEFAULT SYSTIMESTAMP
+        )';
+    DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_ilm_templates');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -955 THEN
+            DBMS_OUTPUT.PUT_LINE('Table dwh_migration_ilm_templates already exists - preserving existing data');
+        ELSE RAISE;
+        END IF;
+END;
+/
 
 COMMENT ON TABLE cmr.dwh_migration_ilm_templates IS 'ILM policy templates for newly migrated tables';
 
