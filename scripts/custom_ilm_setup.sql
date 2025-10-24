@@ -553,14 +553,14 @@ BEGIN
     -- Validation 1: Table exists and is partitioned
     BEGIN
         SELECT COUNT(*) INTO v_partition_count
-        FROM all_part_tables
+        FROM dba_part_tables
         WHERE owner = :NEW.table_owner
         AND table_name = :NEW.table_name;
 
         IF v_partition_count = 0 THEN
             -- Check if table exists but is not partitioned
             SELECT COUNT(*) INTO v_count
-            FROM all_tables
+            FROM dba_tables
             WHERE owner = :NEW.table_owner
             AND table_name = :NEW.table_name;
 
@@ -997,7 +997,7 @@ SELECT
      AND e.partition_name = tp.partition_name
      AND e.status = 'SUCCESS'
     ) AS last_ilm_execution
-FROM all_tab_partitions tp
+FROM dba_tab_partitions tp
 LEFT JOIN dba_segments s
     ON s.owner = tp.table_owner
     AND s.segment_name = tp.table_name
@@ -1372,10 +1372,10 @@ SELECT
         WHEN NVL(a.cold_partitions, 0) > NVL(tp.partition_count, 0) * 0.3 THEN 'Many COLD partitions - consider archival'
         ELSE 'Table lifecycle management is healthy'
     END AS recommendation
-FROM all_tables t
+FROM dba_tables t
 LEFT JOIN (
     SELECT table_owner, table_name, COUNT(*) AS partition_count, partitioning_type
-    FROM all_part_tables
+    FROM dba_part_tables
     GROUP BY table_owner, table_name, partitioning_type
 ) tp ON tp.table_owner = t.owner AND tp.table_name = t.table_name
 LEFT JOIN (
@@ -1457,7 +1457,7 @@ CREATE OR REPLACE PROCEDURE dwh_refresh_partition_access_tracking(
         v_date DATE;
     BEGIN
         SELECT high_value INTO v_high_value
-        FROM all_tab_partitions
+        FROM dba_tab_partitions
         WHERE table_owner = p_owner
         AND table_name = p_table
         AND partition_name = p_partition;
@@ -1498,7 +1498,7 @@ BEGIN
                     TRUNC(SYSDATE - get_partition_date(tp.table_owner, tp.table_name, tp.partition_name))
                 ELSE 10000  -- Very old if can't determine
             END AS calculated_age_days
-        FROM all_tab_partitions tp
+        FROM dba_tab_partitions tp
         LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
@@ -1629,7 +1629,7 @@ BEGIN
             -- Note: Cannot extract date from high_value directly (LONG type)
             -- Using SYSDATE as fallback - will be updated by refresh procedure
             SYSDATE AS estimated_write_date
-        FROM all_tab_partitions tp
+        FROM dba_tab_partitions tp
         LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
@@ -1873,7 +1873,7 @@ END;
 -- -----------------------------------------------------------------------------
 -- Convert LONG high_value to VARCHAR2
 -- -----------------------------------------------------------------------------
--- Note: high_value in all_tab_partitions is LONG type and cannot be used
+-- Note: high_value in dba_tab_partitions is LONG type and cannot be used
 -- directly in WHERE clauses or with functions. This function converts it.
 -- -----------------------------------------------------------------------------
 
@@ -1887,7 +1887,7 @@ AS
     v_high_value_str VARCHAR2(4000);
 BEGIN
     SELECT high_value INTO v_high_value
-    FROM all_tab_partitions
+    FROM dba_tab_partitions
     WHERE table_owner = p_table_owner
     AND table_name = p_table_name
     AND partition_name = p_partition_name;
