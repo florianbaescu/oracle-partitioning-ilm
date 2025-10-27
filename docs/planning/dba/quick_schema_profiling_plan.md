@@ -1,14 +1,18 @@
 # Quick Schema Profiling for ILM Candidate Identification
-## Lightweight Metadata-Only Assessment (120TB Production Database)
+## Schema-Level Ranking with Tablespace Analysis (120TB Production Database)
 
-**Document Purpose:** Define a fast, low-impact metadata-only profiling approach to quickly identify top ILM candidates without table data scanning or detailed analysis.
+**Document Purpose:** Define a fast, low-impact metadata-only profiling approach to rank schemas for ILM migration, considering tablespace consolidation and space reduction goals.
 
 **Target Audience:** DBA Team, Project Managers
-**Document Version:** 1.0
+**Document Version:** 2.0
 **Created:** 2025-10-27
+**Last Updated:** 2025-10-27 - Added schema-level ranking and tablespace analysis
 
 **⚠️ PRODUCTION DATABASE NOTICE:**
 This is a **metadata-only** profiling approach - no table data scanning, no sampling, minimal production impact.
+
+**🎯 MIGRATION STRATEGY:**
+Migrate entire schemas one at a time to new ILM tablespace sets (HOT/WARM/COLD), reducing overall storage footprint.
 
 ---
 
@@ -23,27 +27,38 @@ This is a **metadata-only** profiling approach - no table data scanning, no samp
 ### Quick Profiling Solution
 - **Duration:** 15-30 minutes total
 - **Impact:** VERY LOW - metadata queries only
-- **Output:** Ranked list of top 50-100 candidates for detailed analysis
+- **Output:** Ranked list of schemas for ILM migration (with tablespace details)
 - **Approach:** Use database dictionary views only (no table data access)
 
-### Two-Phase Strategy
+### Schema-First Migration Strategy
 
-**Phase 0: Quick Profiling (THIS DOCUMENT)**
+**Why Schema-Level Migration:**
+1. **Tablespace Consolidation** - Each schema → New ILM tablespace set (HOT/WARM/COLD)
+2. **Administrative Simplicity** - Migrate one schema at a time, not cherry-picking tables
+3. **Clear Progress Tracking** - "Schema X complete" vs tracking 100s of individual tables
+4. **Dependency Management** - All schema objects migrate together
+5. **Space Reduction Goal** - Entire schema footprint reduction is measurable
+
+**Two-Phase Strategy:**
+
+**Phase 0: Quick Schema Profiling (THIS DOCUMENT)**
 - Fast metadata-only queries (15-30 min)
-- Simple scoring algorithm
-- Identify top 50-100 candidates
-- **Then** → Phase 1: Detailed analysis on top candidates only
+- Schema-level aggregation and scoring
+- Tablespace mapping and analysis
+- Identify top 5-10 schemas for ILM migration
+- **Then** → Phase 1: Detailed analysis on top schemas only
 
 ---
 
 ## Table of Contents
 
 1. [Quick Profiling Approach](#1-quick-profiling-approach)
-2. [Lightweight Scoring Model](#2-lightweight-scoring-model)
+2. [Schema-Level Scoring Model](#2-schema-level-scoring-model)
 3. [Metadata Queries](#3-metadata-queries)
-4. [Quick Scoring Implementation](#4-quick-scoring-implementation)
-5. [Sample Output](#5-sample-output)
-6. [Next Steps](#6-next-steps)
+4. [Schema Scoring Implementation](#4-schema-scoring-implementation)
+5. [Schema Ranking Reports](#5-schema-ranking-reports)
+6. [Tablespace Consolidation Strategy](#6-tablespace-consolidation-strategy)
+7. [Next Steps](#7-next-steps)
 
 ---
 
@@ -79,6 +94,22 @@ This is a **metadata-only** profiling approach - no table data scanning, no samp
 **From DBA_INDEXES:**
 - Index count (complexity indicator)
 
+**From DBA_TABLESPACES:**
+- Tablespace names per schema
+- Tablespace sizes and allocation
+- Block size
+- Extent management (UNIFORM, AUTOALLOCATE)
+
+**From DBA_DATA_FILES:**
+- Datafile sizes per tablespace
+- Datafile locations
+- Autoextend settings
+- Total allocated space vs used space
+
+**From DBA_FREE_SPACE:**
+- Free space per tablespace
+- Space utilization percentage
+
 ### 1.2 What We DON'T Get (Requires Data Scanning)
 - ❌ Exact date ranges (min/max dates)
 - ❌ % of old data
@@ -86,54 +117,66 @@ This is a **metadata-only** profiling approach - no table data scanning, no samp
 - ❌ NULL percentages
 - ❌ Actual row counts for sampling
 
-### 1.3 Why This Is Sufficient for Initial Ranking
+### 1.3 Why Schema-Level Ranking Is Sufficient
 
 **Good indicators from metadata alone:**
-1. **Size** - Bigger tables = more impact
-2. **BASICFILE LOBs** - Immediate migration need
-3. **Non-partitioned large tables** - Clear partition candidates
-4. **Has date columns** - Partition potential
-5. **Low complexity** - Fewer dependencies = easier migration
+
+**Schema-Level Metrics:**
+1. **Total Schema Size** - Bigger schemas = more storage reduction impact
+2. **Tablespace Count** - Fewer tablespaces per schema = easier consolidation
+3. **Tablespace Sizes** - Current footprint → Target ILM footprint
+4. **Table Count** - Number of objects to migrate
+
+**Table-Level Aggregates:**
+5. **BASICFILE LOB Count** - Schemas with many BASICFILE LOBs = high priority
+6. **Non-Partitioned Large Tables** - Count per schema
+7. **Date Column Availability** - % of tables with partition keys
+8. **Average Complexity** - Schema-wide dependency patterns
 
 ---
 
-## 2. Lightweight Scoring Model
+## 2. Schema-Level Scoring Model
 
-### 2.1 Simplified Two-Dimensional Scoring
+### 2.1 Schema-Level Three-Dimensional Scoring
 
-**Dimension 1: Impact Potential (0-100)**
-- Table size: 70 points (bigger = better)
-- LOB migration opportunity: 30 points (BASICFILE = high score)
+**Dimension 1: Storage Impact (0-100)**
+- Total schema size: 60 points (larger = more reduction potential)
+- Estimated compression savings: 40 points (based on BASICFILE LOBs, non-partitioned tables)
 
-**Dimension 2: Migration Ease (0-100)**
-- NOT partitioned: +40 points (easier than repartitioning)
-- Few indexes: +20 points (< 5 indexes)
-- Few constraints: +20 points (< 3 FKs)
-- Has date columns: +20 points (partition key available)
+**Dimension 2: Migration Readiness (0-100)**
+- Tablespace simplicity: 30 points (fewer tablespaces = easier consolidation)
+- Average table complexity: 30 points (fewer dependencies = faster migration)
+- Partitioning readiness: 40 points (% of tables with date columns)
 
-**Quick Priority Score:**
+**Dimension 3: Business Value (0-100)**
+- Space reduction urgency: 60 points (size / available space ratio)
+- BASICFILE migration need: 40 points (count of BASICFILE LOB tables)
+
+**Schema Priority Score:**
 ```
-Priority = (Impact × 0.60) + (Ease × 0.40)
+Schema Priority = (Storage Impact × 0.50) + (Migration Readiness × 0.30) + (Business Value × 0.20)
 ```
 
-### 2.2 Priority Categories
+**Range:** 0-100 (higher = better candidate)
 
-| Score | Category | Action |
-|-------|----------|--------|
-| 80-100 | **QUICK WIN** | Detailed analysis immediately |
-| 60-79 | **HIGH PRIORITY** | Include in detailed analysis |
-| 40-59 | **MEDIUM** | Consider for detailed analysis |
-| 0-39 | **DEFER** | Skip detailed analysis for now |
+### 2.2 Schema Priority Categories
 
-### 2.3 Candidate Types (Fast Classification)
+| Score | Category | Action | Timeline |
+|-------|----------|--------|----------|
+| 80-100 | **QUICK WIN SCHEMA** | Begin ILM migration immediately | Wave 0 (Pilot) |
+| 60-79 | **HIGH PRIORITY SCHEMA** | Include in Wave 1 | Quarter 1 |
+| 40-59 | **MEDIUM PRIORITY SCHEMA** | Include in Wave 2-3 | Quarter 2-3 |
+| 0-39 | **LOW PRIORITY SCHEMA** | Defer to future waves | Quarter 4+ |
 
-| Type | Criteria | Priority |
-|------|----------|----------|
-| **Type A: Large Non-Partitioned** | > 50 GB, not partitioned, has date column | HIGH |
-| **Type B: BASICFILE LOBs** | Any size, has BASICFILE LOBs | HIGH |
-| **Type C: Large Simple Tables** | > 100 GB, few dependencies | HIGH |
-| **Type D: Medium Tables** | 20-50 GB, not partitioned | MEDIUM |
-| **Type E: Small or Complex** | < 20 GB or many dependencies | LOW |
+### 2.3 Schema Candidate Types (Fast Classification)
+
+| Type | Criteria | Priority | Migration Strategy |
+|------|----------|----------|-------------------|
+| **Type A: Large Simple Schema** | > 10 TB, few tablespaces (≤3), many non-partitioned tables | HIGH | Full schema to new ILM tablespaces |
+| **Type B: BASICFILE Heavy** | > 50% of tables have BASICFILE LOBs | HIGH | LOB migration + partitioning |
+| **Type C: Medium Mature Schema** | 1-10 TB, 3-5 tablespaces, good date column coverage | HIGH | Standard ILM migration |
+| **Type D: Complex Large Schema** | > 10 TB, many tablespaces (>5), complex dependencies | MEDIUM | Phased migration (table groups) |
+| **Type E: Small or Low-Value** | < 1 TB, small savings potential | LOW | Batch migration in later waves |
 
 ---
 
@@ -267,98 +310,269 @@ COMMIT;
 
 **Expected Duration:** 2-5 minutes for 120TB database
 
----
-
-## 4. Quick Scoring Implementation
-
-### 4.1 Calculate Scores
+### 3.3 Query 2: Tablespace Analysis per Schema
 
 ```sql
--- Add score columns to temp table
-ALTER TABLE temp_quick_profile ADD impact_score NUMBER;
-ALTER TABLE temp_quick_profile ADD ease_score NUMBER;
-ALTER TABLE temp_quick_profile ADD priority_score NUMBER;
-ALTER TABLE temp_quick_profile ADD candidate_type VARCHAR2(30);
+-- Gather tablespace information for each schema
+CREATE GLOBAL TEMPORARY TABLE temp_schema_tablespaces (
+    owner VARCHAR2(128),
+    tablespace_name VARCHAR2(128),
+    tablespace_size_gb NUMBER,
+    tablespace_used_gb NUMBER,
+    tablespace_free_gb NUMBER,
+    pct_used NUMBER,
+    block_size NUMBER,
+    extent_management VARCHAR2(30),
+    datafile_count NUMBER
+) ON COMMIT PRESERVE ROWS;
 
--- Calculate Impact Score (0-100)
-UPDATE temp_quick_profile SET impact_score = ROUND(
-    -- Size component (70 points)
-    (size_gb / (SELECT MAX(size_gb) FROM temp_quick_profile) * 70) +
-    -- LOB migration opportunity (30 points)
+INSERT INTO temp_schema_tablespaces
+SELECT
+    ts_owner.owner,
+    ts.tablespace_name,
+    ROUND(SUM(df.bytes) / 1024 / 1024 / 1024, 2) AS tablespace_size_gb,
+    ROUND((SUM(df.bytes) - NVL(SUM(fs.bytes), 0)) / 1024 / 1024 / 1024, 2) AS tablespace_used_gb,
+    ROUND(NVL(SUM(fs.bytes), 0) / 1024 / 1024 / 1024, 2) AS tablespace_free_gb,
+    ROUND(((SUM(df.bytes) - NVL(SUM(fs.bytes), 0)) / NULLIF(SUM(df.bytes), 0)) * 100, 1) AS pct_used,
+    ts.block_size,
+    ts.extent_management,
+    COUNT(DISTINCT df.file_id) AS datafile_count
+FROM (
+    -- Get unique tablespaces per tracked schema
+    SELECT DISTINCT t.owner, t.tablespace_name
+    FROM dba_tables t
+    JOIN temp_tracked_schemas ts ON t.owner = ts.owner
+    WHERE t.tablespace_name IS NOT NULL
+) ts_owner
+JOIN dba_tablespaces ts ON ts_owner.tablespace_name = ts.tablespace_name
+LEFT JOIN dba_data_files df ON ts.tablespace_name = df.tablespace_name
+LEFT JOIN (
+    SELECT tablespace_name, SUM(bytes) AS bytes
+    FROM dba_free_space
+    GROUP BY tablespace_name
+) fs ON ts.tablespace_name = fs.tablespace_name
+GROUP BY ts_owner.owner, ts.tablespace_name, ts.block_size, ts.extent_management
+ORDER BY ts_owner.owner, tablespace_size_gb DESC;
+
+COMMIT;
+```
+
+**Expected Duration:** 30-60 seconds
+
+### 3.4 Query 3: Schema-Level Aggregation
+
+```sql
+-- Aggregate table-level metrics to schema level
+CREATE GLOBAL TEMPORARY TABLE temp_schema_profile (
+    owner VARCHAR2(128),
+    -- Size metrics
+    total_size_gb NUMBER,
+    table_count NUMBER,
+    large_table_count NUMBER, -- > 50 GB
+    avg_table_size_gb NUMBER,
+
+    -- Tablespace metrics
+    tablespace_count NUMBER,
+    total_tablespace_size_gb NUMBER,
+    avg_tablespace_used_pct NUMBER,
+
+    -- Partitioning metrics
+    partitioned_table_count NUMBER,
+    non_partitioned_table_count NUMBER,
+    pct_partitioned NUMBER,
+    tables_with_date_columns NUMBER,
+    pct_partition_ready NUMBER,
+
+    -- LOB metrics
+    lob_table_count NUMBER,
+    basicfile_lob_table_count NUMBER,
+    securefile_lob_table_count NUMBER,
+    total_basicfile_lob_columns NUMBER,
+    pct_tables_with_basicfile NUMBER,
+
+    -- Complexity metrics
+    avg_indexes_per_table NUMBER,
+    avg_fk_per_table NUMBER,
+    tables_with_many_dependencies NUMBER, -- > 5 indexes or > 3 FKs
+
+    -- Estimated savings
+    estimated_compression_savings_gb NUMBER,
+    estimated_savings_pct NUMBER
+) ON COMMIT PRESERVE ROWS;
+
+INSERT INTO temp_schema_profile
+SELECT
+    p.owner,
+
+    -- Size metrics
+    ROUND(SUM(p.size_gb), 2) AS total_size_gb,
+    COUNT(*) AS table_count,
+    SUM(CASE WHEN p.size_gb > 50 THEN 1 ELSE 0 END) AS large_table_count,
+    ROUND(AVG(p.size_gb), 2) AS avg_table_size_gb,
+
+    -- Tablespace metrics
+    (SELECT COUNT(DISTINCT tablespace_name)
+     FROM temp_schema_tablespaces
+     WHERE owner = p.owner) AS tablespace_count,
+    (SELECT ROUND(SUM(tablespace_size_gb), 2)
+     FROM temp_schema_tablespaces
+     WHERE owner = p.owner) AS total_tablespace_size_gb,
+    (SELECT ROUND(AVG(pct_used), 1)
+     FROM temp_schema_tablespaces
+     WHERE owner = p.owner) AS avg_tablespace_used_pct,
+
+    -- Partitioning metrics
+    SUM(CASE WHEN p.partitioned = 'YES' THEN 1 ELSE 0 END) AS partitioned_table_count,
+    SUM(CASE WHEN p.partitioned = 'NO' THEN 1 ELSE 0 END) AS non_partitioned_table_count,
+    ROUND((SUM(CASE WHEN p.partitioned = 'YES' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) * 100, 1) AS pct_partitioned,
+    SUM(CASE WHEN p.has_date_columns = 'YES' THEN 1 ELSE 0 END) AS tables_with_date_columns,
+    ROUND((SUM(CASE WHEN p.has_date_columns = 'YES' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) * 100, 1) AS pct_partition_ready,
+
+    -- LOB metrics
+    SUM(CASE WHEN p.has_lobs = 'YES' THEN 1 ELSE 0 END) AS lob_table_count,
+    SUM(CASE WHEN p.lob_type = 'BASICFILE' THEN 1 ELSE 0 END) AS basicfile_lob_table_count,
+    SUM(CASE WHEN p.lob_type = 'SECUREFILE' THEN 1 ELSE 0 END) AS securefile_lob_table_count,
+    SUM(p.basicfile_lob_count) AS total_basicfile_lob_columns,
+    ROUND((SUM(CASE WHEN p.lob_type = 'BASICFILE' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) * 100, 1) AS pct_tables_with_basicfile,
+
+    -- Complexity metrics
+    ROUND(AVG(p.num_indexes), 1) AS avg_indexes_per_table,
+    ROUND(AVG(p.num_fk_constraints), 1) AS avg_fk_per_table,
+    SUM(CASE WHEN p.num_indexes > 5 OR p.num_fk_constraints > 3 THEN 1 ELSE 0 END) AS tables_with_many_dependencies,
+
+    -- Estimated savings (conservative: 40% compression on non-partitioned tables with LOBs)
+    ROUND(SUM(
+        CASE
+            WHEN p.partitioned = 'NO' AND p.has_lobs = 'YES' THEN p.size_gb * 0.40
+            WHEN p.partitioned = 'NO' THEN p.size_gb * 0.30
+            WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
+            ELSE p.size_gb * 0.20
+        END
+    ), 2) AS estimated_compression_savings_gb,
+    ROUND((SUM(
+        CASE
+            WHEN p.partitioned = 'NO' AND p.has_lobs = 'YES' THEN p.size_gb * 0.40
+            WHEN p.partitioned = 'NO' THEN p.size_gb * 0.30
+            WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
+            ELSE p.size_gb * 0.20
+        END
+    ) / NULLIF(SUM(p.size_gb), 0)) * 100, 1) AS estimated_savings_pct
+FROM temp_quick_profile p
+GROUP BY p.owner
+ORDER BY SUM(p.size_gb) DESC;
+
+COMMIT;
+```
+
+**Expected Duration:** 10-30 seconds
+
+---
+
+## 4. Schema Scoring Implementation
+
+### 4.1 Calculate Schema-Level Scores
+
+```sql
+-- Add score columns to schema profile table
+ALTER TABLE temp_schema_profile ADD storage_impact_score NUMBER;
+ALTER TABLE temp_schema_profile ADD migration_readiness_score NUMBER;
+ALTER TABLE temp_schema_profile ADD business_value_score NUMBER;
+ALTER TABLE temp_schema_profile ADD schema_priority_score NUMBER;
+ALTER TABLE temp_schema_profile ADD schema_category VARCHAR2(30);
+ALTER TABLE temp_schema_profile ADD schema_type VARCHAR2(30);
+
+-- Calculate Storage Impact Score (0-100)
+UPDATE temp_schema_profile SET storage_impact_score = ROUND(
+    -- Total size component (60 points)
+    (total_size_gb / (SELECT MAX(total_size_gb) FROM temp_schema_profile) * 60) +
+    -- Estimated savings component (40 points)
+    (estimated_compression_savings_gb / (SELECT MAX(estimated_compression_savings_gb) FROM temp_schema_profile) * 40)
+, 1);
+
+-- Calculate Migration Readiness Score (0-100)
+UPDATE temp_schema_profile SET migration_readiness_score = ROUND(
+    -- Tablespace simplicity (30 points - fewer tablespaces = easier)
     CASE
-        WHEN lob_type = 'BASICFILE' THEN 30
-        WHEN lob_type = 'MIXED' THEN 20
+        WHEN tablespace_count <= 2 THEN 30
+        WHEN tablespace_count <= 3 THEN 25
+        WHEN tablespace_count <= 5 THEN 15
+        ELSE 5
+    END +
+    -- Average complexity (30 points - fewer dependencies = faster)
+    CASE
+        WHEN avg_indexes_per_table <= 3 AND avg_fk_per_table <= 1 THEN 30
+        WHEN avg_indexes_per_table <= 5 AND avg_fk_per_table <= 2 THEN 20
+        ELSE 10
+    END +
+    -- Partitioning readiness (40 points - % tables with date columns)
+    (pct_partition_ready * 0.40)
+, 1);
+
+-- Calculate Business Value Score (0-100)
+UPDATE temp_schema_profile SET business_value_score = ROUND(
+    -- Space reduction urgency (60 points - based on savings potential)
+    (estimated_savings_pct * 0.60) +
+    -- BASICFILE migration need (40 points)
+    CASE
+        WHEN pct_tables_with_basicfile >= 50 THEN 40
+        WHEN pct_tables_with_basicfile >= 30 THEN 30
+        WHEN pct_tables_with_basicfile >= 10 THEN 20
+        WHEN total_basicfile_lob_columns > 0 THEN 10
         ELSE 0
     END
 , 1);
 
--- Calculate Ease Score (0-100)
-UPDATE temp_quick_profile SET ease_score = ROUND(
-    -- Not partitioned (40 points - easier to partition from scratch)
-    CASE WHEN partitioned = 'NO' THEN 40 ELSE 0 END +
-    -- Few indexes (20 points)
-    CASE
-        WHEN num_indexes = 0 THEN 20
-        WHEN num_indexes <= 3 THEN 15
-        WHEN num_indexes <= 5 THEN 10
-        ELSE 0
-    END +
-    -- Few FK constraints (20 points)
-    CASE
-        WHEN num_fk_constraints = 0 THEN 20
-        WHEN num_fk_constraints <= 2 THEN 15
-        ELSE 5
-    END +
-    -- Has date columns (20 points - partition key available)
-    CASE WHEN has_date_columns = 'YES' THEN 20 ELSE 0 END
+-- Calculate Schema Priority Score (weighted average)
+UPDATE temp_schema_profile SET schema_priority_score = ROUND(
+    (storage_impact_score * 0.50) +
+    (migration_readiness_score * 0.30) +
+    (business_value_score * 0.20)
 , 1);
 
--- Calculate Priority Score
-UPDATE temp_quick_profile SET priority_score = ROUND(
-    (impact_score * 0.60) + (ease_score * 0.40)
-, 1);
+-- Assign schema categories
+UPDATE temp_schema_profile SET schema_category = CASE
+    WHEN schema_priority_score >= 80 THEN 'QUICK_WIN_SCHEMA'
+    WHEN schema_priority_score >= 60 THEN 'HIGH_PRIORITY'
+    WHEN schema_priority_score >= 40 THEN 'MEDIUM_PRIORITY'
+    ELSE 'LOW_PRIORITY'
+END;
 
--- Assign candidate types
-UPDATE temp_quick_profile SET candidate_type = CASE
-    WHEN size_gb > 50 AND partitioned = 'NO' AND has_date_columns = 'YES' THEN 'TYPE_A_LARGE_NONPART'
-    WHEN lob_type = 'BASICFILE' THEN 'TYPE_B_BASICFILE_LOB'
-    WHEN size_gb > 100 AND num_indexes <= 5 AND num_fk_constraints <= 2 THEN 'TYPE_C_LARGE_SIMPLE'
-    WHEN size_gb BETWEEN 20 AND 50 AND partitioned = 'NO' THEN 'TYPE_D_MEDIUM'
-    ELSE 'TYPE_E_LOW_PRIORITY'
+-- Assign schema types
+UPDATE temp_schema_profile SET schema_type = CASE
+    WHEN total_size_gb > 10000 AND tablespace_count <= 3 THEN 'TYPE_A_LARGE_SIMPLE'
+    WHEN pct_tables_with_basicfile >= 50 THEN 'TYPE_B_BASICFILE_HEAVY'
+    WHEN total_size_gb BETWEEN 1000 AND 10000 AND tablespace_count BETWEEN 3 AND 5 THEN 'TYPE_C_MEDIUM_MATURE'
+    WHEN total_size_gb > 10000 AND tablespace_count > 5 THEN 'TYPE_D_COMPLEX_LARGE'
+    ELSE 'TYPE_E_SMALL_LOW_VALUE'
 END;
 
 COMMIT;
 ```
 
-### 4.2 Final Ranking View
+### 4.2 Schema Ranking View
 
 ```sql
--- Top candidates for detailed analysis
+-- Final schema ranking for ILM migration
+CREATE OR REPLACE VIEW v_ilm_schema_ranking AS
 SELECT
     owner,
-    table_name,
-    size_gb,
-    partitioned,
-    lob_type,
-    basicfile_lob_count,
-    has_date_columns,
-    date_column_count,
-    num_indexes,
-    num_fk_constraints,
-    impact_score,
-    ease_score,
-    priority_score,
-    candidate_type,
-    CASE
-        WHEN priority_score >= 80 THEN 'QUICK_WIN'
-        WHEN priority_score >= 60 THEN 'HIGH'
-        WHEN priority_score >= 40 THEN 'MEDIUM'
-        ELSE 'LOW'
-    END AS priority_category
-FROM temp_quick_profile
-WHERE priority_score >= 40  -- Focus on MEDIUM and above
-ORDER BY priority_score DESC
-FETCH FIRST 100 ROWS ONLY;
+    total_size_gb,
+    estimated_compression_savings_gb,
+    estimated_savings_pct,
+    table_count,
+    tablespace_count,
+    pct_partitioned,
+    pct_partition_ready,
+    basicfile_lob_table_count,
+    total_basicfile_lob_columns,
+    storage_impact_score,
+    migration_readiness_score,
+    business_value_score,
+    schema_priority_score,
+    schema_category,
+    schema_type
+FROM temp_schema_profile
+ORDER BY schema_priority_score DESC;
 ```
 
 ---
