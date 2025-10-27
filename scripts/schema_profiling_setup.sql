@@ -380,8 +380,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting table profiling (min size: ' || p_min_table_size_gb || ' GB)...');
 
-        INSERT INTO cmr.dwh_tables_quick_profile
-        SELECT
+        INSERT /*+ APPEND */ INTO cmr.dwh_tables_quick_profile
+        SELECT /*+ PARALLEL(t,4) PARALLEL(s,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
             t.owner,
             t.table_name,
             ROUND(NVL(s.bytes, 0) / 1024 / 1024 / 1024, 2) AS size_gb,
@@ -404,7 +404,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             SYSDATE AS profile_date
         FROM dba_tables t
         JOIN (
-            SELECT DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT NULL
+            SELECT /*+ NO_MERGE */ DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT NULL
         ) tracked_schemas ON t.owner = tracked_schemas.owner
         LEFT JOIN dba_segments s
             ON t.owner = s.owner
@@ -412,33 +412,37 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             AND s.segment_type IN ('TABLE', 'TABLE PARTITION')
         -- Index count
         LEFT JOIN (
-            SELECT owner, table_name, COUNT(*) AS index_count
+            SELECT /*+ NO_MERGE PARALLEL(dba_indexes,2) */
+                owner, table_name, COUNT(*) AS index_count
             FROM dba_indexes
             GROUP BY owner, table_name
         ) idx ON t.owner = idx.owner AND t.table_name = idx.table_name
         -- FK constraints
         LEFT JOIN (
-            SELECT owner, table_name, COUNT(*) AS fk_count
+            SELECT /*+ NO_MERGE PARALLEL(dba_constraints,2) */
+                owner, table_name, COUNT(*) AS fk_count
             FROM dba_constraints
             WHERE constraint_type = 'R'
             GROUP BY owner, table_name
         ) fk ON t.owner = fk.owner AND t.table_name = fk.table_name
         -- Primary key
         LEFT JOIN (
-            SELECT owner, table_name, constraint_name
+            SELECT /*+ NO_MERGE PARALLEL(dba_constraints,2) */
+                owner, table_name, constraint_name
             FROM dba_constraints
             WHERE constraint_type = 'P'
         ) pk ON t.owner = pk.owner AND t.table_name = pk.table_name
         -- Date columns
         LEFT JOIN (
-            SELECT owner, table_name, COUNT(*) AS date_column_count
+            SELECT /*+ NO_MERGE PARALLEL(dba_tab_columns,2) */
+                owner, table_name, COUNT(*) AS date_column_count
             FROM dba_tab_columns
             WHERE data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             GROUP BY owner, table_name
         ) dc ON t.owner = dc.owner AND t.table_name = dc.table_name
         -- LOB analysis
         LEFT JOIN (
-            SELECT
+            SELECT /*+ NO_MERGE PARALLEL(l,2) PARALLEL(ls,2) USE_HASH(l ls) */
                 l.owner,
                 l.table_name,
                 COUNT(*) AS lob_column_count,
@@ -477,8 +481,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting tablespace profiling...');
 
-        INSERT INTO cmr.dwh_schema_tablespaces
-        SELECT
+        INSERT /*+ APPEND */ INTO cmr.dwh_schema_tablespaces
+        SELECT /*+ PARALLEL(ts_owner,2) PARALLEL(ts,2) PARALLEL(df,2) USE_HASH(ts_owner ts df fs) */
             ts_owner.owner,
             ts.tablespace_name,
             ROUND(SUM(df.bytes) / 1024 / 1024 / 1024, 2) AS tablespace_size_gb,
@@ -491,7 +495,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             SYSDATE AS profile_date
         FROM (
             -- Get unique tablespaces per tracked schema
-            SELECT DISTINCT t.owner, t.tablespace_name
+            SELECT /*+ NO_MERGE */ DISTINCT t.owner, t.tablespace_name
             FROM dba_tables t
             WHERE t.owner IN (SELECT owner FROM cmr.dwh_tables_quick_profile)
               AND t.tablespace_name IS NOT NULL
@@ -499,7 +503,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         JOIN dba_tablespaces ts ON ts_owner.tablespace_name = ts.tablespace_name
         LEFT JOIN dba_data_files df ON ts.tablespace_name = df.tablespace_name
         LEFT JOIN (
-            SELECT tablespace_name, SUM(bytes) AS bytes
+            SELECT /*+ NO_MERGE PARALLEL(dba_free_space,2) */
+                tablespace_name, SUM(bytes) AS bytes
             FROM dba_free_space
             GROUP BY tablespace_name
         ) fs ON ts.tablespace_name = fs.tablespace_name
@@ -519,8 +524,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting schema-level aggregation...');
 
-        INSERT INTO cmr.dwh_schema_profile
-        SELECT
+        INSERT /*+ APPEND */ INTO cmr.dwh_schema_profile
+        SELECT /*+ PARALLEL(p,2) */
             p.owner,
 
             -- Size metrics
@@ -530,13 +535,16 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             ROUND(AVG(p.size_gb), 2) AS avg_table_size_gb,
 
             -- Tablespace metrics
-            (SELECT COUNT(DISTINCT tablespace_name)
+            (SELECT /*+ INDEX(dwh_schema_tablespaces dwh_schema_tablespaces_i2) */
+                COUNT(DISTINCT tablespace_name)
              FROM cmr.dwh_schema_tablespaces
              WHERE owner = p.owner) AS tablespace_count,
-            (SELECT ROUND(SUM(tablespace_size_gb), 2)
+            (SELECT /*+ INDEX(dwh_schema_tablespaces dwh_schema_tablespaces_i2) */
+                ROUND(SUM(tablespace_size_gb), 2)
              FROM cmr.dwh_schema_tablespaces
              WHERE owner = p.owner) AS total_tablespace_size_gb,
-            (SELECT ROUND(AVG(pct_used), 1)
+            (SELECT /*+ INDEX(dwh_schema_tablespaces dwh_schema_tablespaces_i2) */
+                ROUND(AVG(pct_used), 1)
              FROM cmr.dwh_schema_tablespaces
              WHERE owner = p.owner) AS avg_tablespace_used_pct,
 
@@ -600,13 +608,13 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         log_message('Starting score calculation...');
 
         -- Calculate Storage Impact Score (0-100)
-        UPDATE cmr.dwh_schema_profile SET storage_impact_score = ROUND(
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET storage_impact_score = ROUND(
             (total_size_gb / (SELECT MAX(total_size_gb) FROM cmr.dwh_schema_profile) * 60) +
             (estimated_compression_savings_gb / (SELECT MAX(estimated_compression_savings_gb) FROM cmr.dwh_schema_profile) * 40)
         , 1);
 
         -- Calculate Migration Readiness Score (0-100)
-        UPDATE cmr.dwh_schema_profile SET migration_readiness_score = ROUND(
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET migration_readiness_score = ROUND(
             CASE
                 WHEN tablespace_count <= 2 THEN 30
                 WHEN tablespace_count <= 3 THEN 25
@@ -622,7 +630,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         , 1);
 
         -- Calculate Business Value Score (0-100)
-        UPDATE cmr.dwh_schema_profile SET business_value_score = ROUND(
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET business_value_score = ROUND(
             (estimated_savings_pct * 0.60) +
             CASE
                 WHEN pct_tables_with_basicfile >= 50 THEN 40
@@ -634,14 +642,14 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         , 1);
 
         -- Calculate Schema Priority Score (weighted average)
-        UPDATE cmr.dwh_schema_profile SET schema_priority_score = ROUND(
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_priority_score = ROUND(
             (storage_impact_score * 0.50) +
             (migration_readiness_score * 0.30) +
             (business_value_score * 0.20)
         , 1);
 
         -- Assign schema categories
-        UPDATE cmr.dwh_schema_profile SET schema_category = CASE
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_category = CASE
             WHEN schema_priority_score >= 80 THEN 'QUICK_WIN_SCHEMA'
             WHEN schema_priority_score >= 60 THEN 'HIGH_PRIORITY'
             WHEN schema_priority_score >= 40 THEN 'MEDIUM_PRIORITY'
@@ -649,7 +657,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         END;
 
         -- Assign schema types
-        UPDATE cmr.dwh_schema_profile SET schema_type = CASE
+        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_type = CASE
             WHEN total_size_gb > 10000 AND tablespace_count <= 3 THEN 'TYPE_A_LARGE_SIMPLE'
             WHEN pct_tables_with_basicfile >= 50 THEN 'TYPE_B_BASICFILE_HEAVY'
             WHEN total_size_gb BETWEEN 1000 AND 10000 AND tablespace_count BETWEEN 3 AND 5 THEN 'TYPE_C_MEDIUM_MATURE'
