@@ -380,10 +380,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting table profiling (min size: ' || p_min_table_size_gb || ' GB)...');
 
-        -- Enable parallel DML for this session
-        EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
-
-        INSERT /*+ APPEND */ INTO cmr.dwh_tables_quick_profile
+        INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_tables_quick_profile
         SELECT /*+ PARALLEL(t,4) PARALLEL(s,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
             t.owner,
             t.table_name,
@@ -484,10 +481,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting tablespace profiling...');
 
-        -- Enable parallel DML for this session
-        EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
-
-        INSERT /*+ APPEND */ INTO cmr.dwh_schema_tablespaces
+        INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_tablespaces
         SELECT /*+ PARALLEL(ts_owner,2) PARALLEL(ts,2) PARALLEL(df,2) USE_HASH(ts_owner ts df fs) */
             ts_owner.owner,
             ts.tablespace_name,
@@ -530,10 +524,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting schema-level aggregation...');
 
-        -- Enable parallel DML for this session
-        EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
-
-        INSERT /*+ APPEND */ INTO cmr.dwh_schema_profile
+        INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_profile
         SELECT /*+ PARALLEL(p,2) */
             p.owner,
 
@@ -616,17 +607,14 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting score calculation...');
 
-        -- Enable parallel DML for this session
-        EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
-
         -- Calculate Storage Impact Score (0-100)
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET storage_impact_score = ROUND(
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET storage_impact_score = ROUND(
             (total_size_gb / (SELECT MAX(total_size_gb) FROM cmr.dwh_schema_profile) * 60) +
             (estimated_compression_savings_gb / (SELECT MAX(estimated_compression_savings_gb) FROM cmr.dwh_schema_profile) * 40)
         , 1);
 
         -- Calculate Migration Readiness Score (0-100)
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET migration_readiness_score = ROUND(
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET migration_readiness_score = ROUND(
             CASE
                 WHEN tablespace_count <= 2 THEN 30
                 WHEN tablespace_count <= 3 THEN 25
@@ -642,7 +630,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         , 1);
 
         -- Calculate Business Value Score (0-100)
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET business_value_score = ROUND(
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET business_value_score = ROUND(
             (estimated_savings_pct * 0.60) +
             CASE
                 WHEN pct_tables_with_basicfile >= 50 THEN 40
@@ -654,14 +642,14 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         , 1);
 
         -- Calculate Schema Priority Score (weighted average)
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_priority_score = ROUND(
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_priority_score = ROUND(
             (storage_impact_score * 0.50) +
             (migration_readiness_score * 0.30) +
             (business_value_score * 0.20)
         , 1);
 
         -- Assign schema categories
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_category = CASE
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_category = CASE
             WHEN schema_priority_score >= 80 THEN 'QUICK_WIN_SCHEMA'
             WHEN schema_priority_score >= 60 THEN 'HIGH_PRIORITY'
             WHEN schema_priority_score >= 40 THEN 'MEDIUM_PRIORITY'
@@ -669,7 +657,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         END;
 
         -- Assign schema types
-        UPDATE /*+ PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_type = CASE
+        UPDATE /*+ ENABLE_PARALLEL_DML PARALLEL(cmr.dwh_schema_profile,2) */ cmr.dwh_schema_profile SET schema_type = CASE
             WHEN total_size_gb > 10000 AND tablespace_count <= 3 THEN 'TYPE_A_LARGE_SIMPLE'
             WHEN pct_tables_with_basicfile >= 50 THEN 'TYPE_B_BASICFILE_HEAVY'
             WHEN total_size_gb BETWEEN 1000 AND 10000 AND tablespace_count BETWEEN 3 AND 5 THEN 'TYPE_C_MEDIUM_MATURE'
