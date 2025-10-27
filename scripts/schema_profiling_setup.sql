@@ -8,7 +8,7 @@
 --
 -- Components:
 --   1. Tables: dwh_tables_quick_profile, dwh_schema_tablespaces, dwh_schema_profile
---   2. View: dwh_v_ilm_schema_ranking
+--   2. View: v_dwh_ilm_schema_ranking
 --   3. Package: pck_dwh_schema_profiler
 --
 -- Usage:
@@ -25,7 +25,7 @@
 --   /
 --
 --   -- View results:
---   SELECT * FROM cmr.dwh_v_ilm_schema_ranking;
+--   SELECT * FROM cmr.v_dwh_ilm_schema_ranking;
 -- =====================================================================
 
 PROMPT
