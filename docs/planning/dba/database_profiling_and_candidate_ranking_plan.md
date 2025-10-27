@@ -4,8 +4,9 @@
 **Document Purpose:** Define a systematic approach to profile the current 120TB database, identify optimal candidates for ILM migration, and rank them by impact, complexity, and risk.
 
 **Target Audience:** DBA Team, Project Managers, Architecture Team
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Created:** 2025-10-27
+**Last Updated:** 2025-10-27 - Scoped to LOGS.DWH_PROCESS schemas
 
 ---
 
@@ -20,6 +21,8 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 5. **Learn iteratively** - Apply lessons from early migrations to later phases
 
 **Expected Outcome:** A prioritized list of schemas/tables ranked by a composite score that balances impact, complexity, and risk, enabling data-driven migration decisions.
+
+**Profiling Scope:** This analysis focuses exclusively on schemas tracked in the `LOGS.DWH_PROCESS` table, ensuring alignment with existing ETL processes and data warehouse operations.
 
 ---
 
@@ -43,7 +46,7 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 ### 1.1 Primary Goals
 
 **Objective 1: Inventory Assessment**
-- Catalog all schemas, tablespaces, and major objects
+- Catalog all schemas tracked in LOGS.DWH_PROCESS, their tablespaces, and major objects
 - Measure current storage consumption by schema/tablespace
 - Identify growth trends over time
 
@@ -72,7 +75,7 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| Database coverage | 100% of schemas profiled | Schema count |
+| Database coverage | 100% of tracked schemas profiled | Schema count from LOGS.DWH_PROCESS |
 | Candidate identification | Top 50 tables by impact | Ranked list |
 | Storage savings potential | 50-70% reduction | GB saved estimate |
 | Quick wins identified | 5-10 low-risk, high-impact tables | Pilot candidate list |
@@ -89,7 +92,7 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 
 | Data Point | Purpose | Source |
 |------------|---------|--------|
-| Schema name | Identification | dba_users, dba_tablespaces |
+| Schema name | Identification | LOGS.DWH_PROCESS, dba_users |
 | Total size (GB) | Impact potential | dba_segments |
 | Number of tables | Complexity indicator | dba_tables |
 | Growth rate (GB/month) | Ongoing savings potential | AWR, historical snapshots |
@@ -143,6 +146,27 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 - Apply scoring algorithms
 - Generate ranked candidate list
 - Create migration wave assignments
+
+### 2.3 Schema Scoping Methodology
+
+**Schema Filter Source:**
+All profiling queries are scoped to schemas tracked in `LOGS.DWH_PROCESS` table. This ensures:
+- Focus on actively managed data warehouse schemas
+- Alignment with existing ETL processes
+- Exclusion of unused or legacy schemas
+- Consistency with operational monitoring
+
+**Implementation Approach:**
+1. Create temporary table of tracked schemas for query performance
+2. Use this filter consistently across all profiling queries
+3. Validate schema list before beginning profiling
+4. Document any excluded schemas for future reference
+
+**Query Pattern:**
+```sql
+-- Standard filter used in all profiling queries
+WHERE owner IN (SELECT DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT NULL)
+```
 
 ---
 
@@ -296,6 +320,67 @@ Based on the composite score:
 
 ## 4. Profiling Queries
 
+### 4.0 Setup: Schema Scoping and Performance Optimization
+
+**Step 1: Analyze Tracked Schemas from LOGS.DWH_PROCESS**
+
+```sql
+-- Query 0: Identify Tracked Schemas
+-- This query provides an overview of all schemas managed in the data warehouse
+SELECT
+    DISTINCT owner AS schema_name,
+    COUNT(DISTINCT process_name) AS process_count,
+    MIN(last_run_date) AS first_tracked_date,
+    MAX(last_run_date) AS last_tracked_date,
+    COUNT(*) AS total_processes
+FROM LOGS.DWH_PROCESS
+WHERE owner IS NOT NULL
+GROUP BY owner
+ORDER BY owner;
+
+-- Expected Output:
+-- SCHEMA_NAME  PROCESS_COUNT  FIRST_TRACKED_DATE  LAST_TRACKED_DATE  TOTAL_PROCESSES
+-- CMR          25             2023-01-15          2025-10-27         156
+-- DWH_PROD     42             2022-05-20          2025-10-27         389
+-- APP_SALES    18             2023-03-10          2025-10-27         92
+```
+
+**Step 2: Create Temporary Table for Performance**
+
+```sql
+-- Create temporary table of tracked schemas for efficient query reuse
+CREATE GLOBAL TEMPORARY TABLE temp_tracked_schemas (
+    owner VARCHAR2(128)
+) ON COMMIT PRESERVE ROWS;
+
+-- Populate with tracked schemas
+INSERT INTO temp_tracked_schemas
+SELECT DISTINCT owner
+FROM LOGS.DWH_PROCESS
+WHERE owner IS NOT NULL;
+
+COMMIT;
+
+-- Verify schema count
+SELECT COUNT(*) AS tracked_schema_count FROM temp_tracked_schemas;
+
+-- Optional: Create index for better performance
+CREATE INDEX idx_temp_tracked_schemas ON temp_tracked_schemas(owner);
+```
+
+**Benefits of This Approach:**
+- Query performance: Temp table is faster than repeated subqueries
+- Consistency: All queries use same schema list
+- Validation: Easy to verify schema count before profiling
+- Flexibility: Can add/remove schemas from temp table if needed
+
+**Note:** All subsequent queries in this document use the filter:
+```sql
+WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
+```
+
+---
+
 ### 4.1 Schema/Tablespace Inventory
 
 ```sql
@@ -320,7 +405,7 @@ FROM (
         ON t.owner = s.owner
         AND t.table_name = s.segment_name
         AND s.segment_type = 'TABLE'
-    WHERE t.owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP', 'WMSYS', 'XDB', 'ORDDATA', 'CTXSYS', 'MDSYS', 'OLAPSYS')
+    WHERE t.owner IN (SELECT owner FROM temp_tracked_schemas)
       AND t.temporary = 'N'
       AND t.nested = 'NO'
 )
@@ -389,7 +474,7 @@ LEFT JOIN (
     FROM dba_tab_partitions
     GROUP BY table_owner, table_name
 ) tp ON t.owner = tp.table_owner AND t.table_name = tp.table_name
-WHERE t.owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+WHERE t.owner IN (SELECT owner FROM temp_tracked_schemas)
   AND s.bytes IS NOT NULL
   AND s.bytes > 1024*1024*1024  -- > 1 GB
 ORDER BY s.bytes DESC
@@ -421,7 +506,7 @@ LEFT JOIN dba_segments ts
     ON l.owner = ts.owner
     AND l.table_name = ts.segment_name
     AND ts.segment_type = 'TABLE'
-WHERE l.owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+WHERE l.owner IN (SELECT owner FROM temp_tracked_schemas)
   AND s.bytes > 100*1024*1024  -- > 100 MB
 ORDER BY s.bytes DESC;
 ```
@@ -454,7 +539,7 @@ SELECT
         ELSE 'OTHER'
     END AS table_stereotype
 FROM dba_tab_columns
-WHERE owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
   AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
   AND (
       UPPER(column_name) LIKE '%DATE%' OR
@@ -509,7 +594,7 @@ JOIN dba_objects o
     ON s.obj# = o.object_id
 WHERE s.snap_id BETWEEN (SELECT MAX(snap_id) - 168 FROM dba_hist_snapshot)  -- Last 7 days (24*7=168)
                     AND (SELECT MAX(snap_id) FROM dba_hist_snapshot)
-  AND o.owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+  AND o.owner IN (SELECT owner FROM temp_tracked_schemas)
   AND o.object_type IN ('TABLE', 'TABLE PARTITION')
 GROUP BY o.owner, o.object_name, o.subobject_name
 HAVING SUM(s.logical_reads_total) > 0
@@ -551,7 +636,7 @@ FROM dba_hist_seg_stat s
 JOIN dba_objects o ON s.obj# = o.object_id
 WHERE s.snap_id BETWEEN (SELECT MIN(snap_id) FROM dba_hist_snapshot WHERE begin_interval_time >= ADD_MONTHS(SYSDATE, -12))
                     AND (SELECT MAX(snap_id) FROM dba_hist_snapshot)
-  AND o.owner NOT IN ('SYS', 'SYSTEM')
+  AND o.owner IN (SELECT owner FROM temp_tracked_schemas)
   AND o.object_type = 'TABLE'
 GROUP BY o.owner, o.object_name
 HAVING MAX(s.space_used_total) - MIN(s.space_used_total) > 1024*1024*1024  -- > 1 GB growth
@@ -622,7 +707,7 @@ SELECT
 FROM dba_tables t
 JOIN dba_segments s ON t.owner = s.owner AND t.table_name = s.segment_name
 WHERE s.bytes > 10*1024*1024*1024  -- > 10 GB
-  AND t.owner NOT IN ('SYS', 'SYSTEM')
+  AND t.owner IN (SELECT owner FROM temp_tracked_schemas)
   AND EXISTS (
       -- Has date column
       SELECT 1 FROM dba_tab_columns c
