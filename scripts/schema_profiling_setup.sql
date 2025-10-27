@@ -380,15 +380,11 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting table profiling (min size: ' || p_min_table_size_gb || ' GB)...');
 
-        -- Clear existing data to avoid PK violations
-        DELETE FROM cmr.dwh_tables_quick_profile;
-        COMMIT;
-
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_tables_quick_profile
-        SELECT /*+ PARALLEL(t,4) PARALLEL(s,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
+        SELECT /*+ PARALLEL(t,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
             t.owner,
             t.table_name,
-            ROUND(NVL(s.bytes, 0) / 1024 / 1024 / 1024, 2) AS size_gb,
+            ROUND(NVL(s.total_bytes, 0) / 1024 / 1024 / 1024, 2) AS size_gb,
             t.num_rows,
             t.partitioned,
             t.compression,
@@ -410,10 +406,16 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         JOIN (
             SELECT /*+ NO_MERGE */ DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT NULL
         ) tracked_schemas ON t.owner = tracked_schemas.owner
-        LEFT JOIN dba_segments s
-            ON t.owner = s.owner
-            AND t.table_name = s.segment_name
-            AND s.segment_type IN ('TABLE', 'TABLE PARTITION')
+        -- Aggregate segments to avoid duplicates from partitioned tables
+        LEFT JOIN (
+            SELECT /*+ NO_MERGE PARALLEL(dba_segments,4) */
+                owner,
+                segment_name,
+                SUM(bytes) AS total_bytes
+            FROM dba_segments
+            WHERE segment_type IN ('TABLE', 'TABLE PARTITION')
+            GROUP BY owner, segment_name
+        ) s ON t.owner = s.owner AND t.table_name = s.segment_name
         -- Index count
         LEFT JOIN (
             SELECT /*+ NO_MERGE PARALLEL(dba_indexes,2) */
@@ -469,8 +471,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         ) lob ON t.owner = lob.owner AND t.table_name = lob.table_name
         WHERE t.temporary = 'N'
           AND t.nested = 'NO'
-          AND NVL(s.bytes, 0) > (p_min_table_size_gb * 1024 * 1024 * 1024)
-        ORDER BY s.bytes DESC;
+          AND NVL(s.total_bytes, 0) > (p_min_table_size_gb * 1024 * 1024 * 1024);
 
         v_count := SQL%ROWCOUNT;
         COMMIT;
@@ -484,10 +485,6 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         v_start_time TIMESTAMP := SYSTIMESTAMP;
     BEGIN
         log_message('Starting tablespace profiling...');
-
-        -- Clear existing data to avoid PK violations
-        DELETE FROM cmr.dwh_schema_tablespaces;
-        COMMIT;
 
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_tablespaces
         SELECT /*+ PARALLEL(ts_owner,2) PARALLEL(ts,2) PARALLEL(df,2) USE_HASH(ts_owner ts df fs) */
@@ -531,10 +528,6 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         v_start_time TIMESTAMP := SYSTIMESTAMP;
     BEGIN
         log_message('Starting schema-level aggregation...');
-
-        -- Clear existing data to avoid PK violations
-        DELETE FROM cmr.dwh_schema_profile;
-        COMMIT;
 
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_profile
         SELECT /*+ PARALLEL(p,2) */
