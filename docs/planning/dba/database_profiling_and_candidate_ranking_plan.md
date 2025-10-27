@@ -1,12 +1,12 @@
 # Database Profiling and ILM Candidate Ranking Plan
 ## Large Database Assessment Strategy (120TB Production Database)
 
-**Document Purpose:** Define a systematic approach to profile the current 120TB **PRODUCTION** database, identify optimal candidates for ILM migration, and rank them by impact, complexity, and risk.
+**Document Purpose:** Define a systematic approach to profile the current 120TB **PRODUCTION** database, identify optimal candidates for ILM migration, and rank them by impact, complexity, and data age using fully automated database metadata analysis.
 
 **Target Audience:** DBA Team, Project Managers, Architecture Team
-**Document Version:** 1.2
+**Document Version:** 1.3
 **Created:** 2025-10-27
-**Last Updated:** 2025-10-27 - Added production database safety guidelines
+**Last Updated:** 2025-10-27 - Converted to fully automated 3-dimensional scoring model (removed Risk Score requiring manual input)
 
 **⚠️ PRODUCTION DATABASE NOTICE:**
 This profiling plan is designed for a live production environment. All queries include resource management controls, execution timing guidelines, and safety measures to ensure minimal impact on production workloads.
@@ -23,7 +23,7 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 4. **Phase implementation** - Break into manageable waves
 5. **Learn iteratively** - Apply lessons from early migrations to later phases
 
-**Expected Outcome:** A prioritized list of schemas/tables ranked by a composite score that balances impact, complexity, and risk, enabling data-driven migration decisions.
+**Expected Outcome:** A prioritized list of schemas/tables ranked by a composite score that balances impact, complexity, and data age, enabling data-driven migration decisions.
 
 **Profiling Scope:** This analysis focuses exclusively on schemas tracked in the `LOGS.DWH_PROCESS` table, ensuring alignment with existing ETL processes and data warehouse operations.
 
@@ -78,12 +78,7 @@ This section provides comprehensive safety guidelines for executing profiling qu
 | Query 0 (Schema Scoping) | Anytime | < 5 seconds | LOW IMPACT |
 | Query 1 (Schema Inventory) | Off-peak hours | 2-5 minutes | LOW IMPACT |
 | Query 2 (Tablespace Stats) | Anytime | < 1 minute | LOW IMPACT |
-| Query 3 (Large Tables) | Off-peak hours | 5-10 minutes | MEDIUM IMPACT |
-| Query 4 (LOB Analysis) | Weekend/Night | 10-15 minutes | MEDIUM IMPACT |
-| Query 5 (Date Columns) | Off-peak hours | 5-10 minutes | LOW IMPACT |
-| Query 6 (Data Age Sampling) | Weekend/Night | 1-2 hours | HIGH IMPACT |
-| Query 7 (I/O Stats - AWR) | Off-peak hours | 5-10 minutes | LOW IMPACT |
-| Query 8 (Growth Rate) | Off-peak hours | 10-15 minutes | MEDIUM IMPACT |
+| Phase 2 (Table Analysis) | Weekend | 2-4 hours | MEDIUM IMPACT (uses analyze_table package) |
 
 **Off-Peak Definitions:**
 - **Weekday Off-Peak**: 10 PM - 6 AM local time
@@ -187,11 +182,7 @@ WHERE ...
 
 | Query | Recommended Hints | Rationale |
 |-------|------------------|-----------|
-| Query 3 (Large Tables) | `PARALLEL(4), FIRST_ROWS(100)` | Limit parallelism, optimize for top results |
-| Query 4 (LOB Analysis) | `PARALLEL(2), NO_INDEX_FFS` | Moderate parallelism, avoid full scans |
-| Query 6 (Data Age) | `PARALLEL(4), SAMPLE(10)` | Use sampling when possible |
-| Query 7 (I/O Stats) | `PARALLEL(2)` | AWR queries are usually fast |
-| Query 8 (Growth Rate) | `PARALLEL(4)` | Historical data access |
+| Phase 2 (analyze_table) | Built-in sampling | Package handles resource management |
 
 ### 0.3 Incremental Execution Strategy
 
@@ -222,9 +213,9 @@ WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
 FETCH FIRST 100 ROWS ONLY;
 ```
 
-**Schema-by-Schema Execution:**
+**Schema-by-Schema Execution (Example - if needed):**
 ```sql
--- Process one schema at a time for Query 6 (Data Age Sampling)
+-- Process one schema at a time (example for heavy queries)
 DECLARE
     v_sql VARCHAR2(32767);
 BEGIN
@@ -350,68 +341,6 @@ END;
 /
 ```
 
-### 0.5 Query Cancellation Procedures
-
-**How to Cancel a Running Profiling Query:**
-
-**Option 1: Kill Your Own Session (Safest)**
-```sql
--- Find your session ID
-SELECT sid, serial#, username, status, sql_id, seconds_in_wait
-FROM v$session
-WHERE username = USER
-  AND status = 'ACTIVE';
-
--- Kill your own session (requires ALTER SYSTEM privilege)
-ALTER SYSTEM KILL SESSION 'sid,serial#' IMMEDIATE;
-```
-
-**Option 2: Cancel Query via SQL*Plus**
-```
--- In SQL*Plus, press CTRL+C to cancel current query
--- This sends a cancel signal to the database
-```
-
-**Option 3: Use DBMS_SYSTEM (DBA Privilege Required)**
-```sql
--- Cancel specific SQL execution
-BEGIN
-    DBMS_SYSTEM.CANCEL_SQL(
-        sid    => 123,    -- Your session ID
-        serial => 45678   -- Your session serial#
-    );
-END;
-/
-```
-
-**Emergency Rollback Plan:**
-
-1. **Immediate Actions:**
-   - Press CTRL+C in SQL*Plus/SQL Developer
-   - Kill session using ALTER SYSTEM KILL SESSION
-   - Alert DBA team if system impact detected
-
-2. **Post-Cancellation Verification:**
-```sql
--- Verify no profiling queries still running
-SELECT sid, serial#, sql_id, status, seconds_in_wait
-FROM v$session
-WHERE username = 'YOUR_USERNAME'
-  AND status = 'ACTIVE';
-
--- Check for locks held by your session
-SELECT
-    l.sid,
-    s.serial#,
-    l.type,
-    l.lmode,
-    o.object_name
-FROM v$lock l
-JOIN v$session s ON l.sid = s.sid
-LEFT JOIN dba_objects o ON l.id1 = o.object_id
-WHERE s.username = 'YOUR_USERNAME';
-```
-
 3. **Resume Profiling:**
    - Wait 5-10 minutes for system load to stabilize
    - Re-check system load (Section 0.1 pre-execution checklist)
@@ -433,10 +362,10 @@ WHERE s.username = 'YOUR_USERNAME';
 - ❌ Never run `SELECT * FROM dba_segments` without filters
 - ❌ Avoid `COUNT(*)` on tables > 1TB without sampling
 - ❌ Don't use `PARALLEL(16+)` - excessive parallelism
-- ❌ Never run data age sampling (Query 6) during peak hours
 - ❌ Don't execute all queries simultaneously
 - ❌ Avoid queries without time limits or row limits
 - ❌ Don't profile critical production tables during business hours
+- ❌ Don't run full table scans for age distribution - use estimation from date ranges instead
 
 ### 0.7 Communication Protocol
 
@@ -505,7 +434,7 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 **Objective 4: Complexity Assessment**
 - Evaluate migration effort (DDL complexity, downtime)
 - Identify dependencies and constraints
-- Assess risk level (business criticality)
+- Assess technical complexity factors
 
 **Objective 5: Prioritization**
 - Rank all candidates using multi-factor scoring
@@ -517,11 +446,11 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 | Metric | Target | Measurement |
 |--------|--------|-------------|
 | Database coverage | 100% of tracked schemas profiled | Schema count from LOGS.DWH_PROCESS |
-| Candidate identification | Top 50 tables by impact | Ranked list |
-| Storage savings potential | 50-70% reduction | GB saved estimate |
+| Candidate identification | Top 100-200 tables analyzed | Ranked list from dwh_migration_analysis |
+| Storage savings potential | 50-70% reduction | GB saved estimate from analyze_table |
 | Quick wins identified | 5-10 low-risk, high-impact tables | Pilot candidate list |
 | Migration phases defined | 3-5 waves | Phase plan |
-| Profiling completion time | 1-2 weeks | Calendar days |
+| Profiling completion time | **1 week** | Using existing analysis package + age estimation |
 
 ---
 
@@ -536,9 +465,9 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 | Schema name | Identification | LOGS.DWH_PROCESS, dba_users |
 | Total size (GB) | Impact potential | dba_segments |
 | Number of tables | Complexity indicator | dba_tables |
-| Growth rate (GB/month) | Ongoing savings potential | AWR, historical snapshots |
 | Tablespace allocation | Storage tier mapping | dba_tablespaces, dba_data_files |
-| Owner/business unit | Risk/criticality assessment | Application metadata |
+| **Note:** Growth rate analysis removed - requires historical snapshots not available in production | |
+| **Note:** Business criticality/owner metadata removed - requires manual input not available automatically | |
 
 #### Table Level
 
@@ -554,7 +483,6 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 | Has LOBs | Migration requirement | dba_lobs |
 | LOB type (BASICFILE/SECUREFILE) | Modernization need | dba_lobs.securefile |
 | Compression status | Current optimization | dba_tables.compression |
-| Access frequency | Hot vs cold classification | DBA_HIST_SEG_STAT |
 
 #### Data Age Distribution
 
@@ -585,57 +513,145 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 **Phase 2: Detailed Table Analysis (Day 3-7) - MEDIUM IMPACT**
 - **Execution Window:** Weekend preferred, or multiple weekday off-peak windows
 - **Expected Duration:** 2-4 hours (spread across multiple sessions)
-- **Queries:** Query 3 (Large Tables), Query 4 (LOB Analysis), Query 5 (Date Columns)
-- **Impact Level:** MEDIUM - Larger dictionary scans
+- **Method:** Use existing `pck_dwh_table_migration_analyzer.analyze_table` package
+- **Impact Level:** MEDIUM - Table sampling and analysis per table
 - **Activities:**
-  - Per-table metrics collection
-  - Partition and LOB analysis
-  - Date column identification
+  - Create migration project and tasks for tables to analyze
+  - Run `analyze_table` procedure for each task
+  - Results stored in `cmr.dwh_migration_analysis`
+  - **Analysis includes:**
+    - Table statistics (size, rows, indexes, constraints, triggers)
+    - **LOB detailed analysis** (BASICFILE vs SECUREFILE, column-level details, sizes, compression status)
+    - Date column identification with comprehensive analysis (all DATE/TIMESTAMP columns)
+    - Partitioning recommendations
+    - Complexity scoring
+    - Compression estimates
+    - Dependency analysis
 - **Pre-Execution:**
   - Verify system load < 60% CPU
-  - Break Query 3 into batches (100+ GB, 10-100 GB, < 10 GB)
-  - Execute Query 4 (LOB) on Sunday morning if possible
+  - Create project: `INSERT INTO cmr.dwh_migration_projects`
+  - Create tasks for top 100-200 tables from Phase 1 results
+  - Process tables in batches (20-30 tables per session)
 - **Monitoring:** Active monitoring every 5 minutes
-- **Throttling:** 5-minute pause between Query 3 and Query 4
+- **Throttling:** Built-in to analyze_table procedure (uses sampling, not full scans)
 
-**Phase 3: Data Age Sampling (Day 8-12) - HIGH IMPACT**
-- **Execution Window:** Weekend nights (Saturday/Sunday 10 PM - 6 AM)
-- **Expected Duration:** 4-8 hours (spread across 2-3 weekend sessions)
-- **Queries:** Query 6 (Data Age Distribution)
-- **Impact Level:** HIGH - Full table scans on large tables
-- **Activities:**
-  - Data age distribution sampling (MIN/MAX dates, % old data)
-  - Execute schema-by-schema with 10% SAMPLE clause
-  - Process largest tables first (prioritize)
-- **Pre-Execution:**
-  - MANDATORY system load check
-  - Set session timeout to 15 minutes per table
-  - Use PARALLEL(4) and SAMPLE(10) hints
-- **Monitoring:**
-  - Continuous monitoring required
-  - Cancel if CPU > 80% for more than 5 minutes
-  - Pause between each table (1-2 seconds)
-- **Incremental Approach:** Process 10-20 tables per session, not all at once
+**Example Usage:**
+```sql
+-- Create profiling project
+INSERT INTO cmr.dwh_migration_projects (project_name, description)
+VALUES ('ILM_PROFILING_2025', 'Database profiling for ILM candidate ranking');
 
-**Phase 4: Access Pattern Analysis (Day 13-14) - LOW-MEDIUM IMPACT**
-- **Execution Window:** Weekday off-peak (10 PM - 6 AM)
-- **Expected Duration:** 30-60 minutes total
-- **Queries:** Query 7 (I/O Stats - AWR), Query 8 (Growth Rate)
-- **Impact Level:** LOW-MEDIUM - AWR queries are generally fast
-- **Activities:**
-  - AWR data mining for I/O patterns
-  - Segment statistics for hot/cold classification
-  - Growth trend calculation
-- **Pre-Execution:** Verify AWR access permissions
-- **Monitoring:** Standard monitoring every 10 minutes
+-- Create tasks for top 100 tables from Phase 1
+INSERT INTO cmr.dwh_migration_tasks (project_id, owner, table_name, priority)
+SELECT
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_PROFILING_2025'),
+    owner,
+    table_name,
+    'HIGH'
+FROM (
+    SELECT owner, table_name, size_gb
+    FROM phase1_schema_inventory  -- Results from Phase 1
+    WHERE size_gb > 10  -- Focus on tables > 10 GB
+    ORDER BY size_gb DESC
+    FETCH FIRST 100 ROWS ONLY
+);
 
-**Phase 5: Scoring and Ranking (Day 15-16) - ANALYSIS PHASE**
+-- Run analysis (in batches)
+BEGIN
+    FOR task_rec IN (
+        SELECT task_id
+        FROM cmr.dwh_migration_tasks
+        WHERE project_id = (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_PROFILING_2025')
+          AND status = 'PENDING'
+        FETCH FIRST 20 ROWS ONLY  -- Process 20 tables per session
+    ) LOOP
+        pck_dwh_table_migration_analyzer.analyze_table(p_task_id => task_rec.task_id);
+        COMMIT;
+        DBMS_LOCK.SLEEP(2);  -- 2-second pause between tables
+    END LOOP;
+END;
+/
+
+-- Query results
+SELECT
+    t.owner,
+    t.table_name,
+    a.table_size_mb / 1024 AS size_gb,
+    a.has_lobs,
+    a.date_column_name,
+    a.recommended_strategy,
+    a.complexity_score,
+    a.estimated_space_savings_mb / 1024 AS estimated_savings_gb
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON t.task_id = a.task_id
+WHERE t.project_id = (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_PROFILING_2025')
+ORDER BY a.table_size_mb DESC;
+```
+
+**Advantages over manual queries:**
+- ✅ Comprehensive analysis in one procedure call
+- ✅ Results stored in structured tables for easy querying
+- ✅ Rerunnable (supports MERGE for updates)
+- ✅ Built-in error handling and logging
+- ✅ Automatic complexity scoring
+- ✅ Date column analysis includes ALL date columns, not just patterns
+- ✅ Uses sampling (10% for data age) to minimize production impact
+
+**Phase 3: Data Age Distribution - ✅ SKIP THIS PHASE**
+- **Status:** ✅ **FULLY COVERED BY PHASE 2** (using estimation)
+- **What Phase 2 Already Provides:**
+  - ✅ Min/Max dates for all date columns (from `all_date_columns_analysis` JSON)
+  - ✅ Date range in days/years
+  - ✅ Date column quality and NULL percentages
+
+**Age Distribution Estimation:**
+We can estimate % of old data from the date range without scanning tables:
+
+```sql
+-- Estimate % data over 3 years using date range from Phase 2
+SELECT
+    t.owner,
+    t.table_name,
+    a.date_column_name,
+    a.date_range_years,
+    -- Estimate % old data assuming uniform distribution
+    CASE
+        WHEN a.date_range_years >= 3 THEN
+            ROUND(LEAST(((a.date_range_years - 3) / NULLIF(a.date_range_years, 0)) * 100, 100), 1)
+        ELSE 0
+    END AS estimated_pct_over_3_years,
+    -- If min_date is available, calculate precisely
+    CASE
+        WHEN EXTRACT(YEAR FROM TO_DATE(JSON_VALUE(a.all_date_columns_analysis, '$.columns[0].min_date'), 'YYYY-MM-DD')) IS NOT NULL THEN
+            ROUND(((SYSDATE - TO_DATE(JSON_VALUE(a.all_date_columns_analysis, '$.columns[0].min_date'), 'YYYY-MM-DD')) / 365.25 - 3) /
+                  NULLIF(a.date_range_years, 0) * 100, 1)
+        ELSE NULL
+    END AS calculated_pct_over_3_years
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON t.task_id = a.task_id
+WHERE a.date_range_years IS NOT NULL;
+```
+
+**Why This Works:**
+- If a table has a 10-year date range (2015-2025), and today is 2025:
+  - Years over 3 years old: 7 years (2015-2022)
+  - Estimated % old data: (7/10) * 100 = **70%**
+- Assumes uniform data distribution (reasonable for initial profiling)
+- Accurate enough for candidate ranking without table scans
+
+**Exact Age Distribution (ONLY if needed for final validation):**
+- ⚠️ **NOT RECOMMENDED** - Requires HIGH impact table scans
+- Only run for top 5-10 final candidates before migration execution
+- Use SAMPLE(10) to minimize impact
+- See Query Template in Appendix if needed
+
+**Phase 4: Scoring and Ranking (Day 3-5) - ANALYSIS PHASE**
 - **Execution Window:** Business hours (no production impact)
 - **Expected Duration:** 1-2 days
 - **Impact Level:** NONE - Analysis in spreadsheet/SQL*Plus
 - **Activities:**
   - Apply scoring algorithms to collected data
-  - Calculate dimension scores (Impact, Complexity, Risk, Data Age)
+  - Calculate dimension scores (Impact, Complexity, Data Age)
   - Generate composite priority scores
   - Create ranked candidate list
   - Generate migration wave assignments
@@ -645,30 +661,34 @@ Rollback Plan: Query cancellation procedures documented in Section 0.5
 
 ```
 Week 1:
-├─ Weekend 1 (Sat/Sun): Phase 1 + Phase 2 (Queries 0-5)
+├─ Weekend (Sat/Sun): Phase 1 + Phase 2
 │  Duration: 3-5 hours total
 │  Impact: LOW-MEDIUM
+│  Activities:
+│    • Phase 1: Schema inventory (Queries 0-2)
+│    • Phase 2: Table analysis using pck_dwh_table_migration_analyzer
+│      - Analyzes table size, LOBs, date columns, complexity
+│      - Provides min/max dates and date ranges (used for age estimation)
+│      - Process 100-200 tables in batches
 │
-Week 2:
-├─ Weekend 2 (Sat Night): Phase 3 Part 1 (Query 6 - First batch of schemas)
-│  Duration: 4-6 hours
-│  Impact: HIGH - Active monitoring required
+│  ✅ Phase 3: SKIPPED - Age distribution estimated from Phase 2 date ranges
 │
-Week 3:
-├─ Weekend 3 (Sat Night): Phase 3 Part 2 (Query 6 - Remaining schemas)
-│  Duration: 2-4 hours
-│  Impact: HIGH - Active monitoring required
-│
-├─ Weekday (Tue/Wed): Phase 4 (Queries 7-8)
-│  Time: 10 PM - 11 PM
-│  Duration: 30-60 minutes
-│  Impact: LOW-MEDIUM
-│
-├─ Thu-Fri: Phase 5 (Analysis and Scoring)
+├─ Mon-Fri: Phase 4 (Analysis and Scoring)
 │  Business hours - No production impact
+│  Duration: 1-2 days
+│  Activities:
+│    • Calculate dimension scores using Phase 2 data
+│    • Estimate age distribution from date ranges (uniform distribution assumption)
+│    • Generate ranked candidate list
+│    • Create migration wave assignments
+│    • Prepare executive summary
 │
-Total Calendar Time: 3 weeks
-Total Active Profiling Time: 10-15 hours
+Total Calendar Time: 1 week
+Total Active Database Profiling Time: 3-5 hours
+Notes:
+  • Phase 3 (Age Distribution) removed - estimated from date ranges
+  • Growth rate analysis removed - not available in production
+  • Access pattern analysis (AWR) removed - not available/needed
 ```
 
 **Emergency Stop Criteria:**
@@ -702,33 +722,39 @@ WHERE owner IN (SELECT DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT N
 
 ## 3. Ranking Criteria and Scoring Model
 
-### 3.1 Four-Dimensional Scoring Model
+### 3.1 Three-Dimensional Scoring Model
 
-Each candidate is scored across four dimensions, then combined into a priority score:
+**⚠️ PRODUCTION/AUTOMATED APPROACH:** All scoring factors are automatically calculated from database metadata. No manual business input required.
+
+Each candidate is scored across three dimensions, then combined into a priority score:
 
 #### Dimension 1: Impact Score (0-100)
 **"How much value does this migration deliver?"**
 
+**⚠️ PRODUCTION CONSTRAINTS:**
+- Growth rate data not available (requires historical snapshots)
+- Access pattern data not available/needed (AWR)
+- Impact scoring adjusted accordingly
+
 Factors:
-- **Storage savings potential** (40 points)
+- **Storage savings potential** (60 points)
   - Current size × expected compression ratio
   - Larger savings = higher score
-- **Growth rate impact** (30 points)
-  - Future savings from ongoing data growth
-  - Higher growth = higher score
-- **Cost reduction** (20 points)
+- **Cost reduction** (40 points)
   - Tiered storage cost savings (HOT → WARM → COLD)
-- **Performance improvement potential** (10 points)
-  - Partition pruning benefits
-  - Query optimization opportunities
+  - Larger tables = higher tier movement benefit
+  - Date range indicates tier movement potential
 
 **Calculation:**
 ```
 Impact Score =
-  (Size_GB / Max_Size_GB × 40) +
-  (Growth_Rate_GB_Per_Month / Max_Growth_Rate × 30) +
-  (Cost_Savings_Annual / Max_Cost_Savings × 20) +
-  (Performance_Gain_Potential × 10)
+  (Size_GB / Max_Size_GB × 60) +
+  (Cost_Savings_Annual / Max_Cost_Savings × 40)
+
+Notes:
+- Growth rate removed (was 30 points)
+- Performance/AWR removed (was 20 points)
+- Points redistributed to size (60) and cost (40)
 ```
 
 #### Dimension 2: Complexity Score (0-100, lower is better)
@@ -766,39 +792,7 @@ Complexity Score =
 (Lower score = easier migration)
 ```
 
-#### Dimension 3: Risk Score (0-100, lower is better)
-**"What is the business risk of this migration?"**
-
-Factors:
-- **Business criticality** (40 points)
-  - DEV/TEST: +10 points (low risk)
-  - UAT/STAGING: +20 points (medium risk)
-  - PRODUCTION: +40 points (high risk)
-  - MISSION-CRITICAL: +40 points (highest risk)
-- **Downtime tolerance** (30 points)
-  - Can be offline: +0 points
-  - Limited downtime (hours): +15 points
-  - Near-zero downtime required: +30 points
-- **Data sensitivity** (20 points)
-  - Reporting/analytics: +5 points
-  - Transactional: +15 points
-  - Financial/regulated: +20 points
-- **Rollback difficulty** (10 points)
-  - Easy rollback: +0 points
-  - Complex rollback: +10 points
-
-**Calculation:**
-```
-Risk Score =
-  Business_Criticality_Points +
-  Downtime_Tolerance_Points +
-  Data_Sensitivity_Points +
-  Rollback_Difficulty_Points
-
-(Lower score = lower risk)
-```
-
-#### Dimension 4: Data Age Score (0-100)
+#### Dimension 3: Data Age Score (0-100)
 **"How suitable is this data for ILM?"**
 
 Factors:
@@ -823,15 +817,16 @@ Data Age Score =
 
 ### 3.2 Composite Priority Score
 
-**Formula:**
+**Formula (3-Dimensional Model):**
 ```
 Priority Score =
-  (Impact Score × 0.40) +          // 40% weight - most important
-  ((100 - Complexity Score) × 0.25) +  // 25% weight - inverse (lower complexity = higher priority)
-  ((100 - Risk Score) × 0.20) +        // 20% weight - inverse (lower risk = higher priority)
-  (Data Age Score × 0.15)              // 15% weight
+  (Impact Score × 0.50) +              // 50% weight - most important
+  ((100 - Complexity Score) × 0.30) +  // 30% weight - inverse (lower complexity = higher priority)
+  (Data Age Score × 0.20)              // 20% weight
 
 Range: 0-100 (higher = better candidate)
+
+Note: Risk Score removed (required manual business input for table criticality)
 ```
 
 ### 3.3 Priority Categories
@@ -1041,138 +1036,6 @@ WHERE l.owner IN (SELECT owner FROM temp_tracked_schemas)
 ORDER BY s.bytes DESC;
 ```
 
-### 4.3 Data Age Distribution Analysis
-
-```sql
--- Query 5: Identify Tables with Date Columns (Partition Key Candidates)
-SELECT
-    owner,
-    table_name,
-    column_name,
-    data_type,
-    nullable,
-    -- Pattern matching for common date column names
-    CASE
-        WHEN UPPER(column_name) LIKE '%DATE%' THEN 'DATE_PATTERN'
-        WHEN UPPER(column_name) LIKE '%TIME%' THEN 'TIME_PATTERN'
-        WHEN UPPER(column_name) IN ('CREATED', 'MODIFIED', 'UPDATED', 'INSERTED') THEN 'AUDIT_PATTERN'
-        WHEN UPPER(column_name) LIKE '%YEAR%' OR UPPER(column_name) LIKE '%MONTH%' THEN 'PERIOD_PATTERN'
-        ELSE 'OTHER'
-    END AS naming_pattern,
-    -- Priority based on patterns (for SCD2, Events, Staging, HIST tables)
-    CASE
-        WHEN table_name LIKE '%_HIST' OR table_name LIKE '%_HISTORY' THEN 'HIST'
-        WHEN table_name LIKE 'FACT_%' OR table_name LIKE 'FCT_%' THEN 'FACT'
-        WHEN table_name LIKE 'EVENT_%' OR table_name LIKE '%_EVENT%' THEN 'EVENT'
-        WHEN table_name LIKE 'STG_%' OR table_name LIKE '%_STG' THEN 'STAGING'
-        WHEN UPPER(column_name) IN ('VALID_FROM', 'VALID_TO', 'EFFECTIVE_DATE', 'EXPIRY_DATE') THEN 'SCD2'
-        ELSE 'OTHER'
-    END AS table_stereotype
-FROM dba_tab_columns
-WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
-  AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
-  AND (
-      UPPER(column_name) LIKE '%DATE%' OR
-      UPPER(column_name) LIKE '%TIME%' OR
-      UPPER(column_name) IN ('CREATED', 'MODIFIED', 'UPDATED', 'INSERTED', 'VALID_FROM', 'VALID_TO')
-  )
-ORDER BY owner, table_name, column_name;
-```
-
-```sql
--- Query 6: Sample Data Age for Top Tables (Run per table)
--- Template query - replace OWNER, TABLE_NAME, and DATE_COLUMN
-SELECT
-    '{OWNER}.{TABLE_NAME}' AS full_table_name,
-    '{DATE_COLUMN}' AS date_column_name,
-    MIN({DATE_COLUMN}) AS min_date,
-    MAX({DATE_COLUMN}) AS max_date,
-    ROUND((MAX({DATE_COLUMN}) - MIN({DATE_COLUMN})), 0) AS date_range_days,
-    ROUND((MAX({DATE_COLUMN}) - MIN({DATE_COLUMN})) / 365.25, 1) AS date_range_years,
-    COUNT(*) AS total_rows,
-    SUM(CASE WHEN {DATE_COLUMN} < SYSDATE - 365 THEN 1 ELSE 0 END) AS rows_over_1_year,
-    SUM(CASE WHEN {DATE_COLUMN} < SYSDATE - 1095 THEN 1 ELSE 0 END) AS rows_over_3_years,
-    SUM(CASE WHEN {DATE_COLUMN} < SYSDATE - 2555 THEN 1 ELSE 0 END) AS rows_over_7_years,
-    ROUND(SUM(CASE WHEN {DATE_COLUMN} < SYSDATE - 1095 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS pct_over_3_years
-FROM {OWNER}.{TABLE_NAME}
-WHERE {DATE_COLUMN} IS NOT NULL;
-
--- Example usage:
--- SELECT ... FROM DWH_PROD.FACT_SALES WHERE SALE_DATE IS NOT NULL;
-```
-
-### 4.4 Access Pattern Analysis
-
-```sql
--- Query 7: Segment I/O Statistics (Hot vs Cold Data)
--- Requires access to DBA_HIST_SEG_STAT (AWR)
-SELECT
-    o.owner,
-    o.object_name AS table_name,
-    o.subobject_name AS partition_name,
-    ROUND(SUM(s.logical_reads_total) / 1000000, 2) AS logical_reads_millions,
-    ROUND(SUM(s.physical_reads_total) / 1000000, 2) AS physical_reads_millions,
-    ROUND(SUM(s.db_block_changes_total) / 1000000, 2) AS block_changes_millions,
-    ROUND(AVG(s.space_used_total) / 1024 / 1024, 2) AS avg_space_used_mb,
-    CASE
-        WHEN SUM(s.logical_reads_total) > 10000000 THEN 'HOT (High Access)'
-        WHEN SUM(s.logical_reads_total) > 1000000 THEN 'WARM (Moderate Access)'
-        ELSE 'COLD (Low Access)'
-    END AS access_classification
-FROM dba_hist_seg_stat s
-JOIN dba_objects o
-    ON s.obj# = o.object_id
-WHERE s.snap_id BETWEEN (SELECT MAX(snap_id) - 168 FROM dba_hist_snapshot)  -- Last 7 days (24*7=168)
-                    AND (SELECT MAX(snap_id) FROM dba_hist_snapshot)
-  AND o.owner IN (SELECT owner FROM temp_tracked_schemas)
-  AND o.object_type IN ('TABLE', 'TABLE PARTITION')
-GROUP BY o.owner, o.object_name, o.subobject_name
-HAVING SUM(s.logical_reads_total) > 0
-ORDER BY SUM(s.logical_reads_total) DESC
-FETCH FIRST 100 ROWS ONLY;
-```
-
-```sql
--- Query 8: Growth Rate Analysis (Requires Historical Snapshots)
--- Option 1: If you have table size history
-SELECT
-    owner,
-    table_name,
-    MIN(snapshot_date) AS first_snapshot,
-    MAX(snapshot_date) AS last_snapshot,
-    MIN(size_gb) AS initial_size_gb,
-    MAX(size_gb) AS current_size_gb,
-    MAX(size_gb) - MIN(size_gb) AS growth_gb,
-    ROUND((MAX(size_gb) - MIN(size_gb)) /
-          NULLIF(MONTHS_BETWEEN(MAX(snapshot_date), MIN(snapshot_date)), 0), 2) AS growth_gb_per_month,
-    ROUND(((MAX(size_gb) - MIN(size_gb)) / NULLIF(MIN(size_gb), 0)) * 100, 1) AS growth_pct
-FROM table_size_history  -- Your historical tracking table
-WHERE snapshot_date >= ADD_MONTHS(SYSDATE, -12)  -- Last 12 months
-GROUP BY owner, table_name
-HAVING MAX(size_gb) - MIN(size_gb) > 1  -- At least 1 GB growth
-ORDER BY growth_gb_per_month DESC;
-
--- Option 2: If no history, estimate from AWR segment statistics
--- (Less accurate, but better than nothing)
-SELECT
-    o.owner,
-    o.object_name AS table_name,
-    MIN(s.snap_id) AS first_snap,
-    MAX(s.snap_id) AS last_snap,
-    ROUND(MIN(s.space_used_total) / 1024 / 1024 / 1024, 2) AS initial_size_gb,
-    ROUND(MAX(s.space_used_total) / 1024 / 1024 / 1024, 2) AS current_size_gb,
-    ROUND((MAX(s.space_used_total) - MIN(s.space_used_total)) / 1024 / 1024 / 1024, 2) AS growth_gb
-FROM dba_hist_seg_stat s
-JOIN dba_objects o ON s.obj# = o.object_id
-WHERE s.snap_id BETWEEN (SELECT MIN(snap_id) FROM dba_hist_snapshot WHERE begin_interval_time >= ADD_MONTHS(SYSDATE, -12))
-                    AND (SELECT MAX(snap_id) FROM dba_hist_snapshot)
-  AND o.owner IN (SELECT owner FROM temp_tracked_schemas)
-  AND o.object_type = 'TABLE'
-GROUP BY o.owner, o.object_name
-HAVING MAX(s.space_used_total) - MIN(s.space_used_total) > 1024*1024*1024  -- > 1 GB growth
-ORDER BY growth_gb DESC;
-```
-
 ---
 
 ## 5. Candidate Analysis Framework
@@ -1183,11 +1046,11 @@ Tables are classified into one of six categories based on their characteristics:
 
 | Category | Description | ILM Strategy | Priority |
 |----------|-------------|--------------|----------|
-| **Type A: Large Time-Series Tables** | > 50 GB, clear date column, wide date range | Partition by date, tier to COLD/ARCHIVE | **HIGH** |
+| **Type A: Large Time-Series Tables** | > 50 GB, clear date column, wide date range (> 3 years) | Partition by date, tier to COLD/ARCHIVE | **HIGH** |
 | **Type B: Partitioned with BASICFILE LOBs** | Already partitioned, but LOBs need migration | BASICFILE → SECUREFILE, add compression | **HIGH** |
-| **Type C: Non-Partitioned with Growth** | Not partitioned, high growth rate, date column exists | Partition, then tier | **MEDIUM** |
-| **Type D: Large Static Tables** | > 20 GB, low growth, old data | Compress in-place, move to COLD | **MEDIUM** |
-| **Type E: Small Frequent-Access Tables** | < 10 GB, high I/O, recent data | Keep on HOT tier, consider compression | **LOW** |
+| **Type C: Non-Partitioned Large Tables** | > 20 GB, not partitioned, date column exists | Partition, then tier | **MEDIUM** |
+| **Type D: Large Historical Tables** | > 20 GB, old data (> 50% over 3 years) | Compress in-place, move to COLD | **MEDIUM** |
+| **Type E: Small Recent Tables** | < 20 GB, recent data (< 3 years) | Consider compression, lower priority | **LOW** |
 | **Type F: Complex Schema Tables** | Many dependencies, no clear date column | Defer or custom strategy | **DEFER** |
 
 ### 5.2 Decision Tree
@@ -1199,20 +1062,25 @@ START: Evaluate Table
 │  ├─ YES → Has clear date column?
 │  │        ├─ YES → Date range > 3 years?
 │  │        │        ├─ YES → **Type A: Quick Win Candidate**
-│  │        │        └─ NO → Growth rate > 5 GB/month?
-│  │        │                 ├─ YES → **Type C: Medium Priority**
-│  │        │                 └─ NO → **Type D: Low-Medium Priority**
+│  │        │        └─ NO → Partitioned?
+│  │        │                 ├─ YES → **Type B: Check for LOB migration**
+│  │        │                 └─ NO → **Type C: Partition Candidate**
 │  │        └─ NO → Has LOBs?
 │  │                 ├─ YES (BASICFILE) → **Type B: High Priority (LOB Migration)**
 │  │                 └─ NO → Dependencies > 5?
 │  │                          ├─ YES → **Type F: Defer**
-│  │                          └─ NO → **Type D: Medium Priority**
+│  │                          └─ NO → **Type D: Compression Candidate**
 │  │
-│  └─ NO (< 50 GB) → Access frequency?
-│                     ├─ HIGH → **Type E: Low Priority (Keep HOT)**
-│                     └─ LOW → Age > 3 years?
-│                              ├─ YES → **Type D: Compression Candidate**
-│                              └─ NO → **Type F: Defer**
+│  └─ NO (< 50 GB) → Size > 20 GB?
+│                     ├─ YES → % data > 3 years old (estimated)?
+│                     │        ├─ > 50% → **Type D: Historical Data**
+│                     │        └─ < 50% → **Type C: Partition if date column exists**
+│                     └─ NO (< 20 GB) → **Type E: Low Priority or Defer**
+
+Notes:
+- Growth rate criteria removed (not available in production)
+- Access frequency (AWR) removed (not available/needed)
+- Size and date range are primary criteria
 ```
 
 ### 5.3 Quick Win Identification
@@ -1275,20 +1143,17 @@ SELECT
     owner,
     table_name,
     size_gb,
-    growth_gb_per_month,
     partitioned,
     has_lobs,
     lob_type,
     pct_data_over_3_years,
     date_range_years,
-    business_criticality,
 
     -- Impact Score (0-100)
+    -- Note: Growth rate and AWR/performance removed (not available in production)
     ROUND(
-        (size_gb / (SELECT MAX(size_gb) FROM table_inventory) * 40) +
-        (COALESCE(growth_gb_per_month, 0) / (SELECT MAX(growth_gb_per_month) FROM table_inventory WHERE growth_gb_per_month > 0) * 30) +
-        (estimated_cost_savings / (SELECT MAX(estimated_cost_savings) FROM table_inventory) * 20) +
-        (performance_gain_potential * 10)
+        (size_gb / (SELECT MAX(size_gb) FROM table_inventory) * 60) +
+        (estimated_cost_savings / (SELECT MAX(estimated_cost_savings) FROM table_inventory) * 40)
     , 1) AS impact_score,
 
     -- Complexity Score (0-100, lower is better)
@@ -1313,27 +1178,6 @@ SELECT
         END
     , 1) AS complexity_score,
 
-    -- Risk Score (0-100, lower is better)
-    ROUND(
-        CASE business_criticality
-            WHEN 'DEV' THEN 10
-            WHEN 'UAT' THEN 20
-            WHEN 'PROD' THEN 40
-            WHEN 'MISSION_CRITICAL' THEN 40
-        END +
-        CASE downtime_tolerance
-            WHEN 'OFFLINE_OK' THEN 0
-            WHEN 'LIMITED' THEN 15
-            WHEN 'NEAR_ZERO' THEN 30
-        END +
-        CASE data_sensitivity
-            WHEN 'REPORTING' THEN 5
-            WHEN 'TRANSACTIONAL' THEN 15
-            WHEN 'FINANCIAL' THEN 20
-        END +
-        rollback_difficulty_points
-    , 1) AS risk_score,
-
     -- Data Age Score (0-100)
     ROUND(
         (pct_data_over_3_years * 0.50) +
@@ -1351,10 +1195,9 @@ FROM table_inventory;
 ALTER TABLE ilm_candidate_scores ADD priority_score NUMBER;
 
 UPDATE ilm_candidate_scores SET priority_score = ROUND(
-    (impact_score * 0.40) +
-    ((100 - complexity_score) * 0.25) +
-    ((100 - risk_score) * 0.20) +
-    (data_age_score * 0.15)
+    (impact_score * 0.50) +
+    ((100 - complexity_score) * 0.30) +
+    (data_age_score * 0.20)
 , 1);
 
 -- Add priority category
@@ -1370,46 +1213,28 @@ UPDATE ilm_candidate_scores SET priority_category =
     END;
 ```
 
-### 6.2 Manual Adjustments
+### 6.2 Final Candidate Ranking View
 
-After automated scoring, apply manual adjustments based on:
-
-1. **Business input** - Strategic priorities from business units
-2. **Technical constraints** - Known issues or dependencies
-3. **Resource availability** - DBA bandwidth and expertise
-4. **Political factors** - Stakeholder preferences
+**Fully Automated Ranking** - No manual adjustments required.
 
 ```sql
--- Manual adjustment table
-CREATE TABLE ilm_candidate_adjustments (
-    owner VARCHAR2(128),
-    table_name VARCHAR2(128),
-    adjustment_points NUMBER,  -- -50 to +50
-    adjustment_reason VARCHAR2(500),
-    adjusted_by VARCHAR2(100),
-    adjustment_date DATE,
-    PRIMARY KEY (owner, table_name)
-);
-
--- Apply adjustments to final score
+-- Create final ranking view
 CREATE OR REPLACE VIEW ilm_final_candidate_ranking AS
 SELECT
-    s.*,
-    COALESCE(a.adjustment_points, 0) AS manual_adjustment,
-    s.priority_score + COALESCE(a.adjustment_points, 0) AS final_priority_score,
-    CASE
-        WHEN s.priority_score + COALESCE(a.adjustment_points, 0) >= 80 THEN 'QUICK_WIN'
-        WHEN s.priority_score + COALESCE(a.adjustment_points, 0) >= 60 THEN 'HIGH'
-        WHEN s.priority_score + COALESCE(a.adjustment_points, 0) >= 40 THEN 'MEDIUM'
-        WHEN s.priority_score + COALESCE(a.adjustment_points, 0) >= 20 THEN 'LOW'
-        ELSE 'DEFER'
-    END AS final_priority_category,
-    a.adjustment_reason
-FROM ilm_candidate_scores s
-LEFT JOIN ilm_candidate_adjustments a
-    ON s.owner = a.owner
-    AND s.table_name = a.table_name
-ORDER BY final_priority_score DESC;
+    owner,
+    table_name,
+    size_gb,
+    impact_score,
+    complexity_score,
+    data_age_score,
+    priority_score,
+    priority_category,
+    estimated_storage_savings_gb,
+    estimated_compression_ratio,
+    date_range_years,
+    pct_data_over_3_years
+FROM ilm_candidate_scores
+ORDER BY priority_score DESC;
 ```
 
 ---
@@ -1423,7 +1248,7 @@ ORDER BY final_priority_score DESC;
 - **Candidates:** 3-5 QUICK_WIN tables (score 80-100)
 - **Criteria:**
   - Size: 10-50 GB (not too small, not too large)
-  - Non-critical (DEV or low-importance PROD)
+  - Non-critical or standard operational tables (low risk)
   - Clear success metrics
   - Representative of larger population
 
@@ -1481,23 +1306,6 @@ SELECT
 FROM ilm_final_candidate_ranking
 ORDER BY migration_wave, final_priority_score DESC;
 ```
-
-### 7.3 Resource Planning
-
-**Pilot Wave:**
-- DBA Hours: 40-80 hours
-- Dev Hours: 20-40 hours
-- Testing Hours: 40-60 hours
-- **Total:** 100-180 hours (2.5-4.5 weeks for 1 FTE)
-
-**Wave 1:**
-- DBA Hours: 200-400 hours
-- Dev Hours: 100-200 hours
-- Testing Hours: 150-250 hours
-- **Total:** 450-850 hours (11-21 weeks for 1 FTE)
-
-**Parallel Execution:**
-- With 3 DBAs + 2 Devs: Wave 1 in 4-6 weeks
 
 ---
 
@@ -1584,31 +1392,30 @@ BASICFILE LOBs Requiring Migration  234     LOB columns
 ```sql
 -- Top 20 candidates across all categories
 SELECT
-    DENSE_RANK() OVER (ORDER BY final_priority_score DESC) AS rank,
+    DENSE_RANK() OVER (ORDER BY priority_score DESC) AS rank,
     owner,
     table_name,
     size_gb,
     ROUND(impact_score, 1) AS impact,
     ROUND(100 - complexity_score, 1) AS ease,
-    ROUND(100 - risk_score, 1) AS safety,
-    ROUND(final_priority_score, 1) AS priority,
-    final_priority_category AS category,
-    migration_wave AS wave,
+    ROUND(data_age_score, 1) AS age_score,
+    ROUND(priority_score, 1) AS priority,
+    priority_category AS category,
     ROUND(estimated_storage_savings_gb, 1) AS savings_gb,
     estimated_migration_hours AS effort_hrs
 FROM ilm_final_candidate_ranking
-ORDER BY final_priority_score DESC
+ORDER BY priority_score DESC
 FETCH FIRST 20 ROWS ONLY;
 ```
 
 **Sample Output:**
 ```
-RANK  OWNER      TABLE_NAME           SIZE_GB  IMPACT  EASE  SAFETY  PRIORITY  CATEGORY    WAVE           SAVINGS_GB  EFFORT_HRS
-1     DWH_PROD   FACT_SALES_HISTORY   450.2    95.3    82.5  75.0    88.7      QUICK_WIN   WAVE 0: Pilot  337.7       24
-2     DWH_PROD   FACT_ORDERS          380.5    92.1    78.3  70.0    85.4      QUICK_WIN   WAVE 0: Pilot  285.4       32
-3     APP_SALES  SALES_TRANSACTIONS   280.1    88.7    85.0  80.0    84.9      QUICK_WIN   WAVE 0: Pilot  210.1       20
-4     CRM_DATA   CUSTOMER_INTERACTIONS 220.3   85.2    75.5  65.0    79.8      HIGH        WAVE 1         165.2       28
-5     DWH_PROD   EVENT_LOG            195.7    82.4    80.0  75.0    78.6      HIGH        WAVE 1         146.8       22
+RANK  OWNER      TABLE_NAME           SIZE_GB  IMPACT  EASE  AGE    PRIORITY  CATEGORY    SAVINGS_GB  EFFORT_HRS
+1     DWH_PROD   FACT_SALES_HISTORY   450.2    95.3    82.5  85.0   89.5      QUICK_WIN   337.7       24
+2     DWH_PROD   FACT_ORDERS          380.5    92.1    78.3  80.0   86.2      QUICK_WIN   285.4       32
+3     APP_SALES  SALES_TRANSACTIONS   280.1    88.7    85.0  82.0   85.6      QUICK_WIN   210.1       20
+4     CRM_DATA   CUSTOMER_INTERACTIONS 220.3   85.2    75.5  75.0   79.1      HIGH        165.2       28
+5     DWH_PROD   EVENT_LOG            195.7    82.4    80.0  78.0   79.7      HIGH        146.8       22
 ...
 ```
 
@@ -1661,22 +1468,22 @@ ORDER BY
 ### 9.1 Timeline Overview
 
 ```
-Week 1-2:   Data Collection
+Week 1:     Data Collection
             │
-            ├─ Run all profiling queries
-            ├─ Collect data age samples
-            └─ Document business criticality
+            ├─ Run all profiling queries (Phase 1)
+            ├─ Run analyze_table package for top tables (Phase 2)
+            └─ Collect LOB and partitioning metadata
 
-Week 2-3:   Scoring & Analysis
+Week 2:     Scoring & Analysis
             │
-            ├─ Calculate dimension scores
-            ├─ Compute composite priorities
+            ├─ Calculate dimension scores (Impact, Complexity, Data Age)
+            ├─ Compute composite priorities (fully automated)
             └─ Generate candidate ranking
 
-Week 3:     Review & Adjustment
+Week 3:     Review & Validation
             │
             ├─ Review with DBA team
-            ├─ Apply manual adjustments
+            ├─ Validate scoring results with spot checks
             └─ Finalize wave assignments
 
 Week 4:     Planning & Approval
@@ -1716,7 +1523,7 @@ Week 7+:    Production Waves
 **Storage Metrics:**
 - Total TB saved
 - % reduction in storage costs
-- Tiered storage distribution (HOT/WARM/COLD/ARCHIVE %)
+- Compression ratios achieved per table
 
 **Operational Metrics:**
 - Tables migrated per week
@@ -1734,119 +1541,54 @@ Week 7+:    Production Waves
 
 ## 10. Appendix: Complete Query Set
 
-### 10.1 Profiling Query Execution Script
+### 10.1 Profiling Data Sources
 
-```sql
--- Save all profiling results to tables for analysis
+**All profiling data is stored in existing framework tables:**
 
--- Table 1: Schema inventory
-CREATE TABLE ilm_profile_schemas AS
-SELECT * FROM (
-    -- Query 1 from section 4.1
-    -- [Full query here]
-);
+1. **Schema inventory** - Query results from Section 4.1 (can be saved as temp table if needed)
+2. **Table analysis** - `cmr.dwh_migration_analysis` (populated by `pck_dwh_table_migration_analyzer.analyze_table`)
+   - Includes: Table statistics, LOB details (type, size, BASICFILE vs SECUREFILE), date columns, complexity scoring, compression estimates
+3. **Date column analysis** - `cmr.dwh_migration_analysis.all_date_columns_analysis` (JSON format)
+4. **LOB analysis** - `cmr.dwh_migration_analysis.lob_details` (JSON format)
+   - Fields: `lob_column_count`, `lob_type`, `basicfile_lob_count`, `securefile_lob_count`, `lob_total_size_mb`
 
--- Table 2: Large table candidates
-CREATE TABLE ilm_profile_tables AS
-SELECT * FROM (
-    -- Query 3 from section 4.2
-    -- [Full query here]
-);
+**No need for separate `ilm_profile_*` tables** - all data centralized in the migration framework.
 
--- Table 3: LOB analysis
-CREATE TABLE ilm_profile_lobs AS
-SELECT * FROM (
-    -- Query 4 from section 4.2
-    -- [Full query here]
-);
-
--- Table 4: Date column candidates
-CREATE TABLE ilm_profile_date_columns AS
-SELECT * FROM (
-    -- Query 5 from section 4.3
-    -- [Full query here]
-);
-
--- Table 5: Access patterns
-CREATE TABLE ilm_profile_access_patterns AS
-SELECT * FROM (
-    -- Query 7 from section 4.4
-    -- [Full query here]
-);
-```
-
-### 10.2 Data Age Sampling Script Template
-
-```sql
--- Generate dynamic SQL for sampling all candidate tables
-DECLARE
-    v_sql VARCHAR2(32767);
-    v_result SYS_REFCURSOR;
-BEGIN
-    FOR rec IN (
-        -- Get all tables with date columns
-        SELECT DISTINCT
-            tc.owner,
-            tc.table_name,
-            tc.column_name
-        FROM dba_tab_columns tc
-        JOIN ilm_profile_tables t
-            ON tc.owner = t.owner
-            AND tc.table_name = t.table_name
-        WHERE tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
-          AND UPPER(tc.column_name) LIKE '%DATE%'
-    ) LOOP
-        BEGIN
-            v_sql := 'INSERT INTO ilm_profile_data_age ' ||
-                     'SELECT ''' || rec.owner || ''', ''' || rec.table_name || ''', ''' || rec.column_name || ''', ' ||
-                     'MIN(' || rec.column_name || '), MAX(' || rec.column_name || '), ' ||
-                     'COUNT(*), ' ||
-                     'SUM(CASE WHEN ' || rec.column_name || ' < SYSDATE - 1095 THEN 1 ELSE 0 END) ' ||
-                     'FROM ' || rec.owner || '.' || rec.table_name ||
-                     ' WHERE ' || rec.column_name || ' IS NOT NULL';
-
-            EXECUTE IMMEDIATE v_sql;
-            COMMIT;
-
-            DBMS_OUTPUT.PUT_LINE('Sampled: ' || rec.owner || '.' || rec.table_name || '.' || rec.column_name);
-        EXCEPTION
-            WHEN OTHERS THEN
-                DBMS_OUTPUT.PUT_LINE('ERROR: ' || rec.owner || '.' || rec.table_name || ': ' || SQLERRM);
-        END;
-    END LOOP;
-END;
-/
-```
-
-### 10.3 Quick Reference: Top Candidates Query
+### 10.2 Quick Reference: Top Candidates Query
 
 ```sql
 -- One-query summary of top candidates (for quick review)
+-- Uses cmr.dwh_migration_analysis populated by analyze_table package
 SELECT
-    t.owner || '.' || t.table_name AS full_table_name,
-    ROUND(t.size_gb, 1) AS size_gb,
-    t.partitioned,
-    CASE WHEN l.lob_count > 0 THEN 'YES (' || l.lob_type || ')' ELSE 'NO' END AS has_lobs,
-    da.pct_over_3_years AS old_data_pct,
-    ROUND(da.date_range_years, 1) AS date_range_yrs,
+    task.owner || '.' || task.table_name AS full_table_name,
+    ROUND(a.table_size_mb / 1024, 1) AS size_gb,
+    CASE WHEN a.recommended_strategy LIKE '%PARTITION%' THEN 'NO' ELSE 'YES' END AS partitioned,
     CASE
-        WHEN t.size_gb > 50 AND da.pct_over_3_years > 50 THEN 'Type A: Quick Win'
-        WHEN l.lob_type = 'BASICFILE' THEN 'Type B: LOB Migration'
-        WHEN t.partitioned = 'NO' AND t.size_gb > 20 THEN 'Type C: Partition Candidate'
-        WHEN t.size_gb > 20 AND da.pct_over_3_years > 70 THEN 'Type D: Compress & Archive'
+        WHEN a.lob_type = 'BASICFILE' THEN 'YES (BASICFILE - NEEDS MIGRATION)'
+        WHEN a.lob_type = 'SECUREFILE' THEN 'YES (SECUREFILE)'
+        WHEN a.lob_type = 'MIXED' THEN 'YES (MIXED)'
+        ELSE 'NO'
+    END AS has_lobs,
+    -- Estimate % old data from date range (uniform distribution)
+    CASE
+        WHEN a.partition_range_years >= 3 THEN
+            ROUND(LEAST(((a.partition_range_years - 3) / NULLIF(a.partition_range_years, 0)) * 100, 100), 1)
+        ELSE 0
+    END AS old_data_pct,
+    ROUND(a.partition_range_years, 1) AS date_range_yrs,
+    CASE
+        WHEN a.table_size_mb / 1024 > 50 AND a.partition_range_years > 5 THEN 'Type A: Quick Win'
+        WHEN a.lob_type = 'BASICFILE' THEN 'Type B: LOB Migration'
+        WHEN a.recommended_strategy LIKE '%PARTITION%' AND a.table_size_mb / 1024 > 20 THEN 'Type C: Partition Candidate'
+        WHEN a.table_size_mb / 1024 > 20 AND a.partition_range_years > 7 THEN 'Type D: Compress & Archive'
         ELSE 'Type E/F: Lower Priority'
     END AS candidate_type,
-    ROUND(t.size_gb * 0.65, 1) AS est_savings_gb  -- Assuming 65% avg savings
-FROM ilm_profile_tables t
-LEFT JOIN (
-    SELECT owner, table_name, COUNT(*) AS lob_count,
-           MAX(CASE WHEN securefile = 'NO' THEN 'BASICFILE' ELSE 'SECUREFILE' END) AS lob_type
-    FROM ilm_profile_lobs
-    GROUP BY owner, table_name
-) l ON t.owner = l.owner AND t.table_name = l.table_name
-LEFT JOIN ilm_profile_data_age da ON t.owner = da.owner AND t.table_name = da.table_name
-WHERE t.size_gb > 10  -- Focus on tables > 10 GB
-ORDER BY t.size_gb DESC
+    ROUND(a.estimated_space_savings_mb / 1024, 1) AS est_savings_gb
+FROM cmr.dwh_migration_tasks task
+JOIN cmr.dwh_migration_analysis a ON task.task_id = a.task_id
+WHERE task.project_id = (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_PROFILING_2025')
+  AND a.table_size_mb / 1024 > 10  -- Focus on tables > 10 GB
+ORDER BY a.table_size_mb DESC
 FETCH FIRST 50 ROWS ONLY;
 ```
 
@@ -1858,25 +1600,23 @@ FETCH FIRST 50 ROWS ONLY;
 
 - [ ] Review and approve this profiling plan
 - [ ] Assign DBA resources for data collection
-- [ ] Set up profiling tables (ilm_profile_*)
-- [ ] Schedule AWR access for access pattern analysis
-- [ ] Identify business contacts for criticality assessment
+- [ ] Verify cmr.dwh_migration_* framework tables exist and are accessible
+- [ ] Schedule profiling execution window (weekend preferred)
 
 ### 11.2 Week 1-2 Actions
 
-- [ ] Execute all profiling queries (Section 4)
-- [ ] Collect data age samples for top 100 tables
-- [ ] Document business criticality for top schemas
-- [ ] Run LOB BASICFILE vs SECUREFILE analysis
+- [ ] Execute Phase 1 profiling queries (Schema inventory, Query 0-2)
+- [ ] Run Phase 2 analysis using pck_dwh_table_migration_analyzer package (includes LOB analysis)
 - [ ] Generate schema inventory report
+- [ ] Verify all tracked schemas profiled successfully
 
 ### 11.3 Week 3 Actions
 
-- [ ] Calculate dimension scores (Impact, Complexity, Risk, Data Age)
+- [ ] Calculate dimension scores (Impact, Complexity, Data Age)
 - [ ] Compute composite priority scores
 - [ ] Generate candidate ranking
 - [ ] Review with DBA team
-- [ ] Apply manual adjustments as needed
+- [ ] Validate scoring results
 
 ### 11.4 Week 4 Actions
 
@@ -1903,10 +1643,9 @@ FETCH FIRST 50 ROWS ONLY;
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
 | Incomplete data collection | Medium | Medium | Run queries during low-load periods, use multiple sessions |
-| AWR data not available | Low | Low | Fall back to dba_segments for growth estimates |
-| Business criticality unknown | Medium | Medium | Default to "PROD" and validate during review |
 | Scoring model inaccuracies | Medium | Medium | Pilot validates model, adjust weights as needed |
-| Stakeholder disagreement | High | Medium | Allow manual adjustments, document rationale |
+| Stakeholder disagreement | Medium | Low | Fully automated scoring based on objective database metrics, pilot validates approach |
+| Production impact during profiling | Low | Low | Use existing analyze_table package with built-in sampling, no table scans |
 
 ### 12.2 Migration Risks (Post-Profiling)
 
@@ -1921,6 +1660,7 @@ Addressed in main ILM strategy document and DBA meeting discussion points.
 | 1.0 | 2025-10-27 | Claude/DBA Team | Initial profiling plan created |
 | 1.1 | 2025-10-27 | Claude/DBA Team | Scoped profiling to LOGS.DWH_PROCESS schemas, added Query 0 and temp_tracked_schemas table, updated all queries with schema filter |
 | 1.2 | 2025-10-27 | Claude/DBA Team | **PRODUCTION SAFETY UPDATE**: Added Section 0 (Production Database Safety Guidelines) with execution timing, resource management, monitoring procedures, query cancellation, and communication protocols. Updated Section 2.2 with detailed execution phases including impact levels, timing windows, and emergency stop criteria. |
+| 1.3 | 2025-10-27 | Claude/DBA Team | **FULLY AUTOMATED SCORING**: Converted from 4-dimensional to 3-dimensional scoring model. Removed Risk Score dimension (required manual table criticality input). Updated composite priority score formula: Impact (50%), Complexity (30%), Data Age (20%). Removed all manual input requirements - profiling now fully automated using database metadata only. Updated document purpose, success metrics, and risk mitigation table. |
 
 ---
 
