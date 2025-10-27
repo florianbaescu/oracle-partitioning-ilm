@@ -380,6 +380,10 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting table profiling (min size: ' || p_min_table_size_gb || ' GB)...');
 
+        -- Clear existing data to avoid PK violations
+        DELETE FROM cmr.dwh_tables_quick_profile;
+        COMMIT;
+
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_tables_quick_profile
         SELECT /*+ PARALLEL(t,4) PARALLEL(s,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
             t.owner,
@@ -481,6 +485,10 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     BEGIN
         log_message('Starting tablespace profiling...');
 
+        -- Clear existing data to avoid PK violations
+        DELETE FROM cmr.dwh_schema_tablespaces;
+        COMMIT;
+
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_tablespaces
         SELECT /*+ PARALLEL(ts_owner,2) PARALLEL(ts,2) PARALLEL(df,2) USE_HASH(ts_owner ts df fs) */
             ts_owner.owner,
@@ -523,6 +531,10 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         v_start_time TIMESTAMP := SYSTIMESTAMP;
     BEGIN
         log_message('Starting schema-level aggregation...');
+
+        -- Clear existing data to avoid PK violations
+        DELETE FROM cmr.dwh_schema_profile;
+        COMMIT;
 
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_profile
         SELECT /*+ PARALLEL(p,2) */
