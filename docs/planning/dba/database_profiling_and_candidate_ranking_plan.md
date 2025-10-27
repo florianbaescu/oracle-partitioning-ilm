@@ -1,12 +1,15 @@
 # Database Profiling and ILM Candidate Ranking Plan
-## Large Database Assessment Strategy (120TB Database)
+## Large Database Assessment Strategy (120TB Production Database)
 
-**Document Purpose:** Define a systematic approach to profile the current 120TB database, identify optimal candidates for ILM migration, and rank them by impact, complexity, and risk.
+**Document Purpose:** Define a systematic approach to profile the current 120TB **PRODUCTION** database, identify optimal candidates for ILM migration, and rank them by impact, complexity, and risk.
 
 **Target Audience:** DBA Team, Project Managers, Architecture Team
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Created:** 2025-10-27
-**Last Updated:** 2025-10-27 - Scoped to LOGS.DWH_PROCESS schemas
+**Last Updated:** 2025-10-27 - Added production database safety guidelines
+
+**⚠️ PRODUCTION DATABASE NOTICE:**
+This profiling plan is designed for a live production environment. All queries include resource management controls, execution timing guidelines, and safety measures to ensure minimal impact on production workloads.
 
 ---
 
@@ -24,10 +27,27 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 
 **Profiling Scope:** This analysis focuses exclusively on schemas tracked in the `LOGS.DWH_PROCESS` table, ensuring alignment with existing ETL processes and data warehouse operations.
 
+**Production Safety Principles:**
+1. **Non-Intrusive Queries** - All profiling queries designed to minimize resource consumption
+2. **Off-Peak Execution** - Schedule resource-intensive queries during low-activity windows
+3. **Query Timeouts** - All queries include timeout controls to prevent runaway processes
+4. **Resource Limits** - Use query hints to limit CPU, memory, and I/O consumption
+5. **Incremental Approach** - Break large operations into smaller, manageable chunks
+6. **Monitoring** - Active monitoring of system performance during profiling
+7. **Rollback Capability** - Ability to cancel queries if production impact detected
+
 ---
 
 ## Table of Contents
 
+0. [Production Database Safety Guidelines](#0-production-database-safety-guidelines) ⚠️ **READ FIRST**
+   - [0.1 Execution Timing and Scheduling](#01-execution-timing-and-scheduling)
+   - [0.2 Query Resource Management](#02-query-resource-management)
+   - [0.3 Incremental Execution Strategy](#03-incremental-execution-strategy)
+   - [0.4 Real-Time Monitoring During Profiling](#04-real-time-monitoring-during-profiling)
+   - [0.5 Query Cancellation Procedures](#05-query-cancellation-procedures)
+   - [0.6 Safe Query Patterns](#06-safe-query-patterns)
+   - [0.7 Communication Protocol](#07-communication-protocol)
 1. [Profiling Objectives](#1-profiling-objectives)
 2. [Data Collection Strategy](#2-data-collection-strategy)
 3. [Ranking Criteria and Scoring Model](#3-ranking-criteria-and-scoring-model)
@@ -38,6 +58,427 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 8. [Sample Output and Reporting](#8-sample-output-and-reporting)
 9. [Implementation Roadmap](#9-implementation-roadmap)
 10. [Appendix: Complete Query Set](#10-appendix-complete-query-set)
+
+---
+
+## 0. Production Database Safety Guidelines
+
+**⚠️ CRITICAL: Production Impact Minimization**
+
+This section provides comprehensive safety guidelines for executing profiling queries in a production environment. All queries in this plan have been designed with production safety as the primary concern.
+
+### 0.1 Execution Timing and Scheduling
+
+#### Off-Peak Execution Windows
+
+**Recommended Execution Schedule:**
+
+| Query Type | Recommended Window | Max Duration | Priority |
+|------------|-------------------|--------------|----------|
+| Query 0 (Schema Scoping) | Anytime | < 5 seconds | LOW IMPACT |
+| Query 1 (Schema Inventory) | Off-peak hours | 2-5 minutes | LOW IMPACT |
+| Query 2 (Tablespace Stats) | Anytime | < 1 minute | LOW IMPACT |
+| Query 3 (Large Tables) | Off-peak hours | 5-10 minutes | MEDIUM IMPACT |
+| Query 4 (LOB Analysis) | Weekend/Night | 10-15 minutes | MEDIUM IMPACT |
+| Query 5 (Date Columns) | Off-peak hours | 5-10 minutes | LOW IMPACT |
+| Query 6 (Data Age Sampling) | Weekend/Night | 1-2 hours | HIGH IMPACT |
+| Query 7 (I/O Stats - AWR) | Off-peak hours | 5-10 minutes | LOW IMPACT |
+| Query 8 (Growth Rate) | Off-peak hours | 10-15 minutes | MEDIUM IMPACT |
+
+**Off-Peak Definitions:**
+- **Weekday Off-Peak**: 10 PM - 6 AM local time
+- **Weekend Execution**: Saturday/Sunday 8 AM - 10 PM
+- **Low-Activity Periods**: Monitor current load before execution
+
+**Pre-Execution Checklist:**
+```sql
+-- Check current database load before running profiling queries
+SELECT
+    metric_name,
+    value,
+    CASE
+        WHEN metric_name = 'Database CPU Time Ratio' AND value > 80 THEN 'DEFER PROFILING'
+        WHEN metric_name = 'Database CPU Time Ratio' AND value > 60 THEN 'CAUTION'
+        ELSE 'OK TO PROCEED'
+    END AS recommendation
+FROM v$sysmetric
+WHERE metric_name IN (
+    'Database CPU Time Ratio',
+    'Host CPU Utilization (%)',
+    'Current OS Load'
+)
+AND intsize_csec = (SELECT MAX(intsize_csec) FROM v$sysmetric);
+
+-- Check active sessions
+SELECT COUNT(*) AS active_session_count,
+       CASE
+           WHEN COUNT(*) > 100 THEN 'HIGH LOAD - DEFER PROFILING'
+           WHEN COUNT(*) > 50 THEN 'MODERATE LOAD - CAUTION'
+           ELSE 'LOW LOAD - OK TO PROCEED'
+       END AS recommendation
+FROM v$session
+WHERE status = 'ACTIVE'
+  AND username IS NOT NULL;
+```
+
+### 0.2 Query Resource Management
+
+#### Query Timeout Configuration
+
+**Set Session-Level Timeouts:**
+```sql
+-- Set maximum query execution time (adjust per query complexity)
+ALTER SESSION SET MAX_DUMP_FILE_SIZE = '10M';
+
+-- Enable query timeout (Oracle 12c+)
+-- Set to 600 seconds (10 minutes) for most profiling queries
+ALTER SESSION SET MAX_IDLE_TIME = 30;  -- Idle timeout in minutes
+
+-- For individual queries, use DBMS_RESOURCE_MANAGER (if available)
+BEGIN
+    DBMS_RESOURCE_MANAGER.CLEAR_PENDING_AREA();
+    DBMS_RESOURCE_MANAGER.CREATE_PENDING_AREA();
+
+    -- Create resource plan for profiling (if not exists)
+    DBMS_RESOURCE_MANAGER.CREATE_PLAN(
+        plan    => 'ILM_PROFILING_PLAN',
+        comment => 'Resource plan for ILM profiling queries'
+    );
+
+    -- Low priority consumer group
+    DBMS_RESOURCE_MANAGER.CREATE_CONSUMER_GROUP(
+        consumer_group => 'ILM_PROFILING_GROUP',
+        comment        => 'Low-priority profiling queries'
+    );
+
+    DBMS_RESOURCE_MANAGER.SUBMIT_PENDING_AREA();
+END;
+/
+
+-- Assign session to profiling consumer group
+BEGIN
+    DBMS_RESOURCE_MANAGER.SWITCH_CONSUMER_GROUP_FOR_SESS(
+        session_id       => SYS_CONTEXT('USERENV', 'SID'),
+        session_serial   => SYS_CONTEXT('USERENV', 'SESSIONID'),
+        consumer_group   => 'ILM_PROFILING_GROUP'
+    );
+END;
+/
+```
+
+#### Query Hints for Resource Limiting
+
+**Standard Hints for All Profiling Queries:**
+```sql
+-- Template: Add these hints to resource-intensive queries
+SELECT /*+
+    PARALLEL(4)                    -- Limit parallelism to 4 threads
+    CPU_COSTING                    -- Use CPU-based costing
+    NO_INDEX_FFS(t)                -- Avoid full fast scans
+    FIRST_ROWS(100)                -- Optimize for first 100 rows
+    NO_QUERY_TRANSFORMATION        -- Disable query transformations
+*/
+    ...
+FROM large_table t
+WHERE ...
+```
+
+**Query-Specific Hint Recommendations:**
+
+| Query | Recommended Hints | Rationale |
+|-------|------------------|-----------|
+| Query 3 (Large Tables) | `PARALLEL(4), FIRST_ROWS(100)` | Limit parallelism, optimize for top results |
+| Query 4 (LOB Analysis) | `PARALLEL(2), NO_INDEX_FFS` | Moderate parallelism, avoid full scans |
+| Query 6 (Data Age) | `PARALLEL(4), SAMPLE(10)` | Use sampling when possible |
+| Query 7 (I/O Stats) | `PARALLEL(2)` | AWR queries are usually fast |
+| Query 8 (Growth Rate) | `PARALLEL(4)` | Historical data access |
+
+### 0.3 Incremental Execution Strategy
+
+**Break Large Operations into Chunks:**
+
+Instead of running Query 3 for all tables at once:
+```sql
+-- BAD: Single query for all tables (may run for hours)
+SELECT ... FROM dba_tables WHERE owner IN (...);
+
+-- GOOD: Process in batches
+-- Batch 1: Largest tables first
+SELECT ... FROM dba_tables
+WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
+  AND segment_bytes > 100*1024*1024*1024  -- > 100 GB
+FETCH FIRST 20 ROWS ONLY;
+
+-- Batch 2: Medium tables
+SELECT ... FROM dba_tables
+WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
+  AND segment_bytes BETWEEN 10*1024*1024*1024 AND 100*1024*1024*1024
+FETCH FIRST 50 ROWS ONLY;
+
+-- Batch 3: Smaller tables
+SELECT ... FROM dba_tables
+WHERE owner IN (SELECT owner FROM temp_tracked_schemas)
+  AND segment_bytes < 10*1024*1024*1024
+FETCH FIRST 100 ROWS ONLY;
+```
+
+**Schema-by-Schema Execution:**
+```sql
+-- Process one schema at a time for Query 6 (Data Age Sampling)
+DECLARE
+    v_sql VARCHAR2(32767);
+BEGIN
+    FOR schema_rec IN (
+        SELECT owner FROM temp_tracked_schemas ORDER BY owner
+    ) LOOP
+        DBMS_OUTPUT.PUT_LINE('Processing schema: ' || schema_rec.owner);
+
+        -- Run data age queries for this schema only
+        FOR table_rec IN (
+            SELECT table_name, column_name
+            FROM dba_tab_columns
+            WHERE owner = schema_rec.owner
+              AND data_type IN ('DATE', 'TIMESTAMP')
+            FETCH FIRST 10 ROWS ONLY  -- Limit per schema
+        ) LOOP
+            -- Execute sampling query with timeout
+            BEGIN
+                v_sql := 'SELECT /*+ PARALLEL(2) SAMPLE(10) */ ' ||
+                         'MIN(' || table_rec.column_name || '), ' ||
+                         'MAX(' || table_rec.column_name || ') ' ||
+                         'FROM ' || schema_rec.owner || '.' || table_rec.table_name;
+
+                EXECUTE IMMEDIATE v_sql;
+                COMMIT;
+
+                -- Pause between tables (throttling)
+                DBMS_LOCK.SLEEP(1);  -- 1 second pause
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);
+                    CONTINUE;  -- Skip to next table
+            END;
+        END LOOP;
+
+        -- Pause between schemas
+        DBMS_LOCK.SLEEP(5);  -- 5 second pause
+    END LOOP;
+END;
+/
+```
+
+### 0.4 Real-Time Monitoring During Profiling
+
+**Monitor System Load While Profiling:**
+
+```sql
+-- Monitor current session's resource consumption
+-- Run this in a separate session while profiling queries execute
+SELECT
+    s.sid,
+    s.serial#,
+    s.username,
+    s.program,
+    s.sql_id,
+    t.sql_text,
+    s.status,
+    s.seconds_in_wait,
+    ROUND(s.physical_reads / NULLIF(s.executions, 0), 2) AS avg_phys_reads,
+    ROUND(s.buffer_gets / NULLIF(s.executions, 0), 2) AS avg_buffer_gets,
+    s.last_call_et AS seconds_since_last_call
+FROM v$session s
+LEFT JOIN v$sqltext t ON s.sql_id = t.sql_id
+WHERE s.username = 'YOUR_PROFILING_USER'  -- Replace with your username
+  AND s.status = 'ACTIVE'
+ORDER BY s.last_call_et DESC;
+```
+
+**Alert Thresholds:**
+- **CPU Usage > 80%**: Pause profiling, wait for load to decrease
+- **Active Sessions > 100**: Defer resource-intensive queries
+- **Query Runtime > 15 minutes**: Consider canceling and optimizing
+- **Physical I/O > 10 GB**: Throttle or pause
+
+**Automated Monitoring Script:**
+```sql
+-- Save this as monitor_profiling_session.sql
+SET SERVEROUTPUT ON;
+DECLARE
+    v_cpu_usage NUMBER;
+    v_active_sessions NUMBER;
+    v_recommendation VARCHAR2(100);
+BEGIN
+    LOOP
+        -- Check CPU
+        SELECT value INTO v_cpu_usage
+        FROM v$sysmetric
+        WHERE metric_name = 'Host CPU Utilization (%)'
+          AND intsize_csec = (SELECT MAX(intsize_csec) FROM v$sysmetric);
+
+        -- Check active sessions
+        SELECT COUNT(*) INTO v_active_sessions
+        FROM v$session
+        WHERE status = 'ACTIVE' AND username IS NOT NULL;
+
+        -- Evaluate
+        IF v_cpu_usage > 80 THEN
+            v_recommendation := '⛔ STOP PROFILING - HIGH CPU';
+        ELSIF v_cpu_usage > 60 THEN
+            v_recommendation := '⚠️  CAUTION - MODERATE CPU';
+        ELSIF v_active_sessions > 100 THEN
+            v_recommendation := '⛔ STOP PROFILING - HIGH SESSION COUNT';
+        ELSE
+            v_recommendation := '✓ OK TO CONTINUE';
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE(
+            TO_CHAR(SYSDATE, 'HH24:MI:SS') ||
+            ' | CPU: ' || ROUND(v_cpu_usage, 1) || '%' ||
+            ' | Sessions: ' || v_active_sessions ||
+            ' | ' || v_recommendation
+        );
+
+        -- Exit if critical
+        EXIT WHEN v_cpu_usage > 90 OR v_active_sessions > 150;
+
+        -- Check every 30 seconds
+        DBMS_LOCK.SLEEP(30);
+    END LOOP;
+
+    DBMS_OUTPUT.PUT_LINE('⛔ CRITICAL THRESHOLD REACHED - STOP ALL PROFILING QUERIES');
+END;
+/
+```
+
+### 0.5 Query Cancellation Procedures
+
+**How to Cancel a Running Profiling Query:**
+
+**Option 1: Kill Your Own Session (Safest)**
+```sql
+-- Find your session ID
+SELECT sid, serial#, username, status, sql_id, seconds_in_wait
+FROM v$session
+WHERE username = USER
+  AND status = 'ACTIVE';
+
+-- Kill your own session (requires ALTER SYSTEM privilege)
+ALTER SYSTEM KILL SESSION 'sid,serial#' IMMEDIATE;
+```
+
+**Option 2: Cancel Query via SQL*Plus**
+```
+-- In SQL*Plus, press CTRL+C to cancel current query
+-- This sends a cancel signal to the database
+```
+
+**Option 3: Use DBMS_SYSTEM (DBA Privilege Required)**
+```sql
+-- Cancel specific SQL execution
+BEGIN
+    DBMS_SYSTEM.CANCEL_SQL(
+        sid    => 123,    -- Your session ID
+        serial => 45678   -- Your session serial#
+    );
+END;
+/
+```
+
+**Emergency Rollback Plan:**
+
+1. **Immediate Actions:**
+   - Press CTRL+C in SQL*Plus/SQL Developer
+   - Kill session using ALTER SYSTEM KILL SESSION
+   - Alert DBA team if system impact detected
+
+2. **Post-Cancellation Verification:**
+```sql
+-- Verify no profiling queries still running
+SELECT sid, serial#, sql_id, status, seconds_in_wait
+FROM v$session
+WHERE username = 'YOUR_USERNAME'
+  AND status = 'ACTIVE';
+
+-- Check for locks held by your session
+SELECT
+    l.sid,
+    s.serial#,
+    l.type,
+    l.lmode,
+    o.object_name
+FROM v$lock l
+JOIN v$session s ON l.sid = s.sid
+LEFT JOIN dba_objects o ON l.id1 = o.object_id
+WHERE s.username = 'YOUR_USERNAME';
+```
+
+3. **Resume Profiling:**
+   - Wait 5-10 minutes for system load to stabilize
+   - Re-check system load (Section 0.1 pre-execution checklist)
+   - Resume with smaller batch size or more restrictive hints
+
+### 0.6 Safe Query Patterns
+
+**DO's ✓**
+- Always use `FETCH FIRST n ROWS ONLY` when possible
+- Add `/*+ PARALLEL(2-4) */` hints for large table scans
+- Use `SAMPLE(10)` clause for data age analysis when accuracy allows
+- Execute queries in batches (by schema, size, etc.)
+- Monitor system load before and during execution
+- Run during off-peak hours
+- Set session-level timeouts
+- Test queries on smaller subsets first
+
+**DON'Ts ✗**
+- ❌ Never run `SELECT * FROM dba_segments` without filters
+- ❌ Avoid `COUNT(*)` on tables > 1TB without sampling
+- ❌ Don't use `PARALLEL(16+)` - excessive parallelism
+- ❌ Never run data age sampling (Query 6) during peak hours
+- ❌ Don't execute all queries simultaneously
+- ❌ Avoid queries without time limits or row limits
+- ❌ Don't profile critical production tables during business hours
+
+### 0.7 Communication Protocol
+
+**Before Profiling Begins:**
+- ✅ Notify DBA team of profiling schedule
+- ✅ Announce in Slack/Teams: "Starting ILM profiling queries"
+- ✅ Document which queries will run and when
+- ✅ Provide emergency contact information
+
+**During Profiling:**
+- ✅ Log query start/end times
+- ✅ Monitor system metrics every 5-10 minutes
+- ✅ Report any issues immediately to DBA lead
+- ✅ Update status in shared document/channel
+
+**After Profiling:**
+- ✅ Confirm all queries completed successfully
+- ✅ Report any errors or warnings
+- ✅ Document actual query durations vs. estimates
+- ✅ Notify team: "ILM profiling completed - system normal"
+
+**Example Communication Template:**
+```
+📊 ILM Database Profiling - Execution Notice
+
+Date: 2025-10-27
+Time Window: 10:00 PM - 2:00 AM
+Duration: ~4 hours
+
+Queries to Execute:
+- Query 0: Schema Scoping (< 5 sec)
+- Query 1: Schema Inventory (2-5 min)
+- Query 3: Large Tables Analysis (5-10 min)
+- Query 4: LOB Analysis (10-15 min)
+- Query 5: Date Columns (5-10 min)
+
+Expected Impact: LOW - Queries designed with production safety
+Emergency Contact: [DBA Name] - [Phone/Slack]
+
+Monitoring: Active monitoring throughout execution
+Rollback Plan: Query cancellation procedures documented in Section 0.5
+```
 
 ---
 
@@ -127,25 +568,114 @@ With a 120TB database containing numerous tablespaces and schemas, a strategic p
 
 ### 2.2 Data Collection Phases
 
-**Phase 1: High-Level Inventory (Day 1-2)**
-- Schema and tablespace catalog
-- Total sizes and counts
-- Quick identification of largest objects
+**⚠️ PRODUCTION EXECUTION NOTICE:** All phases must be executed during off-peak hours with active monitoring. Refer to [Section 0: Production Database Safety Guidelines](#0-production-database-safety-guidelines) for detailed execution procedures.
 
-**Phase 2: Detailed Table Analysis (Day 3-7)**
-- Per-table metrics collection
-- Partition and LOB analysis
-- Data age distribution sampling
+**Phase 1: High-Level Inventory (Day 1-2) - LOW IMPACT**
+- **Execution Window:** Weekday off-peak (10 PM - 6 AM) or Weekend
+- **Expected Duration:** 30-60 minutes total
+- **Queries:** Query 0 (Schema Scoping), Query 1 (Schema Inventory), Query 2 (Tablespace Stats)
+- **Impact Level:** LOW - Read-only dictionary queries
+- **Activities:**
+  - Schema and tablespace catalog
+  - Total sizes and counts
+  - Quick identification of largest objects
+- **Pre-Execution:** Run system load check (Section 0.1)
+- **Monitoring:** Check CPU/sessions every 10 minutes
 
-**Phase 3: Access Pattern Analysis (Day 8-10)**
-- AWR data mining for I/O patterns
-- Segment statistics for hot/cold classification
-- Growth trend calculation
+**Phase 2: Detailed Table Analysis (Day 3-7) - MEDIUM IMPACT**
+- **Execution Window:** Weekend preferred, or multiple weekday off-peak windows
+- **Expected Duration:** 2-4 hours (spread across multiple sessions)
+- **Queries:** Query 3 (Large Tables), Query 4 (LOB Analysis), Query 5 (Date Columns)
+- **Impact Level:** MEDIUM - Larger dictionary scans
+- **Activities:**
+  - Per-table metrics collection
+  - Partition and LOB analysis
+  - Date column identification
+- **Pre-Execution:**
+  - Verify system load < 60% CPU
+  - Break Query 3 into batches (100+ GB, 10-100 GB, < 10 GB)
+  - Execute Query 4 (LOB) on Sunday morning if possible
+- **Monitoring:** Active monitoring every 5 minutes
+- **Throttling:** 5-minute pause between Query 3 and Query 4
 
-**Phase 4: Scoring and Ranking (Day 11-14)**
-- Apply scoring algorithms
-- Generate ranked candidate list
-- Create migration wave assignments
+**Phase 3: Data Age Sampling (Day 8-12) - HIGH IMPACT**
+- **Execution Window:** Weekend nights (Saturday/Sunday 10 PM - 6 AM)
+- **Expected Duration:** 4-8 hours (spread across 2-3 weekend sessions)
+- **Queries:** Query 6 (Data Age Distribution)
+- **Impact Level:** HIGH - Full table scans on large tables
+- **Activities:**
+  - Data age distribution sampling (MIN/MAX dates, % old data)
+  - Execute schema-by-schema with 10% SAMPLE clause
+  - Process largest tables first (prioritize)
+- **Pre-Execution:**
+  - MANDATORY system load check
+  - Set session timeout to 15 minutes per table
+  - Use PARALLEL(4) and SAMPLE(10) hints
+- **Monitoring:**
+  - Continuous monitoring required
+  - Cancel if CPU > 80% for more than 5 minutes
+  - Pause between each table (1-2 seconds)
+- **Incremental Approach:** Process 10-20 tables per session, not all at once
+
+**Phase 4: Access Pattern Analysis (Day 13-14) - LOW-MEDIUM IMPACT**
+- **Execution Window:** Weekday off-peak (10 PM - 6 AM)
+- **Expected Duration:** 30-60 minutes total
+- **Queries:** Query 7 (I/O Stats - AWR), Query 8 (Growth Rate)
+- **Impact Level:** LOW-MEDIUM - AWR queries are generally fast
+- **Activities:**
+  - AWR data mining for I/O patterns
+  - Segment statistics for hot/cold classification
+  - Growth trend calculation
+- **Pre-Execution:** Verify AWR access permissions
+- **Monitoring:** Standard monitoring every 10 minutes
+
+**Phase 5: Scoring and Ranking (Day 15-16) - ANALYSIS PHASE**
+- **Execution Window:** Business hours (no production impact)
+- **Expected Duration:** 1-2 days
+- **Impact Level:** NONE - Analysis in spreadsheet/SQL*Plus
+- **Activities:**
+  - Apply scoring algorithms to collected data
+  - Calculate dimension scores (Impact, Complexity, Risk, Data Age)
+  - Generate composite priority scores
+  - Create ranked candidate list
+  - Generate migration wave assignments
+  - Prepare executive summary reports
+
+**Execution Timeline Summary:**
+
+```
+Week 1:
+├─ Weekend 1 (Sat/Sun): Phase 1 + Phase 2 (Queries 0-5)
+│  Duration: 3-5 hours total
+│  Impact: LOW-MEDIUM
+│
+Week 2:
+├─ Weekend 2 (Sat Night): Phase 3 Part 1 (Query 6 - First batch of schemas)
+│  Duration: 4-6 hours
+│  Impact: HIGH - Active monitoring required
+│
+Week 3:
+├─ Weekend 3 (Sat Night): Phase 3 Part 2 (Query 6 - Remaining schemas)
+│  Duration: 2-4 hours
+│  Impact: HIGH - Active monitoring required
+│
+├─ Weekday (Tue/Wed): Phase 4 (Queries 7-8)
+│  Time: 10 PM - 11 PM
+│  Duration: 30-60 minutes
+│  Impact: LOW-MEDIUM
+│
+├─ Thu-Fri: Phase 5 (Analysis and Scoring)
+│  Business hours - No production impact
+│
+Total Calendar Time: 3 weeks
+Total Active Profiling Time: 10-15 hours
+```
+
+**Emergency Stop Criteria:**
+- CPU > 85% sustained for 5+ minutes → STOP all queries
+- Active sessions > 120 → DEFER to later window
+- Query runtime > 20 minutes → CANCEL and investigate
+- Production incident reported → STOP immediately, resume after resolution
 
 ### 2.3 Schema Scoping Methodology
 
@@ -1389,6 +1919,8 @@ Addressed in main ILM strategy document and DBA meeting discussion points.
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2025-10-27 | Claude/DBA Team | Initial profiling plan created |
+| 1.1 | 2025-10-27 | Claude/DBA Team | Scoped profiling to LOGS.DWH_PROCESS schemas, added Query 0 and temp_tracked_schemas table, updated all queries with schema filter |
+| 1.2 | 2025-10-27 | Claude/DBA Team | **PRODUCTION SAFETY UPDATE**: Added Section 0 (Production Database Safety Guidelines) with execution timing, resource management, monitoring procedures, query cancellation, and communication protocols. Updated Section 2.2 with detailed execution phases including impact levels, timing windows, and emergency stop criteria. |
 
 ---
 
