@@ -202,7 +202,7 @@ COMMIT;
 
 ```sql
 -- Gather all core metadata in one query (FAST - no table data access)
-CREATE GLOBAL TEMPORARY TABLE temp_quick_profile (
+CREATE TABLE cmr.dwh_tables_quick_profile (
     owner VARCHAR2(128),
     table_name VARCHAR2(128),
     size_gb NUMBER,
@@ -221,10 +221,12 @@ CREATE GLOBAL TEMPORARY TABLE temp_quick_profile (
     basicfile_lob_count NUMBER,
     lob_total_size_gb NUMBER,
     last_analyzed DATE,
-    stats_age_days NUMBER
-) ON COMMIT PRESERVE ROWS;
+    stats_age_days NUMBER,
+    profile_date DATE DEFAULT SYSDATE,
+    CONSTRAINT dwh_tables_quick_profile_pk PRIMARY KEY (owner, table_name)
+);
 
-INSERT INTO temp_quick_profile
+INSERT INTO cmr.dwh_tables_quick_profile
 SELECT
     t.owner,
     t.table_name,
@@ -314,7 +316,7 @@ COMMIT;
 
 ```sql
 -- Gather tablespace information for each schema
-CREATE GLOBAL TEMPORARY TABLE temp_schema_tablespaces (
+CREATE TABLE cmr.dwh_schema_tablespaces (
     owner VARCHAR2(128),
     tablespace_name VARCHAR2(128),
     tablespace_size_gb NUMBER,
@@ -323,10 +325,12 @@ CREATE GLOBAL TEMPORARY TABLE temp_schema_tablespaces (
     pct_used NUMBER,
     block_size NUMBER,
     extent_management VARCHAR2(30),
-    datafile_count NUMBER
-) ON COMMIT PRESERVE ROWS;
+    datafile_count NUMBER,
+    profile_date DATE DEFAULT SYSDATE,
+    CONSTRAINT dwh_schema_tablespaces_pk PRIMARY KEY (owner, tablespace_name)
+);
 
-INSERT INTO temp_schema_tablespaces
+INSERT INTO cmr.dwh_schema_tablespaces
 SELECT
     ts_owner.owner,
     ts.tablespace_name,
@@ -363,8 +367,8 @@ COMMIT;
 
 ```sql
 -- Aggregate table-level metrics to schema level
-CREATE GLOBAL TEMPORARY TABLE temp_schema_profile (
-    owner VARCHAR2(128),
+CREATE TABLE cmr.dwh_schema_profile (
+    owner VARCHAR2(128) PRIMARY KEY,
     -- Size metrics
     total_size_gb NUMBER,
     table_count NUMBER,
@@ -397,10 +401,21 @@ CREATE GLOBAL TEMPORARY TABLE temp_schema_profile (
 
     -- Estimated savings
     estimated_compression_savings_gb NUMBER,
-    estimated_savings_pct NUMBER
-) ON COMMIT PRESERVE ROWS;
+    estimated_savings_pct NUMBER,
 
-INSERT INTO temp_schema_profile
+    -- Scoring columns (added by scoring procedure)
+    storage_impact_score NUMBER,
+    migration_readiness_score NUMBER,
+    business_value_score NUMBER,
+    schema_priority_score NUMBER,
+    schema_category VARCHAR2(30),
+    schema_type VARCHAR2(30),
+
+    -- Metadata
+    profile_date DATE DEFAULT SYSDATE
+);
+
+INSERT INTO cmr.dwh_schema_profile
 SELECT
     p.owner,
 
@@ -412,13 +427,13 @@ SELECT
 
     -- Tablespace metrics
     (SELECT COUNT(DISTINCT tablespace_name)
-     FROM temp_schema_tablespaces
+     FROM cmr.dwh_schema_tablespaces
      WHERE owner = p.owner) AS tablespace_count,
     (SELECT ROUND(SUM(tablespace_size_gb), 2)
-     FROM temp_schema_tablespaces
+     FROM cmr.dwh_schema_tablespaces
      WHERE owner = p.owner) AS total_tablespace_size_gb,
     (SELECT ROUND(AVG(pct_used), 1)
-     FROM temp_schema_tablespaces
+     FROM cmr.dwh_schema_tablespaces
      WHERE owner = p.owner) AS avg_tablespace_used_pct,
 
     -- Partitioning metrics
@@ -456,8 +471,14 @@ SELECT
             WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
             ELSE p.size_gb * 0.20
         END
-    ) / NULLIF(SUM(p.size_gb), 0)) * 100, 1) AS estimated_savings_pct
-FROM temp_quick_profile p
+    ) / NULLIF(SUM(p.size_gb), 0)) * 100, 1) AS estimated_savings_pct,
+
+    -- Scoring columns (NULL initially, populated by scoring procedure)
+    NULL, NULL, NULL, NULL, NULL, NULL,
+
+    -- Profile date
+    SYSDATE
+FROM cmr.dwh_tables_quick_profile p
 GROUP BY p.owner
 ORDER BY SUM(p.size_gb) DESC;
 
@@ -473,24 +494,16 @@ COMMIT;
 ### 4.1 Calculate Schema-Level Scores
 
 ```sql
--- Add score columns to schema profile table
-ALTER TABLE temp_schema_profile ADD storage_impact_score NUMBER;
-ALTER TABLE temp_schema_profile ADD migration_readiness_score NUMBER;
-ALTER TABLE temp_schema_profile ADD business_value_score NUMBER;
-ALTER TABLE temp_schema_profile ADD schema_priority_score NUMBER;
-ALTER TABLE temp_schema_profile ADD schema_category VARCHAR2(30);
-ALTER TABLE temp_schema_profile ADD schema_type VARCHAR2(30);
-
 -- Calculate Storage Impact Score (0-100)
-UPDATE temp_schema_profile SET storage_impact_score = ROUND(
+UPDATE cmr.dwh_schema_profile SET storage_impact_score = ROUND(
     -- Total size component (60 points)
-    (total_size_gb / (SELECT MAX(total_size_gb) FROM temp_schema_profile) * 60) +
+    (total_size_gb / (SELECT MAX(total_size_gb) FROM cmr.dwh_schema_profile) * 60) +
     -- Estimated savings component (40 points)
-    (estimated_compression_savings_gb / (SELECT MAX(estimated_compression_savings_gb) FROM temp_schema_profile) * 40)
+    (estimated_compression_savings_gb / (SELECT MAX(estimated_compression_savings_gb) FROM cmr.dwh_schema_profile) * 40)
 , 1);
 
 -- Calculate Migration Readiness Score (0-100)
-UPDATE temp_schema_profile SET migration_readiness_score = ROUND(
+UPDATE cmr.dwh_schema_profile SET migration_readiness_score = ROUND(
     -- Tablespace simplicity (30 points - fewer tablespaces = easier)
     CASE
         WHEN tablespace_count <= 2 THEN 30
@@ -509,7 +522,7 @@ UPDATE temp_schema_profile SET migration_readiness_score = ROUND(
 , 1);
 
 -- Calculate Business Value Score (0-100)
-UPDATE temp_schema_profile SET business_value_score = ROUND(
+UPDATE cmr.dwh_schema_profile SET business_value_score = ROUND(
     -- Space reduction urgency (60 points - based on savings potential)
     (estimated_savings_pct * 0.60) +
     -- BASICFILE migration need (40 points)
@@ -523,14 +536,14 @@ UPDATE temp_schema_profile SET business_value_score = ROUND(
 , 1);
 
 -- Calculate Schema Priority Score (weighted average)
-UPDATE temp_schema_profile SET schema_priority_score = ROUND(
+UPDATE cmr.dwh_schema_profile SET schema_priority_score = ROUND(
     (storage_impact_score * 0.50) +
     (migration_readiness_score * 0.30) +
     (business_value_score * 0.20)
 , 1);
 
 -- Assign schema categories
-UPDATE temp_schema_profile SET schema_category = CASE
+UPDATE cmr.dwh_schema_profile SET schema_category = CASE
     WHEN schema_priority_score >= 80 THEN 'QUICK_WIN_SCHEMA'
     WHEN schema_priority_score >= 60 THEN 'HIGH_PRIORITY'
     WHEN schema_priority_score >= 40 THEN 'MEDIUM_PRIORITY'
@@ -538,7 +551,7 @@ UPDATE temp_schema_profile SET schema_category = CASE
 END;
 
 -- Assign schema types
-UPDATE temp_schema_profile SET schema_type = CASE
+UPDATE cmr.dwh_schema_profile SET schema_type = CASE
     WHEN total_size_gb > 10000 AND tablespace_count <= 3 THEN 'TYPE_A_LARGE_SIMPLE'
     WHEN pct_tables_with_basicfile >= 50 THEN 'TYPE_B_BASICFILE_HEAVY'
     WHEN total_size_gb BETWEEN 1000 AND 10000 AND tablespace_count BETWEEN 3 AND 5 THEN 'TYPE_C_MEDIUM_MATURE'
@@ -553,7 +566,7 @@ COMMIT;
 
 ```sql
 -- Final schema ranking for ILM migration
-CREATE OR REPLACE VIEW v_ilm_schema_ranking AS
+CREATE OR REPLACE VIEW cmr.v_dwh_ilm_schema_ranking AS
 SELECT
     owner,
     total_size_gb,
@@ -570,112 +583,242 @@ SELECT
     business_value_score,
     schema_priority_score,
     schema_category,
-    schema_type
-FROM temp_schema_profile
+    schema_type,
+    profile_date
+FROM cmr.dwh_schema_profile
 ORDER BY schema_priority_score DESC;
 ```
 
 ---
 
-## 5. Sample Output
+## 5. Schema Ranking Reports
 
-### 5.1 Executive Summary
+### 5.1 Executive Summary - Database-Wide
 
 ```sql
--- Quick summary statistics
+-- Overall profiling summary
 SELECT
-    COUNT(*) AS total_tables_analyzed,
-    ROUND(SUM(size_gb), 1) AS total_size_gb,
-    SUM(CASE WHEN priority_score >= 80 THEN 1 ELSE 0 END) AS quick_win_count,
-    SUM(CASE WHEN priority_score >= 60 THEN 1 ELSE 0 END) AS high_priority_count,
-    SUM(CASE WHEN lob_type = 'BASICFILE' THEN 1 ELSE 0 END) AS basicfile_lob_tables,
-    SUM(CASE WHEN partitioned = 'NO' AND size_gb > 50 THEN 1 ELSE 0 END) AS large_nonpart_tables,
-    SUM(basicfile_lob_count) AS total_basicfile_lobs
-FROM temp_quick_profile;
+    COUNT(DISTINCT owner) AS total_schemas_analyzed,
+    ROUND(SUM(total_size_gb), 1) AS total_database_size_gb,
+    ROUND(SUM(estimated_compression_savings_gb), 1) AS total_potential_savings_gb,
+    ROUND(AVG(estimated_savings_pct), 1) AS avg_savings_pct,
+    SUM(CASE WHEN schema_category = 'QUICK_WIN_SCHEMA' THEN 1 ELSE 0 END) AS quick_win_schemas,
+    SUM(CASE WHEN schema_category = 'HIGH_PRIORITY' THEN 1 ELSE 0 END) AS high_priority_schemas,
+    SUM(table_count) AS total_tables,
+    SUM(tablespace_count) AS total_tablespaces,
+    SUM(basicfile_lob_table_count) AS total_basicfile_lob_tables
+FROM cmr.dwh_schema_profile;
 ```
 
 **Sample Output:**
 ```
-TOTAL_TABLES | TOTAL_SIZE_GB | QUICK_WIN | HIGH_PRIORITY | BASICFILE_TABLES | LARGE_NONPART | TOTAL_BASICFILE_LOBS
--------------|---------------|-----------|---------------|------------------|---------------|---------------------
-1,247        | 85,234.5      | 12        | 45            | 78               | 34            | 156
+TOTAL_SCHEMAS | DB_SIZE_GB | POTENTIAL_SAVINGS_GB | AVG_SAVINGS_PCT | QUICK_WIN | HIGH_PRIORITY | TOTAL_TABLES | TOTAL_TABLESPACES | BASICFILE_LOB_TABLES
+--------------|------------|---------------------|-----------------|-----------|---------------|--------------|-------------------|---------------------
+45            | 118,456.3  | 47,382.5            | 40.0            | 3         | 8             | 12,847       | 156               | 234
 ```
 
-### 5.2 Top Candidates Report
+### 5.2 Top Schema Candidates Report
 
 ```sql
--- Top 20 candidates
+-- Top 10 schemas ranked by priority
 SELECT
-    DENSE_RANK() OVER (ORDER BY priority_score DESC) AS rank,
+    DENSE_RANK() OVER (ORDER BY schema_priority_score DESC) AS rank,
     owner,
-    table_name,
-    size_gb,
-    partitioned AS part,
-    lob_type,
-    ROUND(impact_score, 0) AS impact,
-    ROUND(ease_score, 0) AS ease,
-    ROUND(priority_score, 0) AS priority,
-    candidate_type
-FROM temp_quick_profile
-ORDER BY priority_score DESC
-FETCH FIRST 20 ROWS ONLY;
+    ROUND(total_size_gb, 1) AS size_gb,
+    tablespace_count AS ts_count,
+    table_count AS tables,
+    ROUND(estimated_compression_savings_gb, 1) AS savings_gb,
+    ROUND(estimated_savings_pct, 1) AS savings_pct,
+    basicfile_lob_table_count AS basicfile_tables,
+    ROUND(pct_partition_ready, 0) AS partition_ready_pct,
+    ROUND(schema_priority_score, 0) AS priority,
+    schema_category AS category,
+    schema_type AS type
+FROM cmr.dwh_schema_profile
+ORDER BY schema_priority_score DESC
+FETCH FIRST 10 ROWS ONLY;
 ```
 
 **Sample Output:**
 ```
-RANK  OWNER      TABLE_NAME           SIZE_GB  PART  LOB_TYPE    IMPACT  EASE  PRIORITY  TYPE
-----  ---------  ------------------   -------  ----  ----------  ------  ----  --------  --------------------
-1     DWH_PROD   FACT_SALES_HIST      450.2    NO    BASICFILE   98      85    93        TYPE_B_BASICFILE_LOB
-2     DWH_PROD   FACT_ORDERS          380.5    NO    NONE        82      80    81        TYPE_A_LARGE_NONPART
-3     APP_SALES  SALES_TRANSACTIONS   280.1    NO    SECUREFILE  76      85    80        TYPE_A_LARGE_NONPART
-4     CRM_DATA   CUSTOMER_EVENTS      220.3    NO    MIXED       73      70    72        TYPE_C_LARGE_SIMPLE
+RANK  OWNER        SIZE_GB   TS_CNT  TABLES  SAVINGS_GB  SAVINGS%  BASICFILE  READY%  PRIORITY  CATEGORY           TYPE
+----  -----------  --------  ------  ------  ----------  --------  ---------  ------  --------  -----------------  ----------------------
+1     DWH_PROD     28,456.2  3       2,847   11,382.5    40        78         85      92        QUICK_WIN_SCHEMA   TYPE_A_LARGE_SIMPLE
+2     APP_SALES    15,234.8  2       1,456   6,093.9     40        45         78      88        QUICK_WIN_SCHEMA   TYPE_C_MEDIUM_MATURE
+3     CRM_DATA     12,678.5  4       1,023   5,071.4     40        34         72      85        QUICK_WIN_SCHEMA   TYPE_C_MEDIUM_MATURE
+4     ETL_STAGING  9,456.3   3       856     3,782.5     40        67         90      78        HIGH_PRIORITY      TYPE_B_BASICFILE_HEAVY
+5     ANALYTICS    8,234.1   5       645     3,293.6     40        12         65      72        HIGH_PRIORITY      TYPE_C_MEDIUM_MATURE
 ```
 
-### 5.3 Candidate Type Distribution
+### 5.3 Tablespace Breakdown per Schema
 
 ```sql
--- Count by candidate type
+-- Detailed tablespace information for top schemas
 SELECT
-    candidate_type,
-    COUNT(*) AS table_count,
-    ROUND(SUM(size_gb), 1) AS total_size_gb,
-    ROUND(AVG(priority_score), 1) AS avg_priority
-FROM temp_quick_profile
-WHERE priority_score >= 40
-GROUP BY candidate_type
-ORDER BY AVG(priority_score) DESC;
+    st.owner,
+    st.tablespace_name,
+    ROUND(st.tablespace_size_gb, 1) AS size_gb,
+    ROUND(st.tablespace_used_gb, 1) AS used_gb,
+    ROUND(st.pct_used, 1) AS pct_used,
+    st.extent_management AS extent_mgmt,
+    st.datafile_count AS files,
+    sp.schema_category
+FROM cmr.dwh_schema_tablespaces st
+JOIN cmr.dwh_schema_profile sp ON st.owner = sp.owner
+WHERE sp.schema_category IN ('QUICK_WIN_SCHEMA', 'HIGH_PRIORITY')
+ORDER BY sp.schema_priority_score DESC, st.tablespace_size_gb DESC;
+```
+
+**Sample Output:**
+```
+OWNER        TABLESPACE_NAME      SIZE_GB  USED_GB  PCT_USED  EXTENT_MGMT    FILES  CATEGORY
+-----------  -------------------  -------  -------  --------  -------------  -----  ----------------
+DWH_PROD     DWH_PROD_DATA        15,234   14,890   97.7      AUTOALLOCATE   8      QUICK_WIN_SCHEMA
+DWH_PROD     DWH_PROD_INDEXES     8,456    8,012    94.7      AUTOALLOCATE   5      QUICK_WIN_SCHEMA
+DWH_PROD     DWH_PROD_LOBS        4,766    4,480    94.0      AUTOALLOCATE   3      QUICK_WIN_SCHEMA
+APP_SALES    APP_SALES_DATA       12,234   11,890   97.2      AUTOALLOCATE   6      QUICK_WIN_SCHEMA
+APP_SALES    APP_SALES_INDEXES    3,001    2,870    95.6      AUTOALLOCATE   2      QUICK_WIN_SCHEMA
+```
+
+### 5.4 Schema Type Distribution
+
+```sql
+-- Distribution of schemas by type
+SELECT
+    schema_type,
+    COUNT(*) AS schema_count,
+    ROUND(SUM(total_size_gb), 1) AS total_size_gb,
+    ROUND(SUM(estimated_compression_savings_gb), 1) AS total_savings_gb,
+    ROUND(AVG(schema_priority_score), 1) AS avg_priority
+FROM cmr.dwh_schema_profile
+GROUP BY schema_type
+ORDER BY AVG(schema_priority_score) DESC;
+```
+
+**Sample Output:**
+```
+SCHEMA_TYPE              SCHEMA_COUNT  TOTAL_SIZE_GB  TOTAL_SAVINGS_GB  AVG_PRIORITY
+-----------------------  ------------  -------------  ----------------  ------------
+TYPE_A_LARGE_SIMPLE      2             42,690.5       17,076.2          90.0
+TYPE_B_BASICFILE_HEAVY   3             18,456.3       7,382.5           82.5
+TYPE_C_MEDIUM_MATURE     12            56,234.8       22,493.9          75.2
+TYPE_D_COMPLEX_LARGE     8             82,345.6       32,938.2          58.3
+TYPE_E_SMALL_LOW_VALUE   20            15,234.2       4,570.3           35.8
 ```
 
 ---
 
-## 6. Next Steps
+## 6. Tablespace Consolidation Strategy
 
-### 6.1 Immediate Actions (15-30 minutes)
+### 6.1 Current State (Pre-ILM)
+
+**Typical Schema Tablespace Pattern:**
+```
+DWH_PROD Schema:
+├── DWH_PROD_DATA (15 TB)
+├── DWH_PROD_INDEXES (8 TB)
+└── DWH_PROD_LOBS (5 TB)
+Total: 28 TB across 3 tablespaces
+```
+
+### 6.2 Target State (Post-ILM)
+
+**ILM Tablespace Architecture:**
+```
+DWH_PROD Schema:
+├── DWH_PROD_HOT (Recent data, compressed)
+│   ├── DATA (current year)
+│   ├── INDEXES
+│   └── LOBS (SECUREFILE, compressed)
+│
+├── DWH_PROD_WARM (1-3 years, higher compression)
+│   ├── DATA (partitioned by month/quarter)
+│   ├── INDEXES (local partitioned)
+│   └── LOBS (SECUREFILE, compressed + deduplicated)
+│
+└── DWH_PROD_COLD (>3 years, highest compression)
+    ├── DATA (partitioned by year, HCC if available)
+    └── LOBS (SECUREFILE, compressed + deduplicated)
+
+Estimated Post-ILM: 11.5 TB (59% reduction)
+```
+
+### 6.3 Migration Approach per Schema
+
+**Phase 1: Create ILM Tablespace Set**
+```sql
+-- Example for DWH_PROD schema
+CREATE TABLESPACE DWH_PROD_HOT
+    DATAFILE SIZE 1G AUTOEXTEND ON NEXT 1G MAXSIZE 10G
+    EXTENT MANAGEMENT LOCAL AUTOALLOCATE
+    SEGMENT SPACE MANAGEMENT AUTO;
+
+CREATE TABLESPACE DWH_PROD_WARM
+    DATAFILE SIZE 1G AUTOEXTEND ON NEXT 1G MAXSIZE 20G
+    EXTENT MANAGEMENT LOCAL AUTOALLOCATE
+    SEGMENT SPACE MANAGEMENT AUTO;
+
+CREATE TABLESPACE DWH_PROD_COLD
+    DATAFILE SIZE 1G AUTOEXTEND ON NEXT 1G MAXSIZE 50G
+    EXTENT MANAGEMENT LOCAL AUTOALLOCATE
+    SEGMENT SPACE MANAGEMENT AUTO;
+```
+
+**Phase 2: Migrate Schema Tables**
+- Partition tables by date column
+- Move hot data → DWH_PROD_HOT
+- Move warm data → DWH_PROD_WARM
+- Move cold data → DWH_PROD_COLD
+- Convert BASICFILE → SECUREFILE LOBs
+- Apply appropriate compression
+
+**Phase 3: Decommission Old Tablespaces**
+- Verify all data migrated
+- Drop old tablespaces (DWH_PROD_DATA, DWH_PROD_INDEXES, DWH_PROD_LOBS)
+- Reclaim storage
+
+### 6.4 Space Reduction Example
+
+| Schema | Current Size | Current TS Count | Post-ILM Size | Post-ILM TS Count | Savings | Savings % |
+|--------|-------------|------------------|---------------|-------------------|---------|-----------|
+| DWH_PROD | 28.5 TB | 3 | 11.4 TB | 3 (HOT/WARM/COLD) | 17.1 TB | 60% |
+| APP_SALES | 15.2 TB | 2 | 6.1 TB | 3 (HOT/WARM/COLD) | 9.1 TB | 60% |
+| CRM_DATA | 12.7 TB | 4 | 5.1 TB | 3 (HOT/WARM/COLD) | 7.6 TB | 60% |
+| **Total Top 3** | **56.4 TB** | **9** | **22.6 TB** | **9** | **33.8 TB** | **60%** |
+
+---
+
+## 7. Next Steps
+
+### 7.1 Immediate Actions (15-30 minutes)
 
 1. **Execute Quick Profiling:**
    - Run Query 3.1 (setup tracked schemas)
-   - Run Query 3.2 (core metadata - 2-5 min)
-   - Run Query 4.1 (calculate scores - < 1 min)
-   - Run Query 4.2 (generate ranking - < 1 sec)
+   - Run Query 3.2 (table metadata - 2-5 min)
+   - Run Query 3.3 (tablespace analysis - 30-60 sec)
+   - Run Query 3.4 (schema aggregation - 10-30 sec)
+   - Run Section 4.1 (calculate scores - < 1 min)
+   - Run Section 4.2 (generate ranking - < 1 sec)
 
 2. **Review Results:**
-   - Export top 50-100 candidates
+   - Export top 5-10 schemas
+   - Review tablespace breakdown per schema
    - Review with DBA team
-   - Identify any obvious exclusions (critical tables, etc.)
+   - Identify any business-critical schemas to exclude
 
-3. **Select for Detailed Analysis:**
-   - Choose top 50-100 candidates (priority_score >= 40)
-   - Create tasks in `cmr.dwh_migration_tasks`
-   - Proceed to detailed analysis using `pck_dwh_table_migration_analyzer`
+3. **Select Pilot Schema:**
+   - Choose top 1-2 schemas (Quick Win category)
+   - Verify tablespace consolidation is feasible
+   - Proceed to detailed analysis for selected schemas
 
-### 6.2 Create Detailed Analysis Tasks
+### 7.2 Create Detailed Analysis Tasks for Top Schemas
 
 ```sql
--- Create migration project for detailed analysis
+-- Create project for top schema detailed analysis
 INSERT INTO cmr.dwh_migration_projects (project_name, description)
-VALUES ('ILM_DETAILED_ANALYSIS_2025', 'Detailed analysis of top ILM candidates from quick profiling');
+VALUES ('ILM_SCHEMA_PILOT_2025', 'Detailed analysis of top schemas from quick profiling');
 
--- Create tasks for top candidates
+-- Create tasks for all tables in top 3-5 schemas
 INSERT INTO cmr.dwh_migration_tasks (
     project_id,
     owner,
@@ -683,97 +826,122 @@ INSERT INTO cmr.dwh_migration_tasks (
     priority
 )
 SELECT
-    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_DETAILED_ANALYSIS_2025'),
-    owner,
-    table_name,
+    (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_SCHEMA_PILOT_2025'),
+    p.owner,
+    p.table_name,
     CASE
-        WHEN priority_score >= 80 THEN 'CRITICAL'
-        WHEN priority_score >= 60 THEN 'HIGH'
+        WHEN s.schema_category = 'QUICK_WIN_SCHEMA' THEN 'CRITICAL'
+        WHEN s.schema_category = 'HIGH_PRIORITY' THEN 'HIGH'
         ELSE 'MEDIUM'
     END
-FROM temp_quick_profile
-WHERE priority_score >= 40  -- Top 50-100 candidates only
-ORDER BY priority_score DESC;
+FROM cmr.dwh_tables_quick_profile p
+JOIN cmr.dwh_schema_profile s ON p.owner = s.owner
+WHERE s.schema_category IN ('QUICK_WIN_SCHEMA', 'HIGH_PRIORITY')  -- Top 5-10 schemas
+ORDER BY s.schema_priority_score DESC, p.size_gb DESC;
 
 COMMIT;
 
--- Verify task count
-SELECT COUNT(*) AS tasks_created
-FROM cmr.dwh_migration_tasks
-WHERE project_id = (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_DETAILED_ANALYSIS_2025');
+-- Verify task count by schema
+SELECT
+    t.owner,
+    COUNT(*) AS table_count,
+    s.schema_category
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_schema_profile s ON t.owner = s.owner
+WHERE t.project_id = (SELECT project_id FROM cmr.dwh_migration_projects WHERE project_name = 'ILM_SCHEMA_PILOT_2025')
+GROUP BY t.owner, s.schema_category
+ORDER BY s.schema_priority_score DESC;
 ```
 
-### 6.3 Proceed to Detailed Analysis
+### 7.3 Proceed to Detailed Analysis (Per Schema)
 
-**Only for the top 50-100 candidates:**
-- Run `pck_dwh_table_migration_analyzer.analyze_table` on each task
-- This will provide:
-  - Exact date ranges (min/max dates)
-  - Data age distribution estimates
-  - Detailed complexity scoring
-  - Migration recommendations
-  - Storage savings estimates
+**For each selected schema:**
+1. Run `pck_dwh_table_migration_analyzer.analyze_table` on all tables in schema
+2. This provides per-table:
+   - Exact date ranges (min/max dates)
+   - Data age distribution estimates
+   - Detailed complexity scoring
+   - Migration recommendations
+   - Storage savings estimates
 
-See `database_profiling_and_candidate_ranking_plan.md` Section 2.2 for detailed analysis procedures.
+3. Aggregate results to validate schema-level estimates
+4. Design ILM tablespace set (HOT/WARM/COLD)
+5. Create schema migration plan
+
+See `database_profiling_and_candidate_ranking_plan.md` for detailed analysis procedures.
 
 ---
 
-## 7. Advantages of This Approach
+## 8. Advantages of Schema-Level Approach
 
-### 7.1 Speed
+### 8.1 Speed
 - **15-30 minutes** vs 3-5 hours for full profiling
 - Metadata queries only - no table data scanning
 - Can run during business hours
 
-### 7.2 Safety
+### 8.2 Safety
 - **VERY LOW** production impact
 - No data sampling
 - No full table scans
 - Quick execution (queries timeout in seconds/minutes)
 
-### 7.3 Efficiency
-- Focus detailed analysis on top candidates only
-- Avoid wasting time analyzing tables that won't be migrated
-- 80/20 rule: Find 80% of value with 20% of effort
+### 8.3 Administrative Simplicity
+- Migrate entire schemas (not cherry-picking individual tables)
+- Clear progress tracking: "Schema X complete"
+- All dependencies migrate together
+- Tablespace consolidation per schema
 
-### 7.4 Iterative
+### 8.4 Measurable Results
+- Schema-level space reduction is clearly measurable
+- Easy to demonstrate ROI per schema
+- Business understands "Schema X saved 15 TB"
+- Clear before/after metrics
+
+### 8.5 Iterative
 - Quick feedback loop
 - Can rerun easily if criteria change
 - Easy to adjust scoring weights
+- Learn from each schema migration
 
 ---
 
-## 8. Limitations and Trade-offs
+## 9. Limitations and Trade-offs
 
 ### What You Don't Get (Without Detailed Analysis)
 
-1. **No exact date ranges** - Can't calculate % data over 3 years old
+1. **No exact date ranges** - Can't calculate % data over 3 years old precisely
 2. **No data distribution** - Can't assess data skew or hot/cold data patterns
 3. **No NULL analysis** - Can't assess partition key quality
-4. **No sampling-based estimates** - Compression ratios are estimated, not measured
+4. **No sampling-based estimates** - Compression ratios are estimated (conservative), not measured
 5. **Statistics may be stale** - Relies on last ANALYZE
 
 ### When You Need Detailed Analysis
 
-- **Before final migration planning** - Top 50 candidates should get detailed analysis
+- **Before schema migration** - Top 3-5 schemas need detailed table-level analysis
 - **For accurate savings estimates** - Sampling provides better compression ratio estimates
-- **For complex tables** - Tables with unusual data patterns need investigation
-- **For business-critical tables** - Extra validation before migration
+- **For complex schemas** - Schemas with many dependencies need thorough investigation
+- **For business-critical schemas** - Extra validation before migration
 
 ---
 
-## 9. Comparison: Quick vs Full Profiling
+## 10. Comparison: Schema-Level vs Table-Level Profiling
 
-| Aspect | Quick Profiling | Full Profiling |
-|--------|----------------|----------------|
+| Aspect | Schema-Level (Quick) | Table-Level (Full) |
+|--------|---------------------|---------------------|
 | **Duration** | 15-30 minutes | 3-5 hours |
 | **Production Impact** | VERY LOW | MEDIUM |
+| **Focus** | Top 5-10 schemas | Top 100-200 tables |
+| **Granularity** | Schema aggregates | Individual tables |
+| **Migration Unit** | Entire schema | Cherry-picked tables |
+| **Tablespace Strategy** | Consolidation (old → ILM sets) | Table-by-table moves |
+| **Progress Tracking** | "Schema X complete" | Track 100s of tables |
 | **Tables Analyzed** | All > 1GB | Top 100-200 |
 | **Data Access** | Metadata only | Table sampling |
 | **Accuracy** | Directional | Precise |
-| **Output** | Top 50-100 candidates | Detailed migration plans |
-| **Use Case** | Initial screening | Final candidate selection |
+| **Output** | Top 5-10 schemas ranked | Top 100-200 tables analyzed |
+| **Use Case** | Schema selection | Table-level planning |
 | **Can Run During** | Business hours | Off-peak/weekend |
+| **ROI** | Quick identification of big wins | Detailed execution plans |
 
 ---
 
@@ -782,6 +950,7 @@ See `database_profiling_and_candidate_ranking_plan.md` Section 2.2 for detailed 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2025-10-27 | Claude/DBA Team | Initial quick profiling plan created as lightweight alternative to full profiling |
+| 2.0 | 2025-10-27 | Claude/DBA Team | **SCHEMA-LEVEL FOCUS**: Changed from table-level to schema-level ranking. Added tablespace analysis (Query 2) and schema aggregation (Query 3). Implemented 3-dimensional schema scoring. Added tablespace consolidation strategy. Updated reports to show schema candidates with tablespace breakdown. |
 
 ---
 
@@ -803,19 +972,35 @@ See `database_profiling_and_candidate_ranking_plan.md` Section 2.2 for detailed 
 **Recommended Workflow:**
 
 ```
-Step 1: Quick Profiling (THIS DOCUMENT)
+Step 1: Quick Schema Profiling (THIS DOCUMENT)
    ↓ 15-30 minutes
-   ↓ Identify top 50-100 candidates
+   ↓ Rank all schemas with tablespace analysis
+   ↓ Identify top 5-10 schemas for ILM migration
    ↓
-Step 2: Review & Validate
+Step 2: Review & Schema Selection
    ↓ 1-2 hours
-   ↓ DBA team review, exclude critical tables
+   ↓ DBA team review schema rankings
+   ↓ Review tablespace consolidation opportunities
+   ↓ Select top 1-2 schemas for pilot (Quick Win category)
    ↓
-Step 3: Detailed Analysis (Full Profiling Plan)
-   ↓ 2-4 hours (top candidates only)
-   ↓ Run analyze_table on selected candidates
+Step 3: Detailed Schema Analysis
+   ↓ 2-4 hours per schema
+   ↓ Run analyze_table on all tables in selected schemas
+   ↓ Design ILM tablespace set (HOT/WARM/COLD)
+   ↓ Create schema migration plan
    ↓
-Step 4: Final Ranking & Wave Planning
-   ↓ 1-2 days
-   ↓ Create migration roadmap
+Step 4: Schema Migration Execution
+   ↓ Per schema timeline
+   ↓ Create new ILM tablespaces
+   ↓ Migrate tables to HOT/WARM/COLD tiers
+   ↓ Decommission old tablespaces
+   ↓ Measure space savings
+   ↓
+Step 5: Iterate & Scale
+   ↓ Apply lessons learned
+   ↓ Move to next priority schema
+   ↓ Repeat until all target schemas migrated
 ```
+
+**Key Decision Point:**
+After Step 1, you'll know which schema to start with for maximum impact and easiest implementation.
