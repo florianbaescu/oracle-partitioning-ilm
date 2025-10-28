@@ -420,7 +420,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             t.num_rows,
             t.partitioned,
             t.compression,
-            t.tablespace_name,
+            COALESCE(t.tablespace_name, s.primary_tablespace) AS tablespace_name,
             NVL(idx.index_count, 0) AS num_indexes,
             NVL(fk.fk_count, 0) AS num_fk_constraints,
             CASE WHEN pk.constraint_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS has_pk,
@@ -452,7 +452,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             SELECT /*+ NO_MERGE PARALLEL(dba_segments,4) */
                 owner,
                 segment_name,
-                SUM(bytes) AS total_bytes
+                SUM(bytes) AS total_bytes,
+                MAX(tablespace_name) KEEP (DENSE_RANK LAST ORDER BY bytes) AS primary_tablespace
             FROM dba_segments
             WHERE segment_type IN ('TABLE', 'TABLE PARTITION')
             GROUP BY owner, segment_name
