@@ -487,16 +487,16 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         log_message('Starting tablespace profiling...');
 
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_schema_tablespaces
-        SELECT /*+ PARALLEL(ts_owner,2) PARALLEL(ts,2) PARALLEL(df,2) USE_HASH(ts_owner ts df fs) */
+        SELECT /*+ USE_HASH(ts_owner ts df fs) */
             ts_owner.owner,
             ts.tablespace_name,
-            ROUND(SUM(df.bytes) / 1024 / 1024 / 1024, 2) AS tablespace_size_gb,
-            ROUND((SUM(df.bytes) - NVL(SUM(fs.bytes), 0)) / 1024 / 1024 / 1024, 2) AS tablespace_used_gb,
-            ROUND(NVL(SUM(fs.bytes), 0) / 1024 / 1024 / 1024, 2) AS tablespace_free_gb,
-            ROUND(((SUM(df.bytes) - NVL(SUM(fs.bytes), 0)) / NULLIF(SUM(df.bytes), 0)) * 100, 1) AS pct_used,
+            ROUND(df.total_bytes / 1024 / 1024 / 1024, 2) AS tablespace_size_gb,
+            ROUND((df.total_bytes - NVL(fs.free_bytes, 0)) / 1024 / 1024 / 1024, 2) AS tablespace_used_gb,
+            ROUND(NVL(fs.free_bytes, 0) / 1024 / 1024 / 1024, 2) AS tablespace_free_gb,
+            ROUND(((df.total_bytes - NVL(fs.free_bytes, 0)) / NULLIF(df.total_bytes, 0)) * 100, 1) AS pct_used,
             ts.block_size,
             ts.extent_management,
-            COUNT(DISTINCT df.file_id) AS datafile_count,
+            df.datafile_count,
             SYSDATE AS profile_date
         FROM (
             -- Get unique tablespaces per tracked schema
@@ -506,15 +506,23 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
               AND t.tablespace_name IS NOT NULL
         ) ts_owner
         JOIN dba_tablespaces ts ON ts_owner.tablespace_name = ts.tablespace_name
-        LEFT JOIN dba_data_files df ON ts.tablespace_name = df.tablespace_name
+        -- Aggregate datafiles to avoid multiplying free space
+        LEFT JOIN (
+            SELECT /*+ NO_MERGE PARALLEL(dba_data_files,2) */
+                tablespace_name,
+                SUM(bytes) AS total_bytes,
+                COUNT(*) AS datafile_count
+            FROM dba_data_files
+            GROUP BY tablespace_name
+        ) df ON ts.tablespace_name = df.tablespace_name
+        -- Aggregate free space
         LEFT JOIN (
             SELECT /*+ NO_MERGE PARALLEL(dba_free_space,2) */
-                tablespace_name, SUM(bytes) AS bytes
+                tablespace_name,
+                SUM(bytes) AS free_bytes
             FROM dba_free_space
             GROUP BY tablespace_name
-        ) fs ON ts.tablespace_name = fs.tablespace_name
-        GROUP BY ts_owner.owner, ts.tablespace_name, ts.block_size, ts.extent_management
-        ORDER BY ts_owner.owner, tablespace_size_gb DESC;
+        ) fs ON ts.tablespace_name = fs.tablespace_name;
 
         v_count := SQL%ROWCOUNT;
         COMMIT;
