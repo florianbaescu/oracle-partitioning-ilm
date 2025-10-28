@@ -266,6 +266,25 @@ ORDER BY schema_priority_score DESC;
 
 COMMENT ON TABLE cmr.v_dwh_ilm_schema_ranking IS 'Ranked list of schemas for ILM migration (ordered by priority score)';
 
+-- Column comments for v_dwh_ilm_schema_ranking
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.owner IS 'Schema/owner name';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.total_size_gb IS 'Total schema size in GB (all tables >= 1GB)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.estimated_compression_savings_gb IS 'Estimated storage savings in GB from compression and partitioning';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.estimated_savings_pct IS 'Estimated storage savings percentage (typically 50-60%)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.table_count IS 'Number of tables in schema (>= 1GB)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.tablespace_count IS 'Number of unique tablespaces used by schema';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.pct_partitioned IS 'Percentage of tables already partitioned';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.pct_partition_ready IS 'Percentage of tables with date/timestamp columns (ready for partitioning)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.basicfile_lob_table_count IS 'Number of tables with BASICFILE LOBs (migration candidates)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.total_basicfile_lob_columns IS 'Total count of BASICFILE LOB columns across all tables';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.storage_impact_score IS 'Storage impact score (0-100): weighted by size and compression savings';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.migration_readiness_score IS 'Migration readiness score (0-100): tablespace simplicity + complexity + partition readiness';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.business_value_score IS 'Business value score (0-100): savings urgency + BASICFILE migration need';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.schema_priority_score IS 'Overall priority score (0-100): weighted average of all scores. Higher = better candidate';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.schema_category IS 'Priority category: QUICK_WIN_SCHEMA (80-100), HIGH_PRIORITY (60-79), MEDIUM_PRIORITY (40-59), LOW_PRIORITY (0-39)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.schema_type IS 'Schema classification: TYPE_A (large simple), TYPE_B (BASICFILE heavy), TYPE_C (medium mature), TYPE_D (complex large), TYPE_E (small/low-value)';
+COMMENT ON COLUMN cmr.v_dwh_ilm_schema_ranking.profile_date IS 'Date when schema profiling was executed';
+
 PROMPT View created: cmr.v_dwh_ilm_schema_ranking
 
 -- SECTION 3: Create Package Specification
