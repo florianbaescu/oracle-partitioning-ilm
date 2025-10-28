@@ -15,11 +15,22 @@
 --   -- Run setup once:
 --   @schema_profiling_setup.sql
 --
---   -- Execute profiling:
+--   -- Execute profiling (all tracked schemas):
 --   BEGIN
 --       cmr.pck_dwh_schema_profiler.run_profiling(
 --           p_min_table_size_gb => 1,
 --           p_calculate_scores => TRUE
+--       );
+--   END;
+--   /
+--
+--   -- Execute profiling (with additional schemas):
+--   BEGIN
+--       cmr.pck_dwh_schema_profiler.run_profiling(
+--           p_min_table_size_gb => 1,
+--           p_calculate_scores => TRUE,
+--           p_truncate_before => TRUE,
+--           p_additional_schemas => 'HR,SALES,FINANCE'
 --       );
 --   END;
 --   /
@@ -278,10 +289,21 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
     --   run_profiling - Execute complete profiling workflow
     --
     -- Usage Example:
+    --   -- Profile all tracked schemas:
     --   BEGIN
     --       cmr.pck_dwh_schema_profiler.run_profiling(
     --           p_min_table_size_gb => 1,
     --           p_calculate_scores => TRUE
+    --       );
+    --   END;
+    --   /
+    --
+    --   -- Profile with additional schemas:
+    --   BEGIN
+    --       cmr.pck_dwh_schema_profiler.run_profiling(
+    --           p_min_table_size_gb => 1,
+    --           p_calculate_scores => TRUE,
+    --           p_additional_schemas => 'HR,SALES,FINANCE'
     --       );
     --   END;
     --   /
@@ -295,19 +317,23 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
      * @param p_min_table_size_gb Minimum table size in GB to include (default: 1)
      * @param p_calculate_scores Calculate scores after profiling (default: TRUE)
      * @param p_truncate_before Truncate tables before profiling (default: TRUE)
+     * @param p_additional_schemas Comma-separated list of additional schemas to include (e.g., 'SCHEMA1,SCHEMA2')
      */
     PROCEDURE run_profiling(
         p_min_table_size_gb IN NUMBER DEFAULT 1,
         p_calculate_scores IN BOOLEAN DEFAULT TRUE,
-        p_truncate_before IN BOOLEAN DEFAULT TRUE
+        p_truncate_before IN BOOLEAN DEFAULT TRUE,
+        p_additional_schemas IN VARCHAR2 DEFAULT NULL
     );
 
     /**
      * Step 1: Profile table-level metrics
      * Gathers metadata for all tables > p_min_table_size_gb
+     * @param p_additional_schemas Comma-separated list of additional schemas to include
      */
     PROCEDURE profile_tables(
-        p_min_table_size_gb IN NUMBER DEFAULT 1
+        p_min_table_size_gb IN NUMBER DEFAULT 1,
+        p_additional_schemas IN VARCHAR2 DEFAULT NULL
     );
 
     /**
@@ -374,11 +400,17 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         COMMIT;
     END truncate_profiling_tables;
 
-    PROCEDURE profile_tables(p_min_table_size_gb IN NUMBER DEFAULT 1) IS
+    PROCEDURE profile_tables(
+        p_min_table_size_gb IN NUMBER DEFAULT 1,
+        p_additional_schemas IN VARCHAR2 DEFAULT NULL
+    ) IS
         v_count NUMBER := 0;
         v_start_time TIMESTAMP := SYSTIMESTAMP;
     BEGIN
         log_message('Starting table profiling (min size: ' || p_min_table_size_gb || ' GB)...');
+        IF p_additional_schemas IS NOT NULL THEN
+            log_message('Additional schemas: ' || p_additional_schemas);
+        END IF;
 
         INSERT /*+ ENABLE_PARALLEL_DML APPEND */ INTO cmr.dwh_tables_quick_profile
         SELECT /*+ PARALLEL(t,4) USE_HASH(t tracked_schemas s idx fk pk dc lob) */
@@ -404,7 +436,16 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             SYSDATE AS profile_date
         FROM dba_tables t
         JOIN (
-            SELECT /*+ NO_MERGE */ DISTINCT owner FROM LOGS.DWH_PROCESS WHERE owner IS NOT NULL
+            -- Schemas from LOGS.DWH_PROCESS
+            SELECT /*+ NO_MERGE */ DISTINCT owner
+            FROM LOGS.DWH_PROCESS
+            WHERE owner IS NOT NULL
+            UNION
+            -- Additional manually specified schemas (comma-separated)
+            SELECT /*+ NO_MERGE */ TRIM(REGEXP_SUBSTR(p_additional_schemas, '[^,]+', 1, LEVEL)) AS owner
+            FROM DUAL
+            WHERE p_additional_schemas IS NOT NULL
+            CONNECT BY LEVEL <= REGEXP_COUNT(p_additional_schemas, ',') + 1
         ) tracked_schemas ON t.owner = tracked_schemas.owner
         -- Aggregate segments to avoid duplicates from partitioned tables
         LEFT JOIN (
@@ -688,7 +729,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
     PROCEDURE run_profiling(
         p_min_table_size_gb IN NUMBER DEFAULT 1,
         p_calculate_scores IN BOOLEAN DEFAULT TRUE,
-        p_truncate_before IN BOOLEAN DEFAULT TRUE
+        p_truncate_before IN BOOLEAN DEFAULT TRUE,
+        p_additional_schemas IN VARCHAR2 DEFAULT NULL
     ) IS
         v_start_time TIMESTAMP := SYSTIMESTAMP;
         v_duration NUMBER;
@@ -700,6 +742,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         log_message('  Min table size: ' || p_min_table_size_gb || ' GB');
         log_message('  Calculate scores: ' || CASE WHEN p_calculate_scores THEN 'YES' ELSE 'NO' END);
         log_message('  Truncate before: ' || CASE WHEN p_truncate_before THEN 'YES' ELSE 'NO' END);
+        log_message('  Additional schemas: ' || NVL(p_additional_schemas, '(none)'));
         log_message('------------------------------------------------------');
 
         -- Step 0: Truncate if requested
@@ -708,7 +751,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         END IF;
 
         -- Step 1: Profile tables
-        profile_tables(p_min_table_size_gb);
+        profile_tables(p_min_table_size_gb, p_additional_schemas);
 
         -- Step 2: Profile tablespaces
         profile_tablespaces;
@@ -770,11 +813,22 @@ PROMPT =====================================================================
 PROMPT Quick Start
 PROMPT =====================================================================
 PROMPT
-PROMPT -- Run profiling:
+PROMPT -- Run profiling (all tracked schemas):
 PROMPT BEGIN
 PROMPT     cmr.pck_dwh_schema_profiler.run_profiling(
 PROMPT         p_min_table_size_gb => 1,
 PROMPT         p_calculate_scores => TRUE
+PROMPT     );
+PROMPT END;
+PROMPT /
+PROMPT
+PROMPT -- Run profiling (with additional schemas):
+PROMPT BEGIN
+PROMPT     cmr.pck_dwh_schema_profiler.run_profiling(
+PROMPT         p_min_table_size_gb => 1,
+PROMPT         p_calculate_scores => TRUE,
+PROMPT         p_truncate_before => TRUE,
+PROMPT         p_additional_schemas => 'HR,SALES,FINANCE'
 PROMPT     );
 PROMPT END;
 PROMPT /
