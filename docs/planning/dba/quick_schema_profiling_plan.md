@@ -383,7 +383,7 @@ Estimated Post-ILM: 11.5 TB (59% reduction)
 | `aggregate_to_schema_level` | Schema aggregation | None |
 | `calculate_scores` | Scoring and ranking | None |
 | `truncate_profiling_tables` | Clear all data | None |
-| `generate_migration_tasks` | Generate migration tasks for schema | p_owner, p_project_name, p_min_table_size_gb, p_max_tables, p_use_compression, p_compression_type, p_apply_ilm_policies, p_auto_analyze |
+| `generate_migration_tasks` | Generate migration tasks for schema | p_owner, p_project_name, p_min_table_size_gb, p_max_tables, p_use_compression, p_compression_type, p_lob_compression, p_lob_deduplicate, p_apply_ilm_policies, p_auto_analyze |
 
 ### 5.3 Expected Duration (120TB Database)
 
@@ -563,10 +563,17 @@ Once top schemas are identified, use the automated task generation function:
 - `p_project_name`: Custom project name (default: 'ILM Migration - {OWNER}')
 - `p_min_table_size_gb`: Minimum table size in GB (default: 1)
 - `p_max_tables`: Maximum number of tables per schema (default: NULL = all tables)
-- `p_use_compression`: Enable compression (default: Y)
-- `p_compression_type`: Compression type (default: OLTP)
+- `p_use_compression`: Enable table compression (default: Y)
+- `p_compression_type`: Table compression type (default: OLTP)
+- `p_lob_compression`: LOB compression level - LOW/MEDIUM/HIGH (default: MEDIUM)
+- `p_lob_deduplicate`: LOB deduplication - Y/N (default: N)
 - `p_apply_ilm_policies`: Apply ILM policies (default: Y)
 - `p_auto_analyze`: Run analysis after creation (default: TRUE)
+
+**LOB Compression Strategy:**
+- **HOT tier** (recent data): MEDIUM compression, no deduplication → better write performance
+- **WARM/COLD tiers**: HIGH compression, deduplication → maximum space savings
+- **Default** (MEDIUM/N): Suitable for general use and HOT tier
 
 **Returns:**
 - Single schema: project_id
@@ -623,7 +630,26 @@ END;
 /
 ```
 
-**Example 4: Manual analysis (review tasks before analyzing)**
+**Example 4: WARM/COLD tier with HIGH compression and deduplication**
+```sql
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    -- For WARM/COLD tier tables (maximum space savings)
+    v_project_id := cmr.pck_dwh_schema_profiler.generate_migration_tasks(
+        p_owner => 'ARCHIVE_DWH',
+        p_compression_type => 'QUERY HIGH',
+        p_lob_compression => 'HIGH',
+        p_lob_deduplicate => 'Y',
+        p_auto_analyze => TRUE
+    );
+
+    DBMS_OUTPUT.PUT_LINE('WARM/COLD tier project ID: ' || v_project_id);
+END;
+/
+```
+
+**Example 5: Manual analysis (review tasks before analyzing)**
 ```sql
 DECLARE
     v_project_id NUMBER;
@@ -636,7 +662,7 @@ BEGIN
     );
 
     -- Review generated tasks
-    SELECT task_name, source_table
+    SELECT task_name, source_table, lob_compression, lob_deduplicate
     FROM cmr.dwh_migration_tasks
     WHERE project_id = v_project_id;
 

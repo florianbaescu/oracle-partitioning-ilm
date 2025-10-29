@@ -383,11 +383,18 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
      * @param p_project_name Project name (default: 'ILM Migration - {OWNER}')
      * @param p_min_table_size_gb Minimum table size in GB to include (default: 1)
      * @param p_max_tables Maximum number of tables per schema (default: NULL = all tables)
-     * @param p_use_compression Enable compression (default: Y)
-     * @param p_compression_type Compression type (default: OLTP)
+     * @param p_use_compression Enable table compression (default: Y)
+     * @param p_compression_type Table compression type (default: OLTP)
+     * @param p_lob_compression LOB compression level (default: MEDIUM) - LOW/MEDIUM/HIGH
+     * @param p_lob_deduplicate LOB deduplication (default: N) - Y/N
      * @param p_apply_ilm_policies Apply ILM policies (default: Y)
      * @param p_auto_analyze Run analysis after task creation (default: TRUE)
      * @return project_id The created project ID (NULL when processing multiple schemas)
+     *
+     * LOB Compression Strategy:
+     * - HOT tier (recent data): MEDIUM compression, no deduplication (better write performance)
+     * - WARM/COLD tiers: HIGH compression, deduplication (maximum space savings)
+     * - Default MEDIUM/N is suitable for general use and HOT tier
      */
     FUNCTION generate_migration_tasks(
         p_owner IN VARCHAR2 DEFAULT NULL,
@@ -396,6 +403,8 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
         p_max_tables IN NUMBER DEFAULT NULL,
         p_use_compression IN VARCHAR2 DEFAULT 'Y',
         p_compression_type IN VARCHAR2 DEFAULT 'OLTP',
+        p_lob_compression IN VARCHAR2 DEFAULT 'MEDIUM',
+        p_lob_deduplicate IN VARCHAR2 DEFAULT 'N',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
         p_auto_analyze IN BOOLEAN DEFAULT TRUE
     ) RETURN NUMBER;
@@ -838,6 +847,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         p_max_tables IN NUMBER DEFAULT NULL,
         p_use_compression IN VARCHAR2 DEFAULT 'Y',
         p_compression_type IN VARCHAR2 DEFAULT 'OLTP',
+        p_lob_compression IN VARCHAR2 DEFAULT 'MEDIUM',
+        p_lob_deduplicate IN VARCHAR2 DEFAULT 'N',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
         p_auto_analyze IN BOOLEAN DEFAULT TRUE
     ) RETURN NUMBER IS
@@ -901,11 +912,13 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
                 INSERT INTO cmr.dwh_migration_tasks (
                     project_id, task_name, source_owner, source_table,
                     migration_method, use_compression, compression_type,
+                    lob_compression, lob_deduplicate,
                     apply_ilm_policies, status, created_date
                 )
                 SELECT
                     v_proj_id, 'Migrate ' || table_name, owner, table_name,
                     'CTAS', p_use_compression, p_compression_type,
+                    p_lob_compression, p_lob_deduplicate,
                     p_apply_ilm_policies, 'PENDING', SYSDATE
                 FROM cmr.dwh_tables_quick_profile
                 WHERE owner = UPPER(p_schema_owner)
@@ -917,11 +930,13 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
                 INSERT INTO cmr.dwh_migration_tasks (
                     project_id, task_name, source_owner, source_table,
                     migration_method, use_compression, compression_type,
+                    lob_compression, lob_deduplicate,
                     apply_ilm_policies, status, created_date
                 )
                 SELECT
                     v_proj_id, 'Migrate ' || table_name, owner, table_name,
                     'CTAS', p_use_compression, p_compression_type,
+                    p_lob_compression, p_lob_deduplicate,
                     p_apply_ilm_policies, 'PENDING', SYSDATE
                 FROM cmr.dwh_tables_quick_profile
                 WHERE owner = UPPER(p_schema_owner)
