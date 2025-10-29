@@ -627,11 +627,11 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         SELECT /*+ PARALLEL(p,2) */
             p.owner,
 
-            -- Size metrics
-            ROUND(SUM(p.size_gb), 2) AS total_size_gb,
+            -- Size metrics (includes both table and LOB sizes)
+            ROUND(SUM(p.size_gb + NVL(p.lob_total_size_gb, 0)), 2) AS total_size_gb,
             COUNT(*) AS table_count,
-            SUM(CASE WHEN p.size_gb > 50 THEN 1 ELSE 0 END) AS large_table_count,
-            ROUND(AVG(p.size_gb), 2) AS avg_table_size_gb,
+            SUM(CASE WHEN (p.size_gb + NVL(p.lob_total_size_gb, 0)) > 50 THEN 1 ELSE 0 END) AS large_table_count,
+            ROUND(AVG(p.size_gb + NVL(p.lob_total_size_gb, 0)), 2) AS avg_table_size_gb,
 
             -- Tablespace metrics
             (SELECT /*+ INDEX(dwh_schema_tablespaces dwh_schema_tablespaces_i2) */
@@ -682,7 +682,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
                     WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
                     ELSE p.size_gb * 0.20
                 END
-            ) / NULLIF(SUM(p.size_gb), 0)) * 100, 1) AS estimated_savings_pct,
+            ) / NULLIF(SUM(p.size_gb + NVL(p.lob_total_size_gb, 0)), 0)) * 100, 1) AS estimated_savings_pct,
 
             -- Scoring columns (NULL initially, populated by calculate_scores)
             NULL, NULL, NULL, NULL, NULL, NULL,
@@ -691,7 +691,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             SYSDATE
         FROM cmr.dwh_tables_quick_profile p
         GROUP BY p.owner
-        ORDER BY SUM(p.size_gb) DESC;
+        ORDER BY SUM(p.size_gb + NVL(p.lob_total_size_gb, 0)) DESC;
 
         v_count := SQL%ROWCOUNT;
         COMMIT;
