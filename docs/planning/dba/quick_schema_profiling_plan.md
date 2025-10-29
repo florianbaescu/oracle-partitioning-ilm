@@ -375,14 +375,15 @@ Estimated Post-ILM: 11.5 TB (59% reduction)
 
 ### 5.2 Package Procedures
 
-| Procedure | Purpose | Parameters |
-|-----------|---------|------------|
-| `run_profiling` | Complete workflow | p_min_table_size_gb, p_calculate_scores, p_truncate_before, p_additional_schemas |
+| Procedure/Function | Purpose | Parameters |
+|-------------------|---------|------------|
+| `run_profiling` | Complete profiling workflow | p_min_table_size_gb, p_calculate_scores, p_truncate_before, p_additional_schemas |
 | `profile_tables` | Table-level profiling | p_min_table_size_gb, p_additional_schemas |
 | `profile_tablespaces` | Tablespace profiling | None |
 | `aggregate_to_schema_level` | Schema aggregation | None |
 | `calculate_scores` | Scoring and ranking | None |
 | `truncate_profiling_tables` | Clear all data | None |
+| `generate_migration_tasks` | Generate migration tasks for schema | p_owner, p_project_name, p_min_table_size_gb, p_max_tables, p_use_compression, p_compression_type, p_apply_ilm_policies, p_auto_analyze |
 
 ### 5.3 Expected Duration (120TB Database)
 
@@ -549,14 +550,103 @@ ORDER BY AVG(schema_priority_score) DESC;
    - Verify tablespace consolidation is feasible
    - Proceed to detailed analysis for selected schemas
 
-### 7.2 Create Detailed Analysis Tasks for Top Schemas
+### 7.2 Generate Migration Tasks for Top Schemas
 
-Once top schemas are identified:
-1. Create migration project in `cmr.dwh_migration_projects`
-2. Create tasks for all tables in top schemas in `cmr.dwh_migration_tasks`
-3. Run detailed table-level analysis using `pck_dwh_table_migration_analyzer.analyze_table`
-4. Design ILM tablespace set (HOT/WARM/COLD) per schema
-5. Create schema migration execution plan
+Once top schemas are identified, use the automated task generation function:
+
+**Function:** `pck_dwh_schema_profiler.generate_migration_tasks()`
+
+**Purpose:** Automatically creates a migration project and tasks for all tables in a schema from profiling results.
+
+**Parameters:**
+- `p_owner` (required): Schema/owner name
+- `p_project_name`: Custom project name (default: 'ILM Migration - {OWNER}')
+- `p_min_table_size_gb`: Minimum table size in GB (default: 1)
+- `p_max_tables`: Maximum number of tables (default: NULL = all tables)
+- `p_use_compression`: Enable compression (default: Y)
+- `p_compression_type`: Compression type (default: OLTP)
+- `p_apply_ilm_policies`: Apply ILM policies (default: Y)
+- `p_auto_analyze`: Run analysis after creation (default: TRUE)
+
+**Returns:** project_id
+
+**Example 1: Generate tasks for all tables in top-ranked schema**
+```sql
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    v_project_id := cmr.pck_dwh_schema_profiler.generate_migration_tasks(
+        p_owner => 'DWH_PROD',
+        p_min_table_size_gb => 1,
+        p_auto_analyze => TRUE
+    );
+
+    DBMS_OUTPUT.PUT_LINE('Project ID: ' || v_project_id);
+END;
+/
+```
+
+**Example 2: Pilot migration - top 50 largest tables only**
+```sql
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    v_project_id := cmr.pck_dwh_schema_profiler.generate_migration_tasks(
+        p_owner => 'DWH_PROD',
+        p_project_name => 'ILM Pilot - Top 50 Tables',
+        p_min_table_size_gb => 5,
+        p_max_tables => 50,
+        p_compression_type => 'QUERY HIGH',
+        p_auto_analyze => TRUE
+    );
+END;
+/
+```
+
+**Example 3: Manual analysis (review tasks before analyzing)**
+```sql
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    -- Generate tasks without auto-analysis
+    v_project_id := cmr.pck_dwh_schema_profiler.generate_migration_tasks(
+        p_owner => 'SALES_DWH',
+        p_max_tables => 20,
+        p_auto_analyze => FALSE
+    );
+
+    -- Review generated tasks
+    SELECT task_name, source_table
+    FROM cmr.dwh_migration_tasks
+    WHERE project_id = v_project_id;
+
+    -- Run analysis manually after review
+    cmr.pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+END;
+/
+```
+
+**What This Function Does:**
+1. Validates schema exists in profiling results
+2. Creates migration project in `cmr.dwh_migration_projects`
+3. Creates tasks for all (or top X) tables from `cmr.dwh_tables_quick_profile`
+4. Orders tasks by size (largest tables first)
+5. Sets defaults: CTAS method, compression, ILM policies
+6. Optionally runs detailed analysis on all tasks
+7. Returns project_id for tracking
+
+**Next Steps After Task Generation:**
+1. Review analysis results:
+   ```sql
+   SELECT t.task_name, t.validation_status,
+          a.recommended_partition_type, a.recommended_partition_key
+   FROM cmr.dwh_migration_tasks t
+   JOIN cmr.dwh_migration_analysis a ON t.task_id = a.task_id
+   WHERE t.project_id = {project_id};
+   ```
+2. Design ILM tablespace set (HOT/WARM/COLD) per schema
+3. Create schema migration execution plan
+4. Begin migrations using `pck_dwh_table_migration_executor`
 
 ### 7.3 Proceed to Detailed Analysis (Per Schema)
 
@@ -669,20 +759,27 @@ Step 2: Review & Schema Selection
    ↓ Review tablespace consolidation opportunities
    ↓ Select top 1-2 schemas for pilot (Quick Win category)
    ↓
-Step 3: Detailed Schema Analysis
-   ↓ 2-4 hours per schema
-   ↓ Run analyze_table on all tables in selected schemas
-   ↓ Design ILM tablespace set (HOT/WARM/COLD)
-   ↓ Create schema migration plan
+Step 3: Generate Migration Tasks & Analyze
+   ↓ 10-30 minutes per schema
+   ↓ Use pck_dwh_schema_profiler.generate_migration_tasks(p_owner => 'SCHEMA_NAME')
+   ↓ Function creates project and tasks for all tables in schema
+   ↓ Auto-analyzes all tasks (or manual if p_auto_analyze => FALSE)
+   ↓ Review recommendations (partition types, keys, compression)
    ↓
-Step 4: Schema Migration Execution
+Step 4: Design ILM Architecture
+   ↓ 2-4 hours per schema
+   ↓ Design ILM tablespace set (HOT/WARM/COLD)
+   ↓ Create schema migration execution plan
+   ↓ Review analysis results and adjust strategies
+   ↓
+Step 5: Schema Migration Execution
    ↓ Per schema timeline
    ↓ Create new ILM tablespaces
    ↓ Migrate tables to HOT/WARM/COLD tiers
    ↓ Decommission old tablespaces
    ↓ Measure space savings
    ↓
-Step 5: Iterate & Scale
+Step 6: Iterate & Scale
    ↓ Apply lessons learned
    ↓ Move to next priority schema
    ↓ Repeat until all target schemas migrated
