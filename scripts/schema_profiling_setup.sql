@@ -682,21 +682,35 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             ROUND(AVG(p.num_fk_constraints), 1) AS avg_fk_per_table,
             SUM(CASE WHEN p.num_indexes > 5 OR p.num_fk_constraints > 3 THEN 1 ELSE 0 END) AS tables_with_many_dependencies,
 
-            -- Estimated savings (conservative: 40% compression on non-partitioned tables with LOBs)
+            -- Estimated savings (table compression + LOB compression calculated separately)
             ROUND(SUM(
+                -- Table compression savings
                 CASE
-                    WHEN p.partitioned = 'NO' AND p.has_lobs = 'YES' THEN p.size_gb * 0.40
-                    WHEN p.partitioned = 'NO' THEN p.size_gb * 0.30
-                    WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
-                    ELSE p.size_gb * 0.20
+                    WHEN p.partitioned = 'NO' THEN p.size_gb * 0.30  -- 30% on non-partitioned tables
+                    ELSE p.size_gb * 0.20  -- 20% on already partitioned tables
+                END
+                +
+                -- LOB compression savings (separate calculation)
+                CASE
+                    WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.60  -- 60% BASICFILE to SECUREFILE HIGH
+                    WHEN p.lob_type = 'MIXED' THEN p.lob_total_size_gb * 0.30      -- 30% mixed (conservative)
+                    WHEN p.lob_type = 'SECUREFILE' THEN p.lob_total_size_gb * 0.10 -- 10% if already SECUREFILE
+                    ELSE 0  -- No LOB savings
                 END
             ), 2) AS estimated_compression_savings_gb,
             ROUND((SUM(
+                -- Table compression savings
                 CASE
-                    WHEN p.partitioned = 'NO' AND p.has_lobs = 'YES' THEN p.size_gb * 0.40
                     WHEN p.partitioned = 'NO' THEN p.size_gb * 0.30
-                    WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.50
                     ELSE p.size_gb * 0.20
+                END
+                +
+                -- LOB compression savings
+                CASE
+                    WHEN p.lob_type = 'BASICFILE' THEN p.lob_total_size_gb * 0.60
+                    WHEN p.lob_type = 'MIXED' THEN p.lob_total_size_gb * 0.30
+                    WHEN p.lob_type = 'SECUREFILE' THEN p.lob_total_size_gb * 0.10
+                    ELSE 0
                 END
             ) / NULLIF(SUM(p.size_gb + NVL(p.lob_total_size_gb, 0)), 0)) * 100, 1) AS estimated_savings_pct,
 
