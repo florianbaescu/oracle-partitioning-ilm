@@ -384,7 +384,7 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
      * @param p_min_table_size_gb Minimum table size in GB to include (default: 1)
      * @param p_max_tables Maximum number of tables to include (default: NULL = all tables)
      * @param p_use_compression Enable compression (default: Y)
-     * @param p_compression_type Compression type (default: QUERY HIGH)
+     * @param p_compression_type Compression type (default: OLTP)
      * @param p_apply_ilm_policies Apply ILM policies (default: Y)
      * @param p_auto_analyze Run analysis after task creation (default: TRUE)
      * @return project_id The created project ID
@@ -395,7 +395,7 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
         p_min_table_size_gb IN NUMBER DEFAULT 1,
         p_max_tables IN NUMBER DEFAULT NULL,
         p_use_compression IN VARCHAR2 DEFAULT 'Y',
-        p_compression_type IN VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_compression_type IN VARCHAR2 DEFAULT 'OLTP',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
         p_auto_analyze IN BOOLEAN DEFAULT TRUE
     ) RETURN NUMBER;
@@ -837,7 +837,7 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         p_min_table_size_gb IN NUMBER DEFAULT 1,
         p_max_tables IN NUMBER DEFAULT NULL,
         p_use_compression IN VARCHAR2 DEFAULT 'Y',
-        p_compression_type IN VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_compression_type IN VARCHAR2 DEFAULT 'OLTP',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
         p_auto_analyze IN BOOLEAN DEFAULT TRUE
     ) RETURN NUMBER IS
