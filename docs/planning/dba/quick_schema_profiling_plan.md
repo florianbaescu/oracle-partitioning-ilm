@@ -559,18 +559,38 @@ Once top schemas are identified, use the automated task generation function:
 **Purpose:** Automatically creates a migration project and tasks for all tables in a schema from profiling results.
 
 **Parameters:**
-- `p_owner` (required): Schema/owner name
+- `p_owner`: Schema/owner name (default: NULL = **all profiled schemas**)
 - `p_project_name`: Custom project name (default: 'ILM Migration - {OWNER}')
 - `p_min_table_size_gb`: Minimum table size in GB (default: 1)
-- `p_max_tables`: Maximum number of tables (default: NULL = all tables)
+- `p_max_tables`: Maximum number of tables per schema (default: NULL = all tables)
 - `p_use_compression`: Enable compression (default: Y)
 - `p_compression_type`: Compression type (default: OLTP)
 - `p_apply_ilm_policies`: Apply ILM policies (default: Y)
 - `p_auto_analyze`: Run analysis after creation (default: TRUE)
 
-**Returns:** project_id
+**Returns:**
+- Single schema: project_id
+- All schemas (p_owner = NULL): NULL
 
-**Example 1: Generate tasks for all tables in top-ranked schema**
+**Example 1: Generate tasks for ALL profiled schemas (complete automation)**
+```sql
+DECLARE
+    v_result NUMBER;
+BEGIN
+    -- Process all schemas ranked in dwh_schema_profile
+    -- Creates one project per schema, processes by priority (highest first)
+    v_result := cmr.pck_dwh_schema_profiler.generate_migration_tasks();
+
+    -- Review all created projects
+    SELECT project_id, project_name, status
+    FROM cmr.dwh_migration_projects
+    WHERE created_date >= SYSDATE - 1/24  -- Last hour
+    ORDER BY project_id;
+END;
+/
+```
+
+**Example 2: Generate tasks for specific schema**
 ```sql
 DECLARE
     v_project_id NUMBER;
@@ -586,7 +606,7 @@ END;
 /
 ```
 
-**Example 2: Pilot migration - top 50 largest tables only**
+**Example 3: Pilot migration - top 50 largest tables only**
 ```sql
 DECLARE
     v_project_id NUMBER;
@@ -603,7 +623,7 @@ END;
 /
 ```
 
-**Example 3: Manual analysis (review tasks before analyzing)**
+**Example 4: Manual analysis (review tasks before analyzing)**
 ```sql
 DECLARE
     v_project_id NUMBER;
@@ -627,13 +647,22 @@ END;
 ```
 
 **What This Function Does:**
-1. Validates schema exists in profiling results
-2. Creates migration project in `cmr.dwh_migration_projects`
-3. Creates tasks for all (or top X) tables from `cmr.dwh_tables_quick_profile`
-4. Orders tasks by size (largest tables first)
-5. Sets defaults: CTAS method, compression, ILM policies
-6. Optionally runs detailed analysis on all tasks
-7. Returns project_id for tracking
+1. **Single Schema Mode** (p_owner specified):
+   - Validates schema exists in profiling results
+   - Creates one migration project in `cmr.dwh_migration_projects`
+   - Creates tasks for all (or top X) tables from `cmr.dwh_tables_quick_profile`
+   - Orders tasks by size (largest tables first)
+   - Sets defaults: CTAS method, compression, ILM policies
+   - Optionally runs detailed analysis on all tasks
+   - Returns project_id for tracking
+
+2. **All Schemas Mode** (p_owner = NULL):
+   - Loops through all schemas in `cmr.dwh_schema_profile`
+   - Processes schemas by priority (highest priority score first)
+   - Creates one project per schema
+   - Each schema processed independently with error handling
+   - Skips schemas with no matching tables
+   - Returns NULL (all project_ids logged)
 
 **Next Steps After Task Generation:**
 1. Review analysis results:
