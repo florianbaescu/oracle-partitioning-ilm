@@ -383,7 +383,7 @@ Estimated Post-ILM: 11.5 TB (59% reduction)
 | `aggregate_to_schema_level` | Schema aggregation | None |
 | `calculate_scores` | Scoring and ranking | None |
 | `truncate_profiling_tables` | Clear all data | None |
-| `generate_migration_tasks` | Generate migration tasks for schema | p_owner, p_project_name, p_min_table_size_gb, p_max_tables, p_use_compression, p_compression_type, p_lob_compression, p_lob_deduplicate, p_apply_ilm_policies, p_auto_analyze |
+| `generate_migration_tasks` | Generate migration tasks for schema | p_owner, p_project_name, p_min_table_size_gb, p_max_tables, p_use_compression, p_compression_type, p_lob_compression, p_lob_deduplicate, p_apply_ilm_policies, p_auto_analyze, p_resume |
 
 ### 5.3 Expected Duration (120TB Database)
 
@@ -569,11 +569,17 @@ Once top schemas are identified, use the automated task generation function:
 - `p_lob_deduplicate`: LOB deduplication - Y/N (default: N)
 - `p_apply_ilm_policies`: Apply ILM policies (default: Y)
 - `p_auto_analyze`: Run analysis after creation (default: TRUE)
+- `p_resume`: Skip tables that already have tasks (default: FALSE)
 
 **LOB Compression Strategy:**
 - **HOT tier** (recent data): MEDIUM compression, no deduplication → better write performance
 - **WARM/COLD tiers**: HIGH compression, deduplication → maximum space savings
 - **Default** (MEDIUM/N): Suitable for general use and HOT tier
+
+**Resume Capability:**
+- **p_resume = FALSE** (default): Create new project, generate tasks for all tables
+- **p_resume = TRUE**: Reuse existing project, skip tables that already have tasks
+- Use cases: Adding more tables, recovering from interruptions, incremental updates
 
 **Returns:**
 - Single schema: project_id
@@ -649,7 +655,33 @@ END;
 /
 ```
 
-**Example 5: Manual analysis (review tasks before analyzing)**
+**Example 5: Resume - add more tables to existing project**
+```sql
+DECLARE
+    v_project_id NUMBER;
+BEGIN
+    -- Initial run: Created project with top 50 tables
+    -- Now we want to add 50 more tables without duplicates
+
+    v_project_id := cmr.pck_dwh_schema_profiler.generate_migration_tasks(
+        p_owner => 'DWH_PROD',
+        p_project_name => 'ILM Migration - DWH_PROD',  -- Must match existing project name
+        p_max_tables => 100,  -- Increase limit to get next 50 tables
+        p_resume => TRUE,     -- Skip tables that already have tasks
+        p_auto_analyze => TRUE
+    );
+
+    -- Check results
+    SELECT COUNT(*) AS total_tasks
+    FROM cmr.dwh_migration_tasks
+    WHERE project_id = v_project_id;
+
+    DBMS_OUTPUT.PUT_LINE('Total tasks in project: (should be ~100)');
+END;
+/
+```
+
+**Example 6: Manual analysis (review tasks before analyzing)**
 ```sql
 DECLARE
     v_project_id NUMBER;

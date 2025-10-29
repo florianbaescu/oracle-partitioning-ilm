@@ -389,12 +389,18 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
      * @param p_lob_deduplicate LOB deduplication (default: N) - Y/N
      * @param p_apply_ilm_policies Apply ILM policies (default: Y)
      * @param p_auto_analyze Run analysis after task creation (default: TRUE)
+     * @param p_resume Skip tables that already have tasks (default: FALSE)
      * @return project_id The created project ID (NULL when processing multiple schemas)
      *
      * LOB Compression Strategy:
      * - HOT tier (recent data): MEDIUM compression, no deduplication (better write performance)
      * - WARM/COLD tiers: HIGH compression, deduplication (maximum space savings)
      * - Default MEDIUM/N is suitable for general use and HOT tier
+     *
+     * Resume Capability:
+     * - p_resume = FALSE (default): Create new project, generate tasks for all tables
+     * - p_resume = TRUE: Reuse existing project, skip tables that already have tasks
+     *   Useful for: adding more tables, recovering from interruptions, incremental updates
      */
     FUNCTION generate_migration_tasks(
         p_owner IN VARCHAR2 DEFAULT NULL,
@@ -406,7 +412,8 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
         p_lob_compression IN VARCHAR2 DEFAULT 'MEDIUM',
         p_lob_deduplicate IN VARCHAR2 DEFAULT 'N',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
-        p_auto_analyze IN BOOLEAN DEFAULT TRUE
+        p_auto_analyze IN BOOLEAN DEFAULT TRUE,
+        p_resume IN BOOLEAN DEFAULT FALSE
     ) RETURN NUMBER;
 
 END pck_dwh_schema_profiler;
@@ -850,7 +857,8 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
         p_lob_compression IN VARCHAR2 DEFAULT 'MEDIUM',
         p_lob_deduplicate IN VARCHAR2 DEFAULT 'N',
         p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
-        p_auto_analyze IN BOOLEAN DEFAULT TRUE
+        p_auto_analyze IN BOOLEAN DEFAULT TRUE,
+        p_resume IN BOOLEAN DEFAULT FALSE
     ) RETURN NUMBER IS
         v_project_id NUMBER;
         v_schema_count NUMBER := 0;
@@ -889,22 +897,53 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             -- Create project name
             v_proj_name := NVL(p_schema_project_name, 'ILM Migration - ' || UPPER(p_schema_owner));
 
-            -- Create migration project
-            log_message('Creating project: ' || v_proj_name);
-            INSERT INTO cmr.dwh_migration_projects (
-                project_name,
-                description,
-                status,
-                created_date
-            ) VALUES (
-                v_proj_name,
-                'Auto-generated from schema profiling for ' || UPPER(p_schema_owner) ||
-                ' (tables >= ' || p_min_table_size_gb || ' GB)',
-                'PLANNING',
-                SYSDATE
-            ) RETURNING project_id INTO v_proj_id;
+            -- Create or reuse migration project
+            IF p_resume THEN
+                -- Try to find existing project for this schema
+                BEGIN
+                    SELECT project_id
+                    INTO v_proj_id
+                    FROM cmr.dwh_migration_projects
+                    WHERE project_name = v_proj_name
+                      AND ROWNUM = 1
+                    ORDER BY created_date DESC;
 
-            log_message('Project ID: ' || v_proj_id);
+                    log_message('Resuming existing project: ' || v_proj_name || ' (ID: ' || v_proj_id || ')');
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        -- No existing project, create new one
+                        log_message('No existing project found, creating new: ' || v_proj_name);
+                        INSERT INTO cmr.dwh_migration_projects (
+                            project_name,
+                            description,
+                            status,
+                            created_date
+                        ) VALUES (
+                            v_proj_name,
+                            'Auto-generated from schema profiling for ' || UPPER(p_schema_owner) ||
+                            ' (tables >= ' || p_min_table_size_gb || ' GB)',
+                            'PLANNING',
+                            SYSDATE
+                        ) RETURNING project_id INTO v_proj_id;
+                        log_message('Project ID: ' || v_proj_id);
+                END;
+            ELSE
+                -- Create new project (default behavior)
+                log_message('Creating project: ' || v_proj_name);
+                INSERT INTO cmr.dwh_migration_projects (
+                    project_name,
+                    description,
+                    status,
+                    created_date
+                ) VALUES (
+                    v_proj_name,
+                    'Auto-generated from schema profiling for ' || UPPER(p_schema_owner) ||
+                    ' (tables >= ' || p_min_table_size_gb || ' GB)',
+                    'PLANNING',
+                    SYSDATE
+                ) RETURNING project_id INTO v_proj_id;
+                log_message('Project ID: ' || v_proj_id);
+            END IF;
 
             -- Generate tasks for all tables in the schema
             IF p_max_tables IS NOT NULL THEN
@@ -920,9 +959,15 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
                     'CTAS', p_use_compression, p_compression_type,
                     p_lob_compression, p_lob_deduplicate,
                     p_apply_ilm_policies, 'PENDING', SYSDATE
-                FROM cmr.dwh_tables_quick_profile
+                FROM cmr.dwh_tables_quick_profile p
                 WHERE owner = UPPER(p_schema_owner)
                   AND size_gb >= p_min_table_size_gb
+                  AND (NOT p_resume OR NOT EXISTS (
+                      SELECT 1 FROM cmr.dwh_migration_tasks t
+                      WHERE t.source_owner = p.owner
+                        AND t.source_table = p.table_name
+                        AND t.project_id = v_proj_id
+                  ))
                 ORDER BY size_gb DESC
                 FETCH FIRST p_max_tables ROWS ONLY;
             ELSE
@@ -938,16 +983,26 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
                     'CTAS', p_use_compression, p_compression_type,
                     p_lob_compression, p_lob_deduplicate,
                     p_apply_ilm_policies, 'PENDING', SYSDATE
-                FROM cmr.dwh_tables_quick_profile
+                FROM cmr.dwh_tables_quick_profile p
                 WHERE owner = UPPER(p_schema_owner)
                   AND size_gb >= p_min_table_size_gb
+                  AND (NOT p_resume OR NOT EXISTS (
+                      SELECT 1 FROM cmr.dwh_migration_tasks t
+                      WHERE t.source_owner = p.owner
+                        AND t.source_table = p.table_name
+                        AND t.project_id = v_proj_id
+                  ))
                 ORDER BY size_gb DESC;
             END IF;
 
             v_task_count := SQL%ROWCOUNT;
             COMMIT;
 
-            log_message('Created ' || v_task_count || ' migration tasks');
+            IF p_resume THEN
+                log_message('Created ' || v_task_count || ' new migration tasks (skipped existing)');
+            ELSE
+                log_message('Created ' || v_task_count || ' migration tasks');
+            END IF;
 
             -- Update counters
             v_schema_count := v_schema_count + 1;
