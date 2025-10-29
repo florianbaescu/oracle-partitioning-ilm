@@ -946,53 +946,94 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             END IF;
 
             -- Generate tasks for all tables in the schema
-            IF p_max_tables IS NOT NULL THEN
-                -- Limited number of tables (top X by size)
-                INSERT INTO cmr.dwh_migration_tasks (
-                    project_id, task_name, source_owner, source_table,
-                    migration_method, use_compression, compression_type,
-                    lob_compression, lob_deduplicate,
-                    apply_ilm_policies, status, created_date
-                )
-                SELECT
-                    v_proj_id, 'Migrate ' || table_name, owner, table_name,
-                    'CTAS', p_use_compression, p_compression_type,
-                    p_lob_compression, p_lob_deduplicate,
-                    p_apply_ilm_policies, 'PENDING', SYSDATE
-                FROM cmr.dwh_tables_quick_profile p
-                WHERE owner = UPPER(p_schema_owner)
-                  AND size_gb >= p_min_table_size_gb
-                  AND (NOT p_resume OR NOT EXISTS (
-                      SELECT 1 FROM cmr.dwh_migration_tasks t
-                      WHERE t.source_owner = p.owner
-                        AND t.source_table = p.table_name
-                        AND t.project_id = v_proj_id
-                  ))
-                ORDER BY size_gb DESC
-                FETCH FIRST p_max_tables ROWS ONLY;
+            IF p_resume THEN
+                -- RESUME MODE: Skip tables that already have tasks
+                IF p_max_tables IS NOT NULL THEN
+                    -- Limited number of tables (top X by size)
+                    INSERT INTO cmr.dwh_migration_tasks (
+                        project_id, task_name, source_owner, source_table,
+                        migration_method, use_compression, compression_type,
+                        lob_compression, lob_deduplicate,
+                        apply_ilm_policies, status, created_date
+                    )
+                    SELECT
+                        v_proj_id, 'Migrate ' || table_name, owner, table_name,
+                        'CTAS', p_use_compression, p_compression_type,
+                        p_lob_compression, p_lob_deduplicate,
+                        p_apply_ilm_policies, 'PENDING', SYSDATE
+                    FROM cmr.dwh_tables_quick_profile p
+                    WHERE owner = UPPER(p_schema_owner)
+                      AND size_gb >= p_min_table_size_gb
+                      AND NOT EXISTS (
+                          SELECT 1 FROM cmr.dwh_migration_tasks t
+                          WHERE t.source_owner = p.owner
+                            AND t.source_table = p.table_name
+                            AND t.project_id = v_proj_id
+                      )
+                    ORDER BY size_gb DESC
+                    FETCH FIRST p_max_tables ROWS ONLY;
+                ELSE
+                    -- All tables
+                    INSERT INTO cmr.dwh_migration_tasks (
+                        project_id, task_name, source_owner, source_table,
+                        migration_method, use_compression, compression_type,
+                        lob_compression, lob_deduplicate,
+                        apply_ilm_policies, status, created_date
+                    )
+                    SELECT
+                        v_proj_id, 'Migrate ' || table_name, owner, table_name,
+                        'CTAS', p_use_compression, p_compression_type,
+                        p_lob_compression, p_lob_deduplicate,
+                        p_apply_ilm_policies, 'PENDING', SYSDATE
+                    FROM cmr.dwh_tables_quick_profile p
+                    WHERE owner = UPPER(p_schema_owner)
+                      AND size_gb >= p_min_table_size_gb
+                      AND NOT EXISTS (
+                          SELECT 1 FROM cmr.dwh_migration_tasks t
+                          WHERE t.source_owner = p.owner
+                            AND t.source_table = p.table_name
+                            AND t.project_id = v_proj_id
+                      )
+                    ORDER BY size_gb DESC;
+                END IF;
             ELSE
-                -- All tables
-                INSERT INTO cmr.dwh_migration_tasks (
-                    project_id, task_name, source_owner, source_table,
-                    migration_method, use_compression, compression_type,
-                    lob_compression, lob_deduplicate,
-                    apply_ilm_policies, status, created_date
-                )
-                SELECT
-                    v_proj_id, 'Migrate ' || table_name, owner, table_name,
-                    'CTAS', p_use_compression, p_compression_type,
-                    p_lob_compression, p_lob_deduplicate,
-                    p_apply_ilm_policies, 'PENDING', SYSDATE
-                FROM cmr.dwh_tables_quick_profile p
-                WHERE owner = UPPER(p_schema_owner)
-                  AND size_gb >= p_min_table_size_gb
-                  AND (NOT p_resume OR NOT EXISTS (
-                      SELECT 1 FROM cmr.dwh_migration_tasks t
-                      WHERE t.source_owner = p.owner
-                        AND t.source_table = p.table_name
-                        AND t.project_id = v_proj_id
-                  ))
-                ORDER BY size_gb DESC;
+                -- NORMAL MODE: Create tasks for all tables
+                IF p_max_tables IS NOT NULL THEN
+                    -- Limited number of tables (top X by size)
+                    INSERT INTO cmr.dwh_migration_tasks (
+                        project_id, task_name, source_owner, source_table,
+                        migration_method, use_compression, compression_type,
+                        lob_compression, lob_deduplicate,
+                        apply_ilm_policies, status, created_date
+                    )
+                    SELECT
+                        v_proj_id, 'Migrate ' || table_name, owner, table_name,
+                        'CTAS', p_use_compression, p_compression_type,
+                        p_lob_compression, p_lob_deduplicate,
+                        p_apply_ilm_policies, 'PENDING', SYSDATE
+                    FROM cmr.dwh_tables_quick_profile p
+                    WHERE owner = UPPER(p_schema_owner)
+                      AND size_gb >= p_min_table_size_gb
+                    ORDER BY size_gb DESC
+                    FETCH FIRST p_max_tables ROWS ONLY;
+                ELSE
+                    -- All tables
+                    INSERT INTO cmr.dwh_migration_tasks (
+                        project_id, task_name, source_owner, source_table,
+                        migration_method, use_compression, compression_type,
+                        lob_compression, lob_deduplicate,
+                        apply_ilm_policies, status, created_date
+                    )
+                    SELECT
+                        v_proj_id, 'Migrate ' || table_name, owner, table_name,
+                        'CTAS', p_use_compression, p_compression_type,
+                        p_lob_compression, p_lob_deduplicate,
+                        p_apply_ilm_policies, 'PENDING', SYSDATE
+                    FROM cmr.dwh_tables_quick_profile p
+                    WHERE owner = UPPER(p_schema_owner)
+                      AND size_gb >= p_min_table_size_gb
+                    ORDER BY size_gb DESC;
+                END IF;
             END IF;
 
             v_task_count := SQL%ROWCOUNT;
