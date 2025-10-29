@@ -375,6 +375,31 @@ CREATE OR REPLACE PACKAGE cmr.pck_dwh_schema_profiler AS
      */
     PROCEDURE truncate_profiling_tables;
 
+    /**
+     * Generate migration tasks for all tables in a schema
+     * Creates a migration project and tasks for all tables from dwh_tables_quick_profile
+     *
+     * @param p_owner Schema/owner name
+     * @param p_project_name Project name (default: 'ILM Migration - {OWNER}')
+     * @param p_min_table_size_gb Minimum table size in GB to include (default: 1)
+     * @param p_max_tables Maximum number of tables to include (default: NULL = all tables)
+     * @param p_use_compression Enable compression (default: Y)
+     * @param p_compression_type Compression type (default: QUERY HIGH)
+     * @param p_apply_ilm_policies Apply ILM policies (default: Y)
+     * @param p_auto_analyze Run analysis after task creation (default: TRUE)
+     * @return project_id The created project ID
+     */
+    FUNCTION generate_migration_tasks(
+        p_owner IN VARCHAR2,
+        p_project_name IN VARCHAR2 DEFAULT NULL,
+        p_min_table_size_gb IN NUMBER DEFAULT 1,
+        p_max_tables IN NUMBER DEFAULT NULL,
+        p_use_compression IN VARCHAR2 DEFAULT 'Y',
+        p_compression_type IN VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
+        p_auto_analyze IN BOOLEAN DEFAULT TRUE
+    ) RETURN NUMBER;
+
 END pck_dwh_schema_profiler;
 /
 
@@ -802,6 +827,193 @@ CREATE OR REPLACE PACKAGE BODY cmr.pck_dwh_schema_profiler AS
             ROLLBACK;
             RAISE;
     END run_profiling;
+
+    -- =====================================================================
+    -- Generate Migration Tasks for Schema
+    -- =====================================================================
+    FUNCTION generate_migration_tasks(
+        p_owner IN VARCHAR2,
+        p_project_name IN VARCHAR2 DEFAULT NULL,
+        p_min_table_size_gb IN NUMBER DEFAULT 1,
+        p_max_tables IN NUMBER DEFAULT NULL,
+        p_use_compression IN VARCHAR2 DEFAULT 'Y',
+        p_compression_type IN VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_apply_ilm_policies IN VARCHAR2 DEFAULT 'Y',
+        p_auto_analyze IN BOOLEAN DEFAULT TRUE
+    ) RETURN NUMBER IS
+        v_project_id NUMBER;
+        v_project_name VARCHAR2(200);
+        v_task_count NUMBER := 0;
+        v_start_time TIMESTAMP := SYSTIMESTAMP;
+        v_duration NUMBER;
+        v_schema_exists NUMBER;
+        v_limit_clause VARCHAR2(100);
+    BEGIN
+        log_message('======================================================');
+        log_message('Generate Migration Tasks for Schema: ' || UPPER(p_owner));
+        log_message('======================================================');
+
+        -- Validate schema exists in profiling results
+        SELECT COUNT(*)
+        INTO v_schema_exists
+        FROM cmr.dwh_tables_quick_profile
+        WHERE owner = UPPER(p_owner)
+          AND size_gb >= p_min_table_size_gb;
+
+        IF v_schema_exists = 0 THEN
+            log_message('ERROR: No tables found for schema ' || UPPER(p_owner) ||
+                       ' with size >= ' || p_min_table_size_gb || ' GB');
+            log_message('Run schema profiling first: pck_dwh_schema_profiler.run_profiling()');
+            RAISE_APPLICATION_ERROR(-20001,
+                'No profiling data found for schema ' || UPPER(p_owner) ||
+                '. Run pck_dwh_schema_profiler.run_profiling() first.');
+        END IF;
+
+        log_message('Found ' || v_schema_exists || ' tables matching criteria');
+        IF p_max_tables IS NOT NULL THEN
+            log_message('Limiting to top ' || p_max_tables || ' tables by size');
+        END IF;
+        log_message('');
+
+        -- Create project name
+        v_project_name := NVL(p_project_name, 'ILM Migration - ' || UPPER(p_owner));
+
+        -- Create migration project
+        log_message('Creating migration project: ' || v_project_name);
+        INSERT INTO cmr.dwh_migration_projects (
+            project_name,
+            description,
+            status,
+            created_date
+        ) VALUES (
+            v_project_name,
+            'Auto-generated from schema profiling for ' || UPPER(p_owner) ||
+            ' (tables >= ' || p_min_table_size_gb || ' GB)',
+            'PLANNING',
+            SYSDATE
+        ) RETURNING project_id INTO v_project_id;
+
+        log_message('Created project ID: ' || v_project_id);
+        log_message('');
+
+        -- Generate tasks for all tables in the schema
+        log_message('Generating migration tasks...');
+
+        IF p_max_tables IS NOT NULL THEN
+            -- Limited number of tables (top X by size)
+            INSERT INTO cmr.dwh_migration_tasks (
+                project_id,
+                task_name,
+                source_owner,
+                source_table,
+                migration_method,
+                use_compression,
+                compression_type,
+                apply_ilm_policies,
+                status,
+                created_date
+            )
+            SELECT
+                v_project_id,
+                'Migrate ' || table_name,
+                owner,
+                table_name,
+                'CTAS',  -- Default migration method
+                p_use_compression,
+                p_compression_type,
+                p_apply_ilm_policies,
+                'PENDING',
+                SYSDATE
+            FROM cmr.dwh_tables_quick_profile
+            WHERE owner = UPPER(p_owner)
+              AND size_gb >= p_min_table_size_gb
+            ORDER BY size_gb DESC
+            FETCH FIRST p_max_tables ROWS ONLY;
+        ELSE
+            -- All tables
+            INSERT INTO cmr.dwh_migration_tasks (
+                project_id,
+                task_name,
+                source_owner,
+                source_table,
+                migration_method,
+                use_compression,
+                compression_type,
+                apply_ilm_policies,
+                status,
+                created_date
+            )
+            SELECT
+                v_project_id,
+                'Migrate ' || table_name,
+                owner,
+                table_name,
+                'CTAS',  -- Default migration method
+                p_use_compression,
+                p_compression_type,
+                p_apply_ilm_policies,
+                'PENDING',
+                SYSDATE
+            FROM cmr.dwh_tables_quick_profile
+            WHERE owner = UPPER(p_owner)
+              AND size_gb >= p_min_table_size_gb
+            ORDER BY size_gb DESC;
+        END IF;
+
+        v_task_count := SQL%ROWCOUNT;
+        COMMIT;
+
+        log_message('Created ' || v_task_count || ' migration tasks');
+        log_message('');
+
+        -- Auto-analyze if requested
+        IF p_auto_analyze THEN
+            log_message('Auto-analyzing all tasks (this may take several minutes)...');
+            log_message('Calling: pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(' || v_project_id || ')');
+
+            BEGIN
+                cmr.pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(v_project_id);
+                log_message('Analysis complete');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    log_message('WARNING: Auto-analysis failed: ' || SQLERRM);
+                    log_message('You can run analysis manually later');
+            END;
+        ELSE
+            log_message('Auto-analysis skipped (p_auto_analyze = FALSE)');
+            log_message('Run analysis manually:');
+            log_message('  EXEC pck_dwh_table_migration_analyzer.analyze_all_pending_tasks(' || v_project_id || ');');
+        END IF;
+
+        v_duration := EXTRACT(SECOND FROM (SYSTIMESTAMP - v_start_time));
+
+        log_message('');
+        log_message('======================================================');
+        log_message('Task Generation Complete');
+        log_message('Project ID: ' || v_project_id);
+        log_message('Tasks created: ' || v_task_count);
+        log_message('Duration: ' || ROUND(v_duration, 1) || ' seconds');
+        log_message('======================================================');
+        log_message('');
+        log_message('Review tasks:');
+        log_message('  SELECT * FROM cmr.dwh_migration_tasks WHERE project_id = ' || v_project_id || ';');
+        log_message('');
+        log_message('Review analysis results:');
+        log_message('  SELECT t.task_name, t.validation_status, a.recommended_partition_type, a.recommended_partition_key');
+        log_message('  FROM cmr.dwh_migration_tasks t');
+        log_message('  JOIN cmr.dwh_migration_analysis a ON t.task_id = a.task_id');
+        log_message('  WHERE t.project_id = ' || v_project_id || ';');
+        log_message('');
+
+        RETURN v_project_id;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_message('ERROR in generate_migration_tasks: ' || SQLERRM);
+            log_message('SQLCODE: ' || SQLCODE);
+            ROLLBACK;
+            RAISE;
+    END generate_migration_tasks;
 
 END pck_dwh_schema_profiler;
 /
