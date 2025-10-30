@@ -2915,6 +2915,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_boundary_max_date DATE;
         v_boundary_range_years NUMBER;
         v_boundary_recommendation VARCHAR2(1000);
+
+        -- Existing compression detection variables
+        v_existing_compression VARCHAR2(30);
+        v_existing_compress_for VARCHAR2(30);
+        v_is_compressed CHAR(1) := 'N';
+        v_compression_info VARCHAR2(4000);
+        v_partition_compression_mix CHAR(1) := 'N';  -- Y if partitions have different compression
     BEGIN
         v_start_time := SYSTIMESTAMP;
         -- Get task details
@@ -3061,12 +3068,25 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             -- If 'CONTINUE' - proceed with normal analysis
         END;
 
-        -- Get table statistics
+        -- Get table statistics and existing compression info
         BEGIN
-            SELECT num_rows INTO v_num_rows
+            SELECT num_rows,
+                   NVL(compression, 'DISABLED') as compression,
+                   compress_for
+            INTO v_num_rows, v_existing_compression, v_existing_compress_for
             FROM dba_tables
             WHERE owner = v_task.source_owner
             AND table_name = v_task.source_table;
+
+            -- Determine if table is compressed
+            IF v_existing_compression != 'DISABLED' THEN
+                v_is_compressed := 'Y';
+                v_compression_info := 'Table compressed: ' || v_existing_compression;
+                IF v_existing_compress_for IS NOT NULL THEN
+                    v_compression_info := v_compression_info || ' FOR ' || v_existing_compress_for;
+                END IF;
+                DBMS_OUTPUT.PUT_LINE('INFO: ' || v_compression_info);
+            END IF;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 IF v_error_count > 0 THEN DBMS_LOB.APPEND(v_warnings, ',' || CHR(10)); END IF;
@@ -3100,6 +3120,56 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_error_count := v_error_count + 1;
                 v_table_size := 0;
         END;
+
+        -- Check partition-level compression if table is partitioned
+        IF v_is_compressed = 'Y' OR v_is_compressed = 'N' THEN  -- Check both cases
+            DECLARE
+                v_partition_count NUMBER;
+                v_distinct_compression_count NUMBER;
+                v_partition_info VARCHAR2(4000);
+            BEGIN
+                -- Check if table is partitioned and get partition compression info
+                SELECT COUNT(*),
+                       COUNT(DISTINCT NVL(compression, 'DISABLED') || '|' || NVL(compress_for, 'NONE'))
+                INTO v_partition_count, v_distinct_compression_count
+                FROM dba_tab_partitions
+                WHERE table_owner = v_task.source_owner
+                  AND table_name = v_task.source_table;
+
+                IF v_partition_count > 0 THEN
+                    -- Table is partitioned
+                    IF v_distinct_compression_count > 1 THEN
+                        v_partition_compression_mix := 'Y';
+                        v_partition_info := 'Partitioned table with mixed compression (' || v_distinct_compression_count || ' different types across ' || v_partition_count || ' partitions)';
+                        DBMS_OUTPUT.PUT_LINE('INFO: ' || v_partition_info);
+                        v_compression_info := v_compression_info || '; ' || v_partition_info;
+                    ELSIF v_distinct_compression_count = 1 THEN
+                        -- All partitions have same compression
+                        SELECT DISTINCT NVL(compression, 'DISABLED'), compress_for
+                        INTO v_existing_compression, v_existing_compress_for
+                        FROM dba_tab_partitions
+                        WHERE table_owner = v_task.source_owner
+                          AND table_name = v_task.source_table
+                        FETCH FIRST 1 ROW ONLY;
+
+                        IF v_existing_compression != 'DISABLED' THEN
+                            v_is_compressed := 'Y';
+                            v_partition_info := 'All ' || v_partition_count || ' partitions compressed: ' || v_existing_compression;
+                            IF v_existing_compress_for IS NOT NULL THEN
+                                v_partition_info := v_partition_info || ' FOR ' || v_existing_compress_for;
+                            END IF;
+                            DBMS_OUTPUT.PUT_LINE('INFO: ' || v_partition_info);
+                            v_compression_info := v_partition_info;
+                        END IF;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    NULL;  -- Not partitioned or no partitions
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Could not check partition compression: ' || SQLERRM);
+            END;
+        END IF;
 
         -- Get parallel degree once for all date column analysis
         v_parallel_degree := get_parallel_degree(v_task.source_owner, v_task.source_table);
@@ -3758,6 +3828,31 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         v_dependent_objects := get_dependent_objects(v_task.source_owner, v_task.source_table, v_date_column, v_date_columns);
         v_blocking_issues := identify_blocking_issues(v_task.source_owner, v_task.source_table);
 
+        -- Add compression information to warnings/info
+        IF v_is_compressed = 'Y' THEN
+            IF v_error_count > 0 THEN
+                DBMS_LOB.APPEND(v_warnings, ',' || CHR(10));
+            END IF;
+            v_error_count := v_error_count + 1;
+
+            IF v_partition_compression_mix = 'Y' THEN
+                -- Mixed compression across partitions
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "INFO",' || CHR(10) ||
+                    '    "issue": "' || REPLACE(v_compression_info, '"', '\"') || '",' || CHR(10) ||
+                    '    "action": "Migration will preserve existing partition-level compression. Consider standardizing compression for consistent ILM policies."' || CHR(10) ||
+                    '  }');
+            ELSE
+                -- Uniform compression
+                DBMS_LOB.APPEND(v_warnings, '  {' || CHR(10) ||
+                    '    "type": "INFO",' || CHR(10) ||
+                    '    "issue": "' || REPLACE(v_compression_info, '"', '\"') || '",' || CHR(10) ||
+                    '    "action": "Migration will preserve existing compression: ' || v_existing_compression ||
+                        CASE WHEN v_existing_compress_for IS NOT NULL THEN ' FOR ' || v_existing_compress_for ELSE '' END || '"' || CHR(10) ||
+                    '  }');
+            END IF;
+        END IF;
+
         -- Close warnings JSON array
         DBMS_LOB.APPEND(v_warnings, CHR(10) || ']');
 
@@ -4112,6 +4207,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         WHERE task_id = p_task_id;
 
         -- Update task with recommended method and analyzed parallel degree
+        -- If table already has compression, preserve it
         UPDATE cmr.dwh_migration_tasks
         SET status = 'ANALYZED',
             migration_method = v_recommended_method,
@@ -4121,6 +4217,16 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             validation_status = CASE
                 WHEN DBMS_LOB.INSTR(v_blocking_issues, 'ERROR') > 0 THEN 'BLOCKED'
                 ELSE 'READY'
+            END,
+            -- Preserve existing compression if detected
+            use_compression = CASE
+                WHEN v_is_compressed = 'Y' THEN 'Y'
+                ELSE use_compression
+            END,
+            compression_type = CASE
+                WHEN v_is_compressed = 'Y' AND v_existing_compress_for IS NOT NULL THEN v_existing_compress_for
+                WHEN v_is_compressed = 'Y' AND v_existing_compression != 'DISABLED' THEN v_existing_compression
+                ELSE compression_type
             END
         WHERE task_id = p_task_id;
 
