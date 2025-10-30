@@ -721,7 +721,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             SELECT 1 FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
+            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'VALID_FROM_DATE', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
             AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
             FETCH FIRST 1 ROW ONLY
         );
@@ -731,7 +731,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             SELECT 1 FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND UPPER(column_name) IN ('VALID_TO_DTTM', 'VALID_TO', 'END_DTTM', 'EXPIRY_DTTM')
+            AND UPPER(column_name) IN ('VALID_TO_DTTM', 'VALID_TO', 'VALID_TO_DATE', 'END_DTTM', 'EXPIRY_DTTM')
             AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
             FETCH FIRST 1 ROW ONLY
         );
@@ -751,12 +751,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         ELSIF v_has_valid_from > 0 AND v_has_valid_to > 0 THEN
             p_scd2_type := 'VALID_FROM_TO';
-            -- Get actual column name
+            -- Get actual VALID_TO column name for ILM partitioning
+            -- VALID_TO directly indicates obsolescence: past date = historical, NULL = current
             SELECT column_name INTO p_date_column
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
+            AND UPPER(column_name) IN ('VALID_TO_DTTM', 'VALID_TO', 'VALID_TO_DATE', 'END_DTTM', 'EXPIRY_DTTM')
             AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
             FETCH FIRST 1 ROW ONLY;
             RETURN TRUE;
@@ -2079,8 +2080,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
                         p_reason := 'SCD2 table with effective_date pattern detected - yearly partitioning for historical tracking';
                     ELSIF v_scd2_type = 'VALID_FROM_TO' THEN
-                        v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
-                        p_reason := 'SCD2 table with valid_from_dttm/valid_to_dttm pattern detected - yearly partitioning for historical tracking';
+                        v_strategy := 'RANGE(NVL(' || v_scd2_column || ', TO_DATE(''5999-12-31'', ''YYYY-MM-DD''))) INTERVAL YEARLY';
+                        p_reason := 'SCD2 table with valid_to pattern detected - yearly partitioning by VALID_TO for ILM (NULL = current/active data in far-future partition, past dates = obsolete/historical data)';
                     END IF;
                     RETURN v_strategy;
                 END IF;

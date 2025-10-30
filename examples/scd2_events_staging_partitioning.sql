@@ -29,7 +29,7 @@ CREATE TABLE customer_dim_scd2 (
 
     -- SCD2 tracking columns
     effective_date      DATE NOT NULL,                 -- When this version became effective
-    expiry_date         DATE DEFAULT DATE '9999-12-31',
+    expiry_date         DATE DEFAULT DATE '5999-12-31',
     current_flag        CHAR(1) DEFAULT 'Y',
     version_number      NUMBER(5),
 
@@ -80,7 +80,7 @@ CREATE TABLE product_dim_scd2 (
 
     -- SCD2 tracking
     effective_date      DATE NOT NULL,
-    expiry_date         DATE DEFAULT DATE '9999-12-31',
+    expiry_date         DATE DEFAULT DATE '5999-12-31',
     current_flag        CHAR(1) DEFAULT 'Y',
     version_number      NUMBER(5),
 
@@ -111,6 +111,7 @@ COMMENT ON TABLE product_dim_scd2 IS 'Product SCD Type 2 - Range-Hash composite 
 -- -----------------------------------------------------------------------------
 -- Example 3: Employee SCD2 with valid_from_dttm/valid_to_dttm
 -- Tracks employee history with precise timestamp ranges
+-- ILM-optimized: Partitioned by VALID_TO for lifecycle management
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE employee_dim_scd2 (
@@ -131,7 +132,7 @@ CREATE TABLE employee_dim_scd2 (
 
     -- SCD2 validity tracking with timestamps
     valid_from_dttm     TIMESTAMP NOT NULL,            -- Start of validity period
-    valid_to_dttm       TIMESTAMP DEFAULT TIMESTAMP '9999-12-31 23:59:59',  -- End of validity period
+    valid_to_dttm       TIMESTAMP DEFAULT TIMESTAMP '5999-12-31 23:59:59',  -- End of validity period (NULL means current)
     is_current          CHAR(1) DEFAULT 'Y',
     version_number      NUMBER(5),
 
@@ -141,7 +142,7 @@ CREATE TABLE employee_dim_scd2 (
 
     CONSTRAINT pk_employee_scd2 PRIMARY KEY (employee_sk)
 )
-PARTITION BY RANGE (valid_from_dttm)
+PARTITION BY RANGE (valid_to_dttm)
 INTERVAL (NUMTOYMINTERVAL(1,'YEAR'))
 (
     PARTITION p_initial VALUES LESS THAN (TIMESTAMP '2020-01-01 00:00:00')
@@ -154,15 +155,16 @@ CREATE INDEX idx_emp_scd2_id_valid ON employee_dim_scd2(employee_id, valid_from_
 CREATE INDEX idx_emp_scd2_current ON employee_dim_scd2(employee_id, is_current) LOCAL;
 CREATE BITMAP INDEX idx_emp_scd2_is_current ON employee_dim_scd2(is_current) LOCAL;
 
-COMMENT ON TABLE employee_dim_scd2 IS 'Employee SCD Type 2 - partitioned by valid_from_dttm';
+COMMENT ON TABLE employee_dim_scd2 IS 'Employee SCD Type 2 - ILM-optimized partitioning by valid_to_dttm (obsolete data = past dates → COLD, current data = 5999-12-31 → HOT)';
 COMMENT ON COLUMN employee_dim_scd2.valid_from_dttm IS 'Timestamp when this version became valid';
-COMMENT ON COLUMN employee_dim_scd2.valid_to_dttm IS 'Timestamp when this version ceased to be valid';
+COMMENT ON COLUMN employee_dim_scd2.valid_to_dttm IS 'Timestamp when this version ceased to be valid (5999-12-31 = current/active)';
 COMMENT ON COLUMN employee_dim_scd2.is_current IS 'Y for current version, N for historical';
 
 
 -- -----------------------------------------------------------------------------
 -- Example 4: Account SCD2 with valid_from_dttm/valid_to_dttm - Composite
 -- Banking accounts with frequent status changes
+-- ILM-optimized: Partitioned by VALID_TO for lifecycle management
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE account_dim_scd2 (
@@ -179,7 +181,7 @@ CREATE TABLE account_dim_scd2 (
 
     -- SCD2 temporal tracking
     valid_from_dttm     TIMESTAMP NOT NULL,
-    valid_to_dttm       TIMESTAMP DEFAULT TIMESTAMP '9999-12-31 23:59:59',
+    valid_to_dttm       TIMESTAMP DEFAULT TIMESTAMP '5999-12-31 23:59:59',
     is_current          CHAR(1) DEFAULT 'Y',
     record_version      NUMBER(5),
 
@@ -187,7 +189,7 @@ CREATE TABLE account_dim_scd2 (
 
     CONSTRAINT pk_account_scd2 PRIMARY KEY (account_sk)
 )
-PARTITION BY RANGE (valid_from_dttm)
+PARTITION BY RANGE (valid_to_dttm)
 SUBPARTITION BY LIST (account_status)
 SUBPARTITION TEMPLATE (
     SUBPARTITION sp_active VALUES ('ACTIVE', 'OPEN'),
@@ -205,7 +207,7 @@ COMPRESS FOR QUERY HIGH;
 CREATE INDEX idx_acct_scd2_id_valid ON account_dim_scd2(account_id, valid_from_dttm, valid_to_dttm) LOCAL;
 CREATE INDEX idx_acct_scd2_current ON account_dim_scd2(account_id, is_current) LOCAL;
 
-COMMENT ON TABLE account_dim_scd2 IS 'Account SCD Type 2 - Range-List composite partitioning';
+COMMENT ON TABLE account_dim_scd2 IS 'Account SCD Type 2 - ILM-optimized Range-List composite partitioning by valid_to_dttm';
 
 
 -- =============================================================================
