@@ -177,6 +177,13 @@ BEGIN
             has_lobs            CHAR(1),
             has_foreign_keys    CHAR(1),
 
+            -- Existing compression detection
+            existing_compression VARCHAR2(30),      -- ENABLED/DISABLED
+            existing_compress_for VARCHAR2(30),     -- BASIC/OLTP/QUERY HIGH/QUERY LOW/ARCHIVE HIGH/ARCHIVE LOW
+            storage_type VARCHAR2(10),              -- ROW/COLUMN/NONE (ROW=BASIC/OLTP, COLUMN=HCC, NONE=uncompressed)
+            partition_compression_mixed CHAR(1),    -- Y if partitions have different compression
+            compression_details VARCHAR2(4000),     -- Detailed compression information
+
             -- Data distribution analysis
             candidate_columns   CLOB,
             recommended_strategy VARCHAR2(100),
@@ -638,6 +645,10 @@ SELECT
     a.recommended_strategy,
     a.complexity_score,
     a.estimated_downtime_minutes,
+    a.existing_compression,
+    a.existing_compress_for,
+    a.storage_type,
+    a.partition_compression_mixed,
     t.source_rows,
     ROUND(t.source_size_mb, 2) AS source_size_mb,
     ROUND(t.target_size_mb, 2) AS target_size_mb,

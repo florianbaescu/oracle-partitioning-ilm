@@ -2935,6 +2935,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         -- Existing compression detection variables
         v_existing_compression VARCHAR2(30);
         v_existing_compress_for VARCHAR2(30);
+        v_storage_type VARCHAR2(10) := 'NONE';       -- ROW/COLUMN/NONE
         v_is_compressed CHAR(1) := 'N';
         v_compression_info VARCHAR2(4000);
         v_partition_compression_mix CHAR(1) := 'N';  -- Y if partitions have different compression
@@ -3102,6 +3103,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_compression_info := 'Table compressed: ' || v_existing_compression;
                 IF v_existing_compress_for IS NOT NULL THEN
                     v_compression_info := v_compression_info || ' FOR ' || v_existing_compress_for;
+
+                    -- Determine storage type: ROW vs COLUMN (HCC)
+                    IF v_existing_compress_for IN ('QUERY LOW', 'QUERY HIGH', 'ARCHIVE LOW', 'ARCHIVE HIGH') THEN
+                        v_storage_type := 'COLUMN';  -- HCC (Hybrid Columnar Compression)
+                        v_compression_info := v_compression_info || ' [Column Store/HCC]';
+                    ELSIF v_existing_compress_for IN ('BASIC', 'OLTP') THEN
+                        v_storage_type := 'ROW';     -- Row store compression
+                        v_compression_info := v_compression_info || ' [Row Store]';
+                    END IF;
                 END IF;
                 DBMS_OUTPUT.PUT_LINE('INFO: ' || v_compression_info);
             END IF;
@@ -3175,6 +3185,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             v_partition_info := 'All ' || v_partition_count || ' partitions compressed: ' || v_existing_compression;
                             IF v_existing_compress_for IS NOT NULL THEN
                                 v_partition_info := v_partition_info || ' FOR ' || v_existing_compress_for;
+
+                                -- Determine storage type: ROW vs COLUMN (HCC)
+                                IF v_existing_compress_for IN ('QUERY LOW', 'QUERY HIGH', 'ARCHIVE LOW', 'ARCHIVE HIGH') THEN
+                                    v_storage_type := 'COLUMN';  -- HCC (Hybrid Columnar Compression)
+                                    v_partition_info := v_partition_info || ' [Column Store/HCC]';
+                                ELSIF v_existing_compress_for IN ('BASIC', 'OLTP') THEN
+                                    v_storage_type := 'ROW';     -- Row store compression
+                                    v_partition_info := v_partition_info || ' [Row Store]';
+                                END IF;
                             END IF;
                             DBMS_OUTPUT.PUT_LINE('INFO: ' || v_partition_info);
                             v_compression_info := v_partition_info;
@@ -4112,6 +4131,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 partition_boundary_max_date = v_boundary_max_date,
                 partition_range_years = v_boundary_range_years,
                 partition_boundary_recommendation = v_boundary_recommendation,
+                existing_compression = v_existing_compression,
+                existing_compress_for = v_existing_compress_for,
+                storage_type = v_storage_type,
+                partition_compression_mixed = v_partition_compression_mix,
+                compression_details = v_compression_info,
                 analysis_date = SYSTIMESTAMP,
                 analysis_duration_seconds = v_duration_seconds
         WHEN NOT MATCHED THEN
@@ -4164,6 +4188,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 partition_boundary_max_date,
                 partition_range_years,
                 partition_boundary_recommendation,
+                existing_compression,
+                existing_compress_for,
+                storage_type,
+                partition_compression_mixed,
+                compression_details,
                 analysis_date,
                 analysis_duration_seconds
             ) VALUES (
@@ -4215,6 +4244,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 v_boundary_max_date,
                 v_boundary_range_years,
                 v_boundary_recommendation,
+                v_existing_compression,
+                v_existing_compress_for,
+                v_storage_type,
+                v_partition_compression_mix,
+                v_compression_info,
                 SYSTIMESTAMP,
                 v_duration_seconds
             );
