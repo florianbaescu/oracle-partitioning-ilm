@@ -473,13 +473,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
             -- Check if column has time component (not all midnight)
             -- Sample: check if any non-midnight times exist
-            v_sql := 'SELECT COUNT(*) FROM (' ||
+            v_sql := 'SELECT /*+ NO_MERGE(b) */ COUNT(*) FROM (' ||
                     '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || p_column_name ||
                     '  FROM ' || p_owner || '.' || p_table_name ||
                     '  WHERE ' || p_column_name || ' IS NOT NULL' ||
                     '    AND ' || p_column_name || ' != TRUNC(' || p_column_name || ')' ||
-                    '  FETCH FIRST 1 ROW ONLY' ||
-                    ')';
+                    ') b' ||
+                    ' FETCH FIRST 1 ROW ONLY';
 
             EXECUTE IMMEDIATE v_sql INTO v_time_sample;
 
@@ -643,12 +643,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Check for time component (only for DATE columns)
         IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN
-            v_sql := 'SELECT COUNT(*) FROM (' ||
+            v_sql := 'SELECT /*+ NO_MERGE(b) */ COUNT(*) FROM (' ||
                     '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || p_column_name ||
                     '  FROM ' || p_owner || '.' || p_table_name ||
                     '  WHERE ' || p_column_name || ' IS NOT NULL' ||
                     '  AND TO_CHAR(' || p_column_name || ', ''HH24:MI:SS'') != ''00:00:00''' ||
-                    '  FETCH FIRST 100 ROWS ONLY)';
+                    ') b' ||
+                    ' FETCH FIRST 100 ROWS ONLY';
             BEGIN
                 EXECUTE IMMEDIATE v_sql INTO v_total_count;
                 IF v_total_count > 0 THEN
@@ -873,8 +874,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         ) LOOP
             -- Sample 10 rows to validate format (no NOT NULL filter - fast, no full scan)
             BEGIN
-                v_sql := 'SELECT ' || rec.column_name ||
-                         ' FROM ' || p_owner || '.' || p_table_name ||
+                v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                         '  SELECT ' || rec.column_name ||
+                         '  FROM ' || p_owner || '.' || p_table_name ||
+                         ') b' ||
                          ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ' ROWS ONLY';
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
@@ -1011,8 +1014,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         ) LOOP
             -- Sample values to validate format (Stage 1: no IS NOT NULL filter)
             BEGIN
-                v_sql := 'SELECT ' || rec.column_name ||
-                         ' FROM ' || p_owner || '.' || p_table_name ||
+                v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                         '  SELECT ' || rec.column_name ||
+                         '  FROM ' || p_owner || '.' || p_table_name ||
+                         ') b' ||
                          ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ' ROWS ONLY';
 
                 EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
@@ -1213,8 +1218,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('  Sampling NUMBER column (no name pattern): ' || rec.column_name);
 
                     -- Sample values (Stage 1: no IS NOT NULL filter)
-                    v_sql := 'SELECT ' || rec.column_name ||
-                             ' FROM ' || p_owner || '.' || p_table_name ||
+                    v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                             '  SELECT ' || rec.column_name ||
+                             '  FROM ' || p_owner || '.' || p_table_name ||
+                             ') b' ||
                              ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ' ROWS ONLY';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_number_samples;
@@ -1314,8 +1321,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('  Sampling VARCHAR column (no name pattern): ' || rec.column_name);
 
                     -- Sample values (Stage 1: no IS NOT NULL filter)
-                    v_sql := 'SELECT ' || rec.column_name ||
-                             ' FROM ' || p_owner || '.' || p_table_name ||
+                    v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                             '  SELECT ' || rec.column_name ||
+                             '  FROM ' || p_owner || '.' || p_table_name ||
+                             ') b' ||
                              ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage1_sample_size || ' ROWS ONLY';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_varchar_samples;
@@ -1478,9 +1487,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('  Stage 2 sampling NUMBER: ' || rec.column_name);
 
                     -- Sample with IS NOT NULL + parallel hint (may trigger full scan)
-                    v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
-                             ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL' ||
+                    v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                             '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
+                             '  FROM ' || p_owner || '.' || p_table_name ||
+                             '  WHERE ' || rec.column_name || ' IS NOT NULL' ||
+                             ') b' ||
                              ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage2_sample_size || ' ROWS ONLY';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
@@ -1594,9 +1605,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     DBMS_OUTPUT.PUT_LINE('  Stage 2 sampling VARCHAR: ' || rec.column_name);
 
                     -- Sample with IS NOT NULL + parallel hint
-                    v_sql := 'SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
-                             ' FROM ' || p_owner || '.' || p_table_name ||
-                             ' WHERE ' || rec.column_name || ' IS NOT NULL' ||
+                    v_sql := 'SELECT /*+ NO_MERGE(b) */ b.* FROM (' ||
+                             '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || rec.column_name ||
+                             '  FROM ' || p_owner || '.' || p_table_name ||
+                             '  WHERE ' || rec.column_name || ' IS NOT NULL' ||
+                             ') b' ||
                              ' FETCH FIRST ' || pck_dwh_table_migration_analyzer.c_stage2_sample_size || ' ROWS ONLY';
 
                     EXECUTE IMMEDIATE v_sql BULK COLLECT INTO v_samples;
@@ -2236,14 +2249,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         IF v_num_rows > 10000000 THEN
             -- Find primary key or first indexed column
             BEGIN
-                SELECT cc.column_name INTO v_best_column
-                FROM dba_constraints c
-                JOIN dba_cons_columns cc
-                    ON cc.owner = c.owner
-                    AND cc.constraint_name = c.constraint_name
-                WHERE c.owner = p_owner
-                AND c.table_name = p_table_name
-                AND c.constraint_type = 'P'
+                SELECT /*+ NO_MERGE(b) */ b.column_name INTO v_best_column
+                FROM (
+                    SELECT cc.column_name
+                    FROM dba_constraints c
+                    JOIN dba_cons_columns cc
+                        ON cc.owner = c.owner
+                        AND cc.constraint_name = c.constraint_name
+                    WHERE c.owner = p_owner
+                    AND c.table_name = p_table_name
+                    AND c.constraint_type = 'P'
+                ) b
                 FETCH FIRST 1 ROW ONLY;
 
                 v_strategy := 'HASH(' || v_best_column || ') PARTITIONS 16';
@@ -2946,7 +2962,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
         -- Verify table access early
         BEGIN
-            EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ' || v_task.source_owner || '.' || v_task.source_table || ' FETCH FIRST 1 ROW ONLY' INTO v_error_count;
+            EXECUTE IMMEDIATE 'SELECT /*+ NO_MERGE(b) */ COUNT(*) FROM (' ||
+                             '  SELECT 1 FROM ' || v_task.source_owner || '.' || v_task.source_table ||
+                             ') b FETCH FIRST 1 ROW ONLY' INTO v_error_count;
         EXCEPTION
             WHEN OTHERS THEN
                 v_error_count := v_error_count + 1;
