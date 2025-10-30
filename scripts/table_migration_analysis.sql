@@ -153,7 +153,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         FROM dba_tab_columns
         WHERE owner = p_owner
         AND table_name = p_table_name
-        AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+        AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
         ORDER BY column_id;
 
         RETURN v_columns;
@@ -184,7 +184,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         AND table_name = p_table_name
         AND (
             -- Standard date types
-            data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             OR
             -- NUMBER columns with date-like names
             (data_type = 'NUMBER' AND (
@@ -213,8 +213,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 WHEN 'DATE' THEN 1
                 WHEN 'TIMESTAMP' THEN 2
                 WHEN 'TIMESTAMP(6)' THEN 3
-                WHEN 'NUMBER' THEN 4
-                ELSE 5
+                WHEN 'TIMESTAMP(9)' THEN 4
+                WHEN 'NUMBER' THEN 5
+                ELSE 6
             END,
             column_id;
 
@@ -593,7 +594,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_has_time_component := 'N';
 
         -- Build column expression based on data type
-        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN
+        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN
             v_column_expr := p_column_name;
         ELSE
             -- For NUMBER/VARCHAR, use conversion expression
@@ -641,7 +642,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_range_days := ROUND(p_max_date - p_min_date, 4);
 
         -- Check for time component (only for DATE columns)
-        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN
+        IF p_data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN
             v_sql := 'SELECT COUNT(*) FROM (' ||
                     '  SELECT /*+ PARALLEL(' || p_parallel_degree || ') */ ' || p_column_name ||
                     '  FROM ' || p_owner || '.' || p_table_name ||
@@ -722,7 +723,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE owner = p_owner
             AND table_name = p_table_name
             AND UPPER(column_name) IN ('VALID_FROM_DTTM', 'VALID_FROM', 'VALID_FROM_DATE', 'START_DTTM', 'BEGIN_DTTM', 'VALID_ON', 'DATA_MODIF')
-            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             FETCH FIRST 1 ROW ONLY
         );
 
@@ -732,7 +733,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE owner = p_owner
             AND table_name = p_table_name
             AND UPPER(column_name) IN ('VALID_TO_DTTM', 'VALID_TO', 'VALID_TO_DATE', 'END_DTTM', 'EXPIRY_DTTM')
-            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             FETCH FIRST 1 ROW ONLY
         );
 
@@ -758,7 +759,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE owner = p_owner
             AND table_name = p_table_name
             AND UPPER(column_name) IN ('VALID_TO_DTTM', 'VALID_TO', 'VALID_TO_DATE', 'END_DTTM', 'EXPIRY_DTTM')
-            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             FETCH FIRST 1 ROW ONLY;
             RETURN TRUE;
         END IF;
@@ -802,7 +803,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 AND table_name = p_table_name
                 AND UPPER(column_name) IN ('EVENT_DTTM', 'EVENT_TIMESTAMP', 'EVENT_DATE', 'AUDIT_DTTM', 'CAPTURE_DTTM', 'INGESTION_DTTM',
                                             'CREATED_DTTM', 'INSERT_DTTM', 'TRN_DT', 'TXN_DATE', 'TRANSACTION_DATE', 'DATA_TRANZACTIEI', 'LOG_DATE')
-                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
                 ORDER BY
                     CASE UPPER(column_name)
                         WHEN 'EVENT_DTTM' THEN 1
@@ -1720,7 +1721,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             FROM dba_tab_columns
             WHERE owner = p_owner
             AND table_name = p_table_name
-            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+            AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
             ORDER BY column_id
         ) LOOP
             p_column_names.EXTEND;
@@ -1799,7 +1800,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 FROM dba_tab_columns
                 WHERE owner = p_owner
                 AND table_name = p_table_name
-                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)');
 
                 -- Only run Stage 2 if NO DATE columns found
                 IF v_date_count = 0 THEN
@@ -1879,7 +1880,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 AND table_name = p_table_name
                 AND UPPER(column_name) IN ('LOAD_DTTM', 'LOAD_DATE', 'LOAD_TIMESTAMP', 'INSERT_DTTM', 'CREATED_DTTM', 'INGESTION_DTTM', 'CAPTURE_DTTM',
                                             'EXTRACTDATE', 'EXTRCT_DATE', 'RUN_DATE', 'PURGE_DATE', 'VAL_DT')
-                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
                 ORDER BY
                     CASE UPPER(column_name)
                         WHEN 'LOAD_DTTM' THEN 1
@@ -1935,7 +1936,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     OR UPPER(column_name) LIKE 'HISTORY_%DATE%'
                     OR UPPER(column_name) LIKE 'SNAPSHOT_%'
                 )
-                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+                AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
                 ORDER BY
                     CASE UPPER(column_name)
                         WHEN 'HIST_DATE' THEN 1
@@ -1960,7 +1961,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         FROM dba_tab_columns
                         WHERE owner = p_owner
                         AND table_name = p_table_name
-                        AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)')
+                        AND data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)')
                         ORDER BY column_id
                         FETCH FIRST 1 ROW ONLY;
 
@@ -2736,7 +2737,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE pkc.owner = p_owner
             AND pkc.name = p_table_name
             AND pkc.object_type = 'TABLE'
-            AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+            AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)');
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 v_date_partition_cols := NULL;
@@ -2754,7 +2755,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
             WHERE pkc.owner = p_owner
             AND pkc.name = p_table_name
             AND pkc.object_type = 'TABLE'
-            AND tc.data_type NOT IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+            AND tc.data_type NOT IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)');
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 v_non_date_partition_cols := NULL;
@@ -2778,7 +2779,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                 WHERE spkc.owner = p_owner
                 AND spkc.name = p_table_name
                 AND spkc.object_type = 'TABLE'
-                AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)');
+                AND tc.data_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)');
             EXCEPTION
                 WHEN NO_DATA_FOUND THEN
                     v_subpartition_key_is_date := 'N';
@@ -3365,7 +3366,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             v_selected_null_pct := v_null_percentage;
                             v_selected_has_time := v_has_time_component;
                             v_best_has_quality_issue := v_data_quality_issue;
-                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN 'N' ELSE 'Y' END;
                             v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
                         ELSIF (
                             -- Case 1: Current has no data quality issue, best has issue -> always select current
@@ -3401,7 +3402,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             v_selected_null_pct := v_null_percentage;
                             v_selected_has_time := v_has_time_component;
                             v_best_has_quality_issue := v_data_quality_issue;
-                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN 'N' ELSE 'Y' END;
                             v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
                         END IF;
                     END IF;
@@ -3417,7 +3418,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                             v_date_column := v_stereotype_column;
                             v_date_type := v_all_data_types(i);
                             v_date_format := NVL(v_all_date_formats(i), v_stereotype_type);
-                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') THEN 'N' ELSE 'Y' END;
+                            v_requires_conversion := CASE WHEN v_all_data_types(i) IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') THEN 'N' ELSE 'Y' END;
                             v_conversion_expr := get_date_conversion_expr(v_all_column_names(i), v_all_data_types(i), v_all_date_formats(i));
                             EXIT;
                         END IF;
@@ -3642,7 +3643,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_null_strategy := 'UPDATE';
                         v_null_reason := 'Low NULL percentage (<= 5%) - recommend updating to default value for data quality';
                         -- Get appropriate default value based on column type
-                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL THEN
+                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') OR v_date_column IS NOT NULL THEN
                             v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_DATE');
                         ELSIF v_date_type LIKE 'VARCHAR%' OR v_date_type LIKE 'CHAR%' THEN
                             v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_VARCHAR');
@@ -3662,7 +3663,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                     -- Use configured strategy
                     v_null_strategy := UPPER(v_config_strategy);
                     IF v_null_strategy = 'UPDATE' THEN
-                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL THEN
+                        IF v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') OR v_date_column IS NOT NULL THEN
                             v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_DATE');
                         ELSIF v_date_type LIKE 'VARCHAR%' OR v_date_type LIKE 'CHAR%' THEN
                             v_null_default_value := get_dwh_ilm_config('NULL_DEFAULT_VARCHAR');
@@ -3684,7 +3685,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
 
                 -- Query actual MIN/MAX dates (excluding NULLs) for partition boundary calculation
                 -- This prevents ORA-14300 when initial partition is set incorrectly
-                IF (v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)') OR v_date_column IS NOT NULL) THEN
+                IF (v_date_type IN ('DATE', 'TIMESTAMP', 'TIMESTAMP(6)', 'TIMESTAMP(9)') OR v_date_column IS NOT NULL) THEN
                     DECLARE
                         v_conversion_column VARCHAR2(500);
                     BEGIN
