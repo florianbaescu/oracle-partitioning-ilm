@@ -4,6 +4,70 @@ All notable changes to the Oracle Custom ILM Framework project.
 
 ---
 
+## [3.2.0] - 2025-11-10
+
+**Threshold Alignment Release: Updated to 24m/60m Standard**
+
+### Changed
+
+- **Updated DEFAULT Threshold Profile** - Aligned with test script and template expectations
+  - `hot_threshold_days`: 90 → **730** (24 months / 2 years)
+  - `warm_threshold_days`: 365 → **1825** (60 months / 5 years)
+  - `cold_threshold_days`: 1095 → **1825** (60 months / 5 years)
+  - **Rationale**: Matches tiered partitioning templates (HOT=0-24m, WARM=24-60m, COLD=>60m)
+
+- **Updated All ILM Policy Templates** - Consistent tier thresholds across templates
+  - FACT_TABLE_STANDARD: WARM 12m→24m, COLD 36m→60m
+  - SCD2_EFFECTIVE_DATE: Compress 365d→24m, COLD 36m→60m
+  - SCD2_VALID_FROM_TO: Compress 365d→24m, COLD 36m→60m
+  - EVENTS_COMPLIANCE: WARM 12m→24m, COLD 36m→60m
+  - HIST_MONTHLY: COLD 12m→24m
+  - HIST_YEARLY: Added WARM 24m, COLD 36m→60m
+  - HIST_COMPLIANCE: READ_ONLY 36m→24m
+  - Added PCTFREE values to all templates (HOT=10, WARM=5, COLD=0)
+
+- **Updated Other Threshold Profiles**
+  - FAST_AGING: HOT 30d→90d (3m), WARM 90d→365d (12m), COLD 180d→365d (12m)
+  - SLOW_AGING: HOT 180d→1095d (36m), WARM 730d→2555d (84m), COLD 1825d→2555d (84m)
+  - AGGRESSIVE_ARCHIVE: HOT 14d→30d, WARM/COLD remain at 90d
+
+### Fixed
+
+- **Reserved Word Issue** - Renamed `pctfree` column to `pct_free` in `dwh_ilm_policies`
+  - Oracle error: PCTFREE is reserved and cannot be used as column name
+  - Column: `pctfree` → `pct_free`
+  - Parameter names remain `p_pctfree` (allowed for parameters)
+  - JSON fields remain `"pctfree"` (allowed in JSON)
+
+- **View Naming Convention** - Standardized all view references to `v_dwh_*` pattern
+  - Changed: `dwh_v_migration_candidates` → `v_dwh_migration_candidates`
+  - Changed: `dwh_v_ilm_*` → `v_dwh_ilm_*` (15 views total)
+  - Updated: 8 files (README, docs, examples, scripts)
+
+### Benefits
+
+- ✅ **Consistent Thresholds** - All components use same aging boundaries (24m/60m)
+- ✅ **Test Alignment** - Matches test_tiered_partitioning.sql expectations
+- ✅ **Template Alignment** - Non-tiered templates now match tiered templates
+- ✅ **Business Alignment** - 2-year HOT, 5-year WARM reflects typical retention needs
+- ✅ **Naming Consistency** - All views follow `v_dwh_*` convention
+
+### Migration Notes
+
+**Modifying Global Thresholds (v3.2.0+):**
+```sql
+-- Update DEFAULT profile to change global thresholds
+UPDATE cmr.dwh_ilm_threshold_profiles
+SET hot_threshold_days = 730,   -- 24 months
+    warm_threshold_days = 1825, -- 60 months
+    cold_threshold_days = 1825  -- 60 months
+WHERE profile_name = 'DEFAULT';
+```
+
+**Note**: HOT/WARM/COLD thresholds were moved from `dwh_ilm_config` to `dwh_ilm_threshold_profiles` in v3.1.1. If upgrading from v3.1 or earlier, see v3.1.1 migration notes below.
+
+---
+
 ## [3.1.1] - 2025-10-23
 
 **Refactoring Release: DEFAULT Profile as Single Source of Truth**
