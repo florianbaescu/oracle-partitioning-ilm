@@ -957,14 +957,14 @@ DROP VIEW v_ilm_execution_stats;
 DROP VIEW v_ilm_partition_temperature;
 DROP VIEW v_ilm_scheduler_status;
 DROP VIEW v_ilm_job_history;
-DROP VIEW dwh_v_ilm_policy_summary;
-DROP VIEW dwh_v_ilm_upcoming_actions;
-DROP VIEW dwh_v_ilm_space_savings;
-DROP VIEW dwh_v_ilm_execution_history;
-DROP VIEW dwh_v_migration_dashboard;
-DROP VIEW dwh_v_migration_task_status;
-DROP VIEW dwh_v_migration_candidates;
-DROP VIEW dwh_v_date_column_analysis;
+DROP VIEW v_dwh_ilm_policy_summary;
+DROP VIEW v_dwh_ilm_upcoming_actions;
+DROP VIEW v_dwh_ilm_space_savings;
+DROP VIEW v_dwh_ilm_execution_history;
+DROP VIEW v_dwh_migration_dashboard;
+DROP VIEW v_dwh_migration_task_status;
+DROP VIEW v_dwh_migration_candidates;
+DROP VIEW v_dwh_date_column_analysis;
 
 -- Step 6: Drop tables (⚠ DATA LOSS!)
 DROP TABLE cmr.dwh_ilm_evaluation_queue PURGE;
@@ -1082,7 +1082,7 @@ WHERE log_date > SYSDATE - 7
 ORDER BY log_date DESC;
 
 -- Check policy effectiveness
-SELECT * FROM dwh_v_ilm_space_savings
+SELECT * FROM v_dwh_ilm_space_savings
 WHERE execution_date > TRUNC(SYSDATE - 30)
 ORDER BY execution_date DESC;
 ```

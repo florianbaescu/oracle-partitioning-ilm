@@ -254,7 +254,7 @@ Migrate non-partitioned tables to partitioned:
 Quick example (automatic workflow):
 ```sql
 -- 1. Identify candidates
-SELECT * FROM cmr.dwh_v_migration_candidates;
+SELECT * FROM cmr.v_dwh_migration_candidates;
 
 -- 2. Create migration task
 INSERT INTO cmr.dwh_migration_tasks (task_name, source_table, migration_method)

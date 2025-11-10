@@ -908,7 +908,7 @@ JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE a.all_date_columns_analysis IS NOT NULL
 ORDER BY a.analysis_date DESC;
 
-COMMENT ON TABLE cmr.dwh_v_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
+COMMENT ON TABLE cmr.v_dwh_date_column_analysis IS 'Comprehensive date column analysis for migration tasks';
 
 
 -- =============================================================================
@@ -1096,6 +1096,6 @@ PROMPT
 PROMPT Next Steps:
 PROMPT 1. Install analysis package: @scripts/table_dwh_migration_analysis.sql
 PROMPT 2. Install execution package: @scripts/table_migration_execution.sql
-PROMPT 3. View candidates: SELECT * FROM cmr.dwh_v_migration_candidates;
+PROMPT 3. View candidates: SELECT * FROM cmr.v_dwh_migration_candidates;
 PROMPT
 PROMPT ========================================

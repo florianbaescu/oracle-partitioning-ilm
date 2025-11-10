@@ -1502,7 +1502,7 @@ END;
 -- -----------------------------------------------------------------------------
 
 -- Get complete system performance snapshot
-SELECT * FROM dwh_v_ilm_performance_dashboard;
+SELECT * FROM v_dwh_ilm_performance_dashboard;
 
 /*
 Sample Output:
@@ -1526,7 +1526,7 @@ AVG_COMPRESSION_RATIO_7DAYS: 3.2
 -- -----------------------------------------------------------------------------
 
 -- Check overall ILM health status with threshold-based alerts
-SELECT * FROM dwh_v_ilm_alerting_metrics;
+SELECT * FROM v_dwh_ilm_alerting_metrics;
 
 /*
 Sample Output:
@@ -1551,28 +1551,28 @@ SELECT
     'Failure Rate' AS metric,
     failure_rate_24h_pct AS value,
     failure_rate_status AS status
-FROM dwh_v_ilm_alerting_metrics
+FROM v_dwh_ilm_alerting_metrics
 WHERE failure_rate_status IN ('WARNING', 'CRITICAL')
 UNION ALL
 SELECT
     'Queue Backlog' AS metric,
     pending_queue_count AS value,
     queue_status AS status
-FROM dwh_v_ilm_alerting_metrics
+FROM v_dwh_ilm_alerting_metrics
 WHERE queue_status IN ('WARNING', 'CRITICAL')
 UNION ALL
 SELECT
     'Compression Ratio' AS metric,
     avg_compression_ratio_7d AS value,
     compression_status AS status
-FROM dwh_v_ilm_alerting_metrics
+FROM v_dwh_ilm_alerting_metrics
 WHERE compression_status IN ('WARNING', 'CRITICAL')
 UNION ALL
 SELECT
     'Execution Lag' AS metric,
     overdue_actions_count AS value,
     execution_lag_status AS status
-FROM dwh_v_ilm_alerting_metrics
+FROM v_dwh_ilm_alerting_metrics
 WHERE execution_lag_status IN ('WARNING', 'CRITICAL');
 
 
@@ -1590,7 +1590,7 @@ SELECT
     avg_execution_time_min,
     space_saved_per_hour_gb,
     effectiveness_rating
-FROM dwh_v_ilm_policy_effectiveness
+FROM v_dwh_ilm_policy_effectiveness
 WHERE total_executions > 0
 ORDER BY space_saved_per_hour_gb DESC NULLS LAST
 FETCH FIRST 10 ROWS ONLY;
@@ -1604,7 +1604,7 @@ SELECT
     failed_executions,
     effectiveness_rating,
     days_since_last_execution
-FROM dwh_v_ilm_policy_effectiveness
+FROM v_dwh_ilm_policy_effectiveness
 WHERE effectiveness_rating IN ('POOR', 'FAIR', 'NOT_EXECUTED', 'SLOW')
 OR days_since_last_execution > 7
 ORDER BY
@@ -1627,7 +1627,7 @@ SELECT
     SUM(CASE WHEN effectiveness_rating = 'EXCELLENT' THEN 1 ELSE 0 END) AS excellent_policies,
     SUM(CASE WHEN effectiveness_rating = 'GOOD' THEN 1 ELSE 0 END) AS good_policies,
     SUM(CASE WHEN effectiveness_rating IN ('POOR', 'FAIR', 'SLOW') THEN 1 ELSE 0 END) AS problem_policies
-FROM dwh_v_ilm_policy_effectiveness;
+FROM v_dwh_ilm_policy_effectiveness;
 
 
 -- -----------------------------------------------------------------------------
@@ -1648,7 +1648,7 @@ SELECT
     compress_actions,
     move_actions,
     drop_actions
-FROM dwh_v_ilm_resource_trends
+FROM v_dwh_ilm_resource_trends
 WHERE execution_date > SYSDATE - 30
 ORDER BY execution_date DESC;
 
@@ -1661,7 +1661,7 @@ SELECT
     ROUND(AVG(avg_compression_ratio), 2) AS avg_compression_ratio,
     SUM(total_execution_hours) AS weekly_execution_hours,
     ROUND(AVG(gb_saved_per_hour), 2) AS avg_efficiency_gb_per_hour
-FROM dwh_v_ilm_resource_trends
+FROM v_dwh_ilm_resource_trends
 WHERE execution_date > SYSDATE - 90
 GROUP BY year_week
 ORDER BY year_week DESC;
@@ -1680,7 +1680,7 @@ SELECT
     SUM(move_actions) AS move_operations,
     SUM(drop_actions) AS drop_operations,
     SUM(custom_actions) AS custom_operations
-FROM dwh_v_ilm_resource_trends
+FROM v_dwh_ilm_resource_trends
 GROUP BY year_month
 ORDER BY year_month DESC
 FETCH FIRST 12 ROWS ONLY;
@@ -1694,7 +1694,7 @@ FROM (
     SELECT
         year_month,
         SUM(space_saved_gb) AS monthly_space_saved
-    FROM dwh_v_ilm_resource_trends
+    FROM v_dwh_ilm_resource_trends
     WHERE execution_date > ADD_MONTHS(SYSDATE, -3)
     GROUP BY year_month
 );
@@ -1713,7 +1713,7 @@ SELECT
     MAX(last_failure) AS most_recent_failure,
     ROUND(AVG(avg_duration_before_failure_sec) / 60, 2) AS avg_time_to_failure_min,
     MIN(recommended_action) AS action_to_take
-FROM dwh_v_ilm_failure_analysis
+FROM v_dwh_ilm_failure_analysis
 GROUP BY error_category
 ORDER BY total_failures DESC;
 
@@ -1728,7 +1728,7 @@ SELECT
     last_failure,
     sample_error_message,
     recommended_action
-FROM dwh_v_ilm_failure_analysis
+FROM v_dwh_ilm_failure_analysis
 WHERE error_category = 'Resource Busy (Lock Conflict)'
 ORDER BY failure_count DESC, last_failure DESC;
 
@@ -1740,7 +1740,7 @@ SELECT
     SUM(failure_count) AS total_failures,
     MAX(last_failure) AS most_recent_failure,
     LISTAGG(DISTINCT error_category, ', ') WITHIN GROUP (ORDER BY error_category) AS error_categories
-FROM dwh_v_ilm_failure_analysis
+FROM v_dwh_ilm_failure_analysis
 GROUP BY table_owner, table_name
 HAVING SUM(failure_count) > 5
 ORDER BY total_failures DESC;
@@ -1750,7 +1750,7 @@ SELECT
     'Table: ' || table_owner || '.' || table_name AS affected_object,
     'Error: ' || error_category AS issue,
     'Action: ' || recommended_action AS fix
-FROM dwh_v_ilm_failure_analysis
+FROM v_dwh_ilm_failure_analysis
 WHERE error_category IN ('Insufficient Privileges', 'Tablespace Full', 'Index Not Partitioned')
 ORDER BY failure_count DESC;
 
@@ -1774,7 +1774,7 @@ SELECT
     pending_actions,
     lifecycle_status,
     recommendation
-FROM dwh_v_ilm_table_overview
+FROM v_dwh_ilm_table_overview
 ORDER BY
     CASE lifecycle_status
         WHEN 'NO_ILM_POLICIES' THEN 1
@@ -1795,7 +1795,7 @@ SELECT
     warm_partitions,
     cold_partitions,
     recommendation
-FROM dwh_v_ilm_table_overview
+FROM v_dwh_ilm_table_overview
 WHERE lifecycle_status = 'NO_ILM_POLICIES'
 AND total_table_size_gb > 10  -- Focus on tables larger than 10 GB
 ORDER BY total_table_size_gb DESC;
@@ -1811,7 +1811,7 @@ SELECT
     ROUND((cold_partitions / NULLIF(partition_count, 0)) * 100, 1) AS cold_pct,
     active_policies_count,
     recommendation
-FROM dwh_v_ilm_table_overview
+FROM v_dwh_ilm_table_overview
 WHERE cold_partitions > partition_count * 0.3  -- >30% COLD
 ORDER BY cold_pct DESC;
 
@@ -1829,7 +1829,7 @@ SELECT
     SUM(pending_actions) AS total_pending_actions,
     SUM(CASE WHEN lifecycle_status = 'ACTIVE' THEN 1 ELSE 0 END) AS healthy_tables,
     SUM(CASE WHEN lifecycle_status IN ('NO_ILM_POLICIES', 'NEVER_EXECUTED', 'STALE', 'HIGH_FAILURE_RATE') THEN 1 ELSE 0 END) AS problematic_tables
-FROM dwh_v_ilm_table_overview;
+FROM v_dwh_ilm_table_overview;
 
 
 -- -----------------------------------------------------------------------------
@@ -1839,31 +1839,31 @@ FROM dwh_v_ilm_table_overview;
 -- Single query for executive dashboard (high-level KPIs)
 SELECT
     -- System Health
-    (SELECT overall_health_status FROM dwh_v_ilm_alerting_metrics) AS system_health,
+    (SELECT overall_health_status FROM v_dwh_ilm_alerting_metrics) AS system_health,
     -- Active Policies
-    (SELECT active_policies_count FROM dwh_v_ilm_performance_dashboard) AS active_policies,
+    (SELECT active_policies_count FROM v_dwh_ilm_performance_dashboard) AS active_policies,
     -- Today's Activity
-    (SELECT actions_today_success FROM dwh_v_ilm_performance_dashboard) AS actions_today,
-    (SELECT space_saved_today_gb FROM dwh_v_ilm_performance_dashboard) AS space_saved_today_gb,
+    (SELECT actions_today_success FROM v_dwh_ilm_performance_dashboard) AS actions_today,
+    (SELECT space_saved_today_gb FROM v_dwh_ilm_performance_dashboard) AS space_saved_today_gb,
     -- Last 7 Days
-    (SELECT actions_7days_success FROM dwh_v_ilm_performance_dashboard) AS actions_7days,
-    (SELECT space_saved_7days_gb FROM dwh_v_ilm_performance_dashboard) AS space_saved_7days_gb,
-    (SELECT ROUND(avg_compression_ratio_7days, 2) FROM dwh_v_ilm_performance_dashboard) AS avg_compression_7days,
+    (SELECT actions_7days_success FROM v_dwh_ilm_performance_dashboard) AS actions_7days,
+    (SELECT space_saved_7days_gb FROM v_dwh_ilm_performance_dashboard) AS space_saved_7days_gb,
+    (SELECT ROUND(avg_compression_ratio_7days, 2) FROM v_dwh_ilm_performance_dashboard) AS avg_compression_7days,
     -- Last 30 Days
-    (SELECT space_saved_30days_gb FROM dwh_v_ilm_performance_dashboard) AS space_saved_30days_gb,
+    (SELECT space_saved_30days_gb FROM v_dwh_ilm_performance_dashboard) AS space_saved_30days_gb,
     -- Pending Work
-    (SELECT pending_actions_count FROM dwh_v_ilm_performance_dashboard) AS pending_actions,
-    (SELECT running_actions_count FROM dwh_v_ilm_performance_dashboard) AS running_actions,
+    (SELECT pending_actions_count FROM v_dwh_ilm_performance_dashboard) AS pending_actions,
+    (SELECT running_actions_count FROM v_dwh_ilm_performance_dashboard) AS running_actions,
     -- Failures
-    (SELECT failures_count_24h FROM dwh_v_ilm_alerting_metrics) AS failures_24h,
-    (SELECT failure_rate_24h_pct FROM dwh_v_ilm_alerting_metrics) AS failure_rate_pct,
+    (SELECT failures_count_24h FROM v_dwh_ilm_alerting_metrics) AS failures_24h,
+    (SELECT failure_rate_24h_pct FROM v_dwh_ilm_alerting_metrics) AS failure_rate_pct,
     -- Temperature Distribution
-    (SELECT partitions_hot FROM dwh_v_ilm_performance_dashboard) AS partitions_hot,
-    (SELECT partitions_warm FROM dwh_v_ilm_performance_dashboard) AS partitions_warm,
-    (SELECT partitions_cold FROM dwh_v_ilm_performance_dashboard) AS partitions_cold,
+    (SELECT partitions_hot FROM v_dwh_ilm_performance_dashboard) AS partitions_hot,
+    (SELECT partitions_warm FROM v_dwh_ilm_performance_dashboard) AS partitions_warm,
+    (SELECT partitions_cold FROM v_dwh_ilm_performance_dashboard) AS partitions_cold,
     -- Tables
-    (SELECT COUNT(*) FROM dwh_v_ilm_table_overview WHERE lifecycle_status = 'ACTIVE') AS healthy_tables,
-    (SELECT COUNT(*) FROM dwh_v_ilm_table_overview WHERE lifecycle_status != 'ACTIVE') AS problematic_tables,
+    (SELECT COUNT(*) FROM v_dwh_ilm_table_overview WHERE lifecycle_status = 'ACTIVE') AS healthy_tables,
+    (SELECT COUNT(*) FROM v_dwh_ilm_table_overview WHERE lifecycle_status != 'ACTIVE') AS problematic_tables,
     -- Timestamp
     SYSTIMESTAMP AS report_timestamp
 FROM DUAL;
@@ -1887,7 +1887,7 @@ BEGIN
     -- Get current health metrics
     SELECT overall_health_status, failures_count_24h, pending_queue_count, stale_partitions_count
     INTO v_health, v_failures, v_queue, v_stale
-    FROM dwh_v_ilm_alerting_metrics;
+    FROM v_dwh_ilm_alerting_metrics;
 
     -- Build alert message if issues found
     IF v_health IN ('WARNING', 'CRITICAL') THEN
@@ -1937,7 +1937,7 @@ SELECT
     'System Health: ' || overall_health_status,
     NULL,
     NULL
-FROM dwh_v_ilm_alerting_metrics
+FROM v_dwh_ilm_alerting_metrics
 UNION ALL
 SELECT
     '=========================',
@@ -1955,25 +1955,25 @@ SELECT
     '  Successful Actions: ' || actions_today_success,
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Failed Actions: ' || actions_today_failed,
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Space Saved: ' || space_saved_today_gb || ' GB',
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Avg Duration: ' || avg_duration_today_min || ' min',
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '=========================',
@@ -1991,19 +1991,19 @@ SELECT
     '  Total Actions: ' || actions_7days_success,
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Space Saved: ' || space_saved_7days_gb || ' GB',
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Avg Compression: ' || avg_compression_ratio_7days || 'x',
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '=========================',
@@ -2021,13 +2021,13 @@ SELECT
     '  Pending Actions: ' || pending_actions_count,
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard
+FROM v_dwh_ilm_performance_dashboard
 UNION ALL
 SELECT
     '  Running Actions: ' || running_actions_count,
     NULL,
     NULL
-FROM dwh_v_ilm_performance_dashboard;
+FROM v_dwh_ilm_performance_dashboard;
 
 
 -- -----------------------------------------------------------------------------
@@ -2052,7 +2052,7 @@ SELECT
         WHEN p.max_execution_time_sec > p.avg_execution_time_sec * 3 THEN 'Investigate outlier executions'
         ELSE 'Performance acceptable'
     END AS optimization_suggestion
-FROM dwh_v_ilm_policy_effectiveness p
+FROM v_dwh_ilm_policy_effectiveness p
 WHERE p.total_executions > 0
 AND p.avg_execution_time_min > 15  -- Longer than 15 minutes average
 ORDER BY p.avg_execution_time_min DESC;

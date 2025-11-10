@@ -8,7 +8,7 @@
 -- =============================================================================
 
 -- View all non-partitioned tables that are good candidates
-SELECT * FROM cmr.dwh_v_migration_candidates
+SELECT * FROM cmr.v_dwh_migration_candidates
 WHERE migration_priority IN ('HIGH PRIORITY', 'MEDIUM PRIORITY')
 ORDER BY size_mb DESC;
 
@@ -21,7 +21,7 @@ SELECT
     num_constraints,
     migration_priority,
     recommendation_reason
-FROM cmr.dwh_v_migration_candidates
+FROM cmr.v_dwh_migration_candidates
 WHERE table_name = 'SALES_FACT_STAGING';
 
 
@@ -384,12 +384,12 @@ EXEC pck_dwh_table_migration_executor.execute_migration(1);  -- Replace 1 with a
 -- =============================================================================
 
 -- Example 13: View project dashboard
-SELECT * FROM cmr.dwh_v_migration_dashboard
+SELECT * FROM cmr.v_dwh_migration_dashboard
 ORDER BY created_date DESC;
 
 
 -- Example 14: View task status
-SELECT * FROM cmr.dwh_v_migration_task_status
+SELECT * FROM cmr.v_dwh_migration_task_status
 WHERE project_name = 'Q1_2024_TABLE_PARTITIONING'
 ORDER BY task_id;
 
@@ -657,7 +657,7 @@ END;
 -- =============================================================================
 
 -- Example 27: View all date columns analyzed for a table
-SELECT * FROM cmr.dwh_v_date_column_analysis
+SELECT * FROM cmr.v_dwh_date_column_analysis
 WHERE source_table = 'SALES_FACT';
 
 -- Example 28: Parse JSON to see all date columns for a specific task
@@ -667,7 +667,7 @@ SELECT
     primary_date_column,
     date_format_detected,
     JSON_QUERY(all_date_columns_analysis, '$[*]' WITH WRAPPER) AS all_columns_json
-FROM cmr.dwh_v_date_column_analysis
+FROM cmr.v_dwh_date_column_analysis
 WHERE task_id = 1;
 
 -- Example 29: Extract detailed date column info from JSON
@@ -676,7 +676,7 @@ SELECT
     a.task_name,
     a.source_table,
     jt.*
-FROM cmr.dwh_v_date_column_analysis a,
+FROM cmr.v_dwh_date_column_analysis a,
 JSON_TABLE(
     a.all_date_columns_analysis, '$[*]'
     COLUMNS (
@@ -699,7 +699,7 @@ SELECT
     primary_date_column,
     JSON_VALUE(all_date_columns_analysis, '$.size()') AS num_date_columns,
     all_date_columns_analysis
-FROM cmr.dwh_v_date_column_analysis
+FROM cmr.v_dwh_date_column_analysis
 WHERE JSON_VALUE(all_date_columns_analysis, '$.size()') > 1
 ORDER BY num_date_columns DESC;
 

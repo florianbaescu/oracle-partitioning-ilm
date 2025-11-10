@@ -31,7 +31,7 @@ This document explains the **complete end-to-end workflow** for migrating non-pa
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ STEP 3: Review Recommendations (OPTIONAL)                        │
-│ SELECT * FROM dwh_v_migration_task_status                        │
+│ SELECT * FROM v_dwh_migration_task_status                        │
 │ - Review recommended_strategy                                    │
 │ - Check complexity_score                                         │
 │ - Verify no blocking issues                                      │
@@ -240,7 +240,7 @@ The analyzer examines **ALL** date/timestamp columns and stores comprehensive an
 
 ```sql
 -- View all date columns analyzed
-SELECT * FROM cmr.dwh_v_date_column_analysis
+SELECT * FROM cmr.v_dwh_date_column_analysis
 WHERE task_id = 123;
 
 -- Parse JSON to see details
@@ -273,12 +273,12 @@ Automatically detects and converts:
 
 ### Dashboard View
 ```sql
-SELECT * FROM cmr.dwh_v_migration_dashboard;
+SELECT * FROM cmr.v_dwh_migration_dashboard;
 ```
 
 ### Task Status
 ```sql
-SELECT * FROM cmr.dwh_v_migration_task_status
+SELECT * FROM cmr.v_dwh_migration_task_status
 WHERE project_name = 'YOUR_PROJECT';
 ```
 

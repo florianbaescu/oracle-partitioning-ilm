@@ -541,10 +541,10 @@ PROMPT Example 7: ILM Monitoring Dashboard
 PROMPT ========================================
 
 PROMPT Query 1: Summary of ILM policies per table
-SELECT * FROM dwh_v_ilm_policy_summary ORDER BY pending_actions DESC;
+SELECT * FROM v_dwh_ilm_policy_summary ORDER BY pending_actions DESC;
 
 PROMPT Query 2: Upcoming ILM actions in next 30 days
-SELECT * FROM dwh_v_ilm_upcoming_actions WHERE urgency IN ('Overdue', 'Today', 'This Week');
+SELECT * FROM v_dwh_ilm_upcoming_actions WHERE urgency IN ('Overdue', 'Today', 'This Week');
 
 PROMPT Query 3: Partition lifecycle status
 SELECT
@@ -555,7 +555,7 @@ SELECT
     partition_age_days_from_highvalue,
     size_mb,
     compression
-FROM dwh_v_ilm_partition_lifecycle
+FROM v_dwh_ilm_partition_lifecycle
 WHERE table_name = 'SALES_FACT'
 ORDER BY partition_position;
 
@@ -567,7 +567,7 @@ SELECT
     partitions_processed,
     total_space_saved_mb,
     avg_compression_ratio
-FROM dwh_v_ilm_space_savings
+FROM v_dwh_ilm_space_savings
 WHERE table_name = 'SALES_FACT'
 AND execution_date > SYSDATE - 30
 ORDER BY execution_date DESC;
@@ -582,7 +582,7 @@ SELECT
     duration_minutes,
     space_saved_mb,
     performance_category
-FROM dwh_v_ilm_execution_history
+FROM v_dwh_ilm_execution_history
 WHERE table_name = 'SALES_FACT'
 ORDER BY execution_start DESC;
 

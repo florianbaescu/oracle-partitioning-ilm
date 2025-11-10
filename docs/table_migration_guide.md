@@ -91,7 +91,7 @@ AND object_type = 'PACKAGE';
 
 ```sql
 -- View tables suitable for partitioning
-SELECT * FROM cmr.dwh_v_migration_candidates
+SELECT * FROM cmr.v_dwh_migration_candidates
 WHERE migration_priority IN ('HIGH PRIORITY', 'MEDIUM PRIORITY')
 ORDER BY size_mb DESC;
 ```
