@@ -556,18 +556,21 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_hot_interval VARCHAR2(20);
         v_hot_tablespace VARCHAR2(128);
         v_hot_compression VARCHAR2(50);
+        v_hot_pctfree NUMBER;
 
         v_warm_months NUMBER;
         v_warm_days NUMBER;
         v_warm_interval VARCHAR2(20);
         v_warm_tablespace VARCHAR2(128);
         v_warm_compression VARCHAR2(50);
+        v_warm_pctfree NUMBER;
 
         v_cold_months NUMBER;
         v_cold_days NUMBER;
         v_cold_interval VARCHAR2(20);
         v_cold_tablespace VARCHAR2(128);
         v_cold_compression VARCHAR2(50);
+        v_cold_pctfree NUMBER;
 
         -- Date ranges
         v_min_date DATE;
@@ -677,6 +680,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_hot_interval := v_hot_config.get_string('interval');
         v_hot_tablespace := v_hot_config.get_string('tablespace');
         v_hot_compression := v_hot_config.get_string('compression');
+        -- Get PCTFREE from template or fallback to config default
+        IF v_hot_config.has('pctfree') THEN
+            v_hot_pctfree := v_hot_config.get_number('pctfree');
+        ELSE
+            v_hot_pctfree := NVL(TO_NUMBER(get_dwh_ilm_config('PCTFREE_HOT_TIER')), 10);
+        END IF;
 
         -- WARM tier (already retrieved during validation)
         IF v_warm_config.has('age_months') THEN
@@ -688,6 +697,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_warm_interval := v_warm_config.get_string('interval');
         v_warm_tablespace := v_warm_config.get_string('tablespace');
         v_warm_compression := v_warm_config.get_string('compression');
+        -- Get PCTFREE from template or fallback to config default
+        IF v_warm_config.has('pctfree') THEN
+            v_warm_pctfree := v_warm_config.get_number('pctfree');
+        ELSE
+            v_warm_pctfree := NVL(TO_NUMBER(get_dwh_ilm_config('PCTFREE_WARM_TIER')), 5);
+        END IF;
 
         -- COLD tier (already retrieved during validation)
         IF v_cold_config.has('age_months') AND NOT v_cold_config.get('age_months').is_null() THEN
@@ -699,6 +714,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_cold_interval := v_cold_config.get_string('interval');
         v_cold_tablespace := v_cold_config.get_string('tablespace');
         v_cold_compression := v_cold_config.get_string('compression');
+        -- Get PCTFREE from template or fallback to config default
+        IF v_cold_config.has('pctfree') THEN
+            v_cold_pctfree := v_cold_config.get_number('pctfree');
+        ELSE
+            v_cold_pctfree := NVL(TO_NUMBER(get_dwh_ilm_config('PCTFREE_COLD_TIER')), 0);
+        END IF;
 
         -- Calculate tier boundary dates
         IF v_hot_months IS NOT NULL THEN
@@ -774,6 +795,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
                     END IF;
 
+                    DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
                     DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                     v_cold_count := v_cold_count + 1;
                     v_partition_date := v_next_date;
@@ -793,6 +815,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
                     END IF;
 
+                    DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
                     DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                     v_cold_count := v_cold_count + 1;
                     v_partition_date := v_next_date;
@@ -819,6 +842,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
                     END IF;
 
+                    DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
                     DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                     v_cold_count := v_cold_count + 1;
                     v_partition_date := v_next_date;
@@ -853,6 +877,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
                 END IF;
 
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_warm_pctfree);
                 DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                 v_warm_count := v_warm_count + 1;
                 v_partition_date := v_next_date;
@@ -872,6 +897,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
                 END IF;
 
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_warm_pctfree);
                 DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                 v_warm_count := v_warm_count + 1;
                 v_partition_date := v_next_date;
@@ -900,6 +926,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
                 END IF;
 
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
                 DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                 v_hot_count := v_hot_count + 1;
                 v_partition_date := v_next_date;
@@ -919,6 +946,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
                 END IF;
 
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
                 DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                 v_hot_count := v_hot_count + 1;
                 v_partition_date := v_next_date;
@@ -938,6 +966,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
                 END IF;
 
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
                 DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
                 v_hot_count := v_hot_count + 1;
                 v_partition_date := v_next_date;
@@ -3307,6 +3336,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 jt.age_months,
                 jt.compression_type,
                 jt.target_tablespace,
+                jt.pctfree,
                 jt.priority,
                 jt.enabled
             FROM cmr.dwh_migration_ilm_templates t,
@@ -3319,6 +3349,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         age_months NUMBER PATH '$.age_months',
                         compression_type VARCHAR2(50) PATH '$.compression',
                         target_tablespace VARCHAR2(30) PATH '$.tablespace',
+                        pctfree NUMBER PATH '$.pctfree',
                         priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
                         enabled CHAR(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
                     )
@@ -3354,6 +3385,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         age_months,
                         compression_type,
                         target_tablespace,
+                        pctfree,
                         priority,
                         enabled,
                         created_by
@@ -3367,6 +3399,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         policy_rec.age_months,
                         policy_rec.compression_type,
                         policy_rec.target_tablespace,
+                        policy_rec.pctfree,
                         policy_rec.priority,
                         policy_rec.enabled,
                         USER || ' (Migration Task ' || p_task_id || ')'

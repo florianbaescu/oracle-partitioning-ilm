@@ -24,6 +24,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_table_name VARCHAR2,
         p_partition_name VARCHAR2,
         p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
         p_gather_stats BOOLEAN DEFAULT TRUE
     );
@@ -34,6 +35,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_partition_name VARCHAR2,
         p_target_tablespace VARCHAR2,
         p_compression_type VARCHAR2 DEFAULT NULL,
+        p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
         p_gather_stats BOOLEAN DEFAULT TRUE
     );
@@ -208,6 +210,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         p_table_name VARCHAR2,
         p_partition_name VARCHAR2,
         p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
         p_gather_stats BOOLEAN DEFAULT TRUE
     ) AS
@@ -222,8 +225,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
         v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
                 ' MOVE PARTITION ' || p_partition_name ||
-                ' COMPRESS FOR ' || p_compression_type ||
-                ' PARALLEL 4';
+                ' COMPRESS FOR ' || p_compression_type;
+
+        IF p_pctfree IS NOT NULL THEN
+            v_sql := v_sql || ' PCTFREE ' || p_pctfree;
+        END IF;
+
+        v_sql := v_sql || ' PARALLEL 4';
 
         EXECUTE IMMEDIATE v_sql;
 
@@ -251,11 +259,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         p_partition_name VARCHAR2,
         p_target_tablespace VARCHAR2,
         p_compression_type VARCHAR2 DEFAULT NULL,
+        p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
         p_gather_stats BOOLEAN DEFAULT TRUE
     ) AS
         v_sql VARCHAR2(4000);
         v_compression_clause VARCHAR2(100) := '';
+        v_pctfree_clause VARCHAR2(50) := '';
         v_size_before NUMBER;
         v_size_after NUMBER;
     BEGIN
@@ -269,10 +279,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             v_compression_clause := ' COMPRESS FOR ' || p_compression_type;
         END IF;
 
+        IF p_pctfree IS NOT NULL THEN
+            v_pctfree_clause := ' PCTFREE ' || p_pctfree;
+        END IF;
+
         v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
                 ' MOVE PARTITION ' || p_partition_name ||
                 ' TABLESPACE ' || p_target_tablespace ||
                 v_compression_clause ||
+                v_pctfree_clause ||
                 ' PARALLEL 4';
 
         EXECUTE IMMEDIATE v_sql;
@@ -409,6 +424,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                         v_queue.table_name,
                         v_queue.partition_name,
                         v_policy.compression_type,
+                        v_policy.pctfree,
                         (v_policy.rebuild_indexes = 'Y'),
                         (v_policy.gather_stats = 'Y')
                     );
@@ -420,6 +436,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                         v_queue.partition_name,
                         v_policy.target_tablespace,
                         v_policy.compression_type,
+                        v_policy.pctfree,
                         (v_policy.rebuild_indexes = 'Y'),
                         (v_policy.gather_stats = 'Y')
                     );

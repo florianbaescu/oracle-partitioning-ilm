@@ -634,7 +634,7 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'FACT_TABLE_STANDARD_TIERED',
-        'ILM-aware partitioning: HOT=2y monthly/TBS_HOT/no compression, WARM=2-5y yearly/TBS_WARM/BASIC, COLD=>5y yearly/TBS_COLD/OLTP',
+        'ILM-aware partitioning: HOT=2y monthly/TBS_HOT/no compression/PCTFREE 10, WARM=2-5y yearly/TBS_WARM/BASIC/PCTFREE 5, COLD=>5y yearly/TBS_COLD/OLTP/PCTFREE 0',
         'FACT',
         '{
             "tier_config": {
@@ -643,24 +643,27 @@ WHEN NOT MATCHED THEN
                     "age_months": 24,
                     "interval": "MONTHLY",
                     "tablespace": "TBS_HOT",
-                    "compression": "NONE"
+                    "compression": "NONE",
+                    "pctfree": 10
                 },
                 "warm": {
                     "age_months": 60,
                     "interval": "YEARLY",
                     "tablespace": "TBS_WARM",
-                    "compression": "BASIC"
+                    "compression": "BASIC",
+                    "pctfree": 5
                 },
                 "cold": {
                     "age_months": null,
                     "interval": "YEARLY",
                     "tablespace": "TBS_COLD",
-                    "compression": "OLTP"
+                    "compression": "OLTP",
+                    "pctfree": 0
                 }
             },
             "policies": [
-                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m (aligns with tier_config.hot.age_months)"},
-                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m (aligns with tier_config.warm.age_months)"}
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "pctfree": 5, "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m (aligns with tier_config.hot.age_months)"},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m (aligns with tier_config.warm.age_months)"}
             ]
         }'
     );
@@ -673,7 +676,7 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'EVENTS_SHORT_RETENTION_TIERED',
-        'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT, WARM=30d weekly/TBS_WARM/QUERY HIGH, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH',
+        'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT/PCTFREE 10, WARM=30d weekly/TBS_WARM/QUERY HIGH/PCTFREE 5, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH/PCTFREE 0',
         'EVENTS',
         '{
             "tier_config": {
@@ -682,24 +685,27 @@ WHEN NOT MATCHED THEN
                     "age_days": 7,
                     "interval": "DAILY",
                     "tablespace": "TBS_HOT",
-                    "compression": "NONE"
+                    "compression": "NONE",
+                    "pctfree": 10
                 },
                 "warm": {
                     "age_days": 30,
                     "interval": "WEEKLY",
                     "tablespace": "TBS_WARM",
-                    "compression": "QUERY HIGH"
+                    "compression": "QUERY HIGH",
+                    "pctfree": 5
                 },
                 "cold": {
                     "age_days": 90,
                     "interval": "MONTHLY",
                     "tablespace": "TBS_COLD",
-                    "compression": "ARCHIVE HIGH"
+                    "compression": "ARCHIVE HIGH",
+                    "pctfree": 0
                 }
             },
             "policies": [
-                {"policy_name": "{TABLE}_TIER_WARM", "age_days": 7, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
-                {"policy_name": "{TABLE}_TIER_COLD", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+                {"policy_name": "{TABLE}_TIER_WARM", "age_days": 7, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "pctfree": 5, "priority": 200},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "pctfree": 0, "priority": 300},
                 {"policy_name": "{TABLE}_PURGE", "age_days": 90, "action": "DROP", "priority": 900}
             ]
         }'
@@ -715,7 +721,7 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'SCD2_VALID_FROM_TO_TIERED',
-        'ILM-aware partitioning for SCD2: HOT=2y monthly/TBS_HOT, WARM=2-5y yearly/TBS_WARM/QUERY HIGH, COLD=>5y yearly/TBS_COLD/ARCHIVE HIGH (permanent)',
+        'ILM-aware partitioning for SCD2: HOT=2y monthly/TBS_HOT/PCTFREE 10, WARM=2-5y yearly/TBS_WARM/QUERY HIGH/PCTFREE 5, COLD=>5y yearly/TBS_COLD/ARCHIVE HIGH/PCTFREE 0 (permanent)',
         'SCD2',
         '{
             "tier_config": {
@@ -724,24 +730,27 @@ WHEN NOT MATCHED THEN
                     "age_months": 24,
                     "interval": "MONTHLY",
                     "tablespace": "TBS_HOT",
-                    "compression": "NONE"
+                    "compression": "NONE",
+                    "pctfree": 10
                 },
                 "warm": {
                     "age_months": 60,
                     "interval": "YEARLY",
                     "tablespace": "TBS_WARM",
-                    "compression": "QUERY HIGH"
+                    "compression": "QUERY HIGH",
+                    "pctfree": 5
                 },
                 "cold": {
                     "age_months": null,
                     "interval": "YEARLY",
                     "tablespace": "TBS_COLD",
-                    "compression": "ARCHIVE HIGH"
+                    "compression": "ARCHIVE HIGH",
+                    "pctfree": 0
                 }
             },
             "policies": [
-                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m"},
-                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m"},
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "pctfree": 5, "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m"},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "pctfree": 0, "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m"},
                 {"policy_name": "{TABLE}_READONLY", "age_months": 60, "action": "READ_ONLY", "priority": 400, "comment": "Ongoing: make partitions read-only at 60m (permanent retention)"}
             ]
         }'
@@ -988,6 +997,35 @@ ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
     VALUES ('STORAGE_EXTENT_MODE', 'AUTO', 'Storage extent mode: AUTO (use analysis recommendations), FORCED (always use fixed config), NONE (never use STORAGE clause)');
+
+-- PCTFREE Configuration (block-level space management)
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'PCTFREE_HOT_TIER' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('PCTFREE_HOT_TIER', '10', 'PCTFREE for HOT tier partitions (0-99). Reserve 10% for row updates in active data.');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'PCTFREE_WARM_TIER' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('PCTFREE_WARM_TIER', '5', 'PCTFREE for WARM tier partitions (0-99). Reserve 5% for minimal updates in aging data.');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'PCTFREE_COLD_TIER' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('PCTFREE_COLD_TIER', '0', 'PCTFREE for COLD tier partitions (0-99). 0% for read-only archive data (maximum storage efficiency).');
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'PCTFREE_DEFAULT' AS config_key FROM DUAL) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES ('PCTFREE_DEFAULT', '10', 'Default PCTFREE for non-tiered tables (0-99). Oracle default is 10.');
 
 MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'NULL_HANDLING_STRATEGY' AS config_key FROM DUAL) s
