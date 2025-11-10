@@ -395,13 +395,13 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'FACT_TABLE_STANDARD',
-        'Standard ILM policies for fact tables: compress at 90d, tier at 12m, archive at 36m',
+        'Standard ILM policies for fact tables: compress at 90d, tier to WARM at 24m, tier to COLD at 60m',
         'FACT',
         '[
             {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
-            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
-            {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 301}
+            {"policy_name": "{TABLE}_TIER_WARM_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "pctfree": 5, "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_60M", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 300},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 301}
         ]'
     );
 
@@ -440,11 +440,11 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'SCD2_EFFECTIVE_DATE',
-        'ILM policies for SCD2 tables with effective_date - compress old versions, retain history',
+        'ILM policies for SCD2 tables with effective_date - compress old versions at 24m, move to COLD at 60m, retain history',
         'SCD2',
         '[
-            {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_COMPRESS_24M", "age_months": 24, "action": "COMPRESS", "compression": "BASIC", "pctfree": 5, "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_60M", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 200},
             {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
         ]'
     );
@@ -456,11 +456,11 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'SCD2_VALID_FROM_TO',
-        'ILM policies for SCD2 tables with valid_from_dttm/valid_to_dttm - compress old versions',
+        'ILM policies for SCD2 tables with valid_from_dttm/valid_to_dttm - compress old versions at 24m, move to COLD at 60m',
         'SCD2',
         '[
-            {"policy_name": "{TABLE}_COMPRESS_365D", "age_days": 365, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_COMPRESS_24M", "age_months": 24, "action": "COMPRESS", "compression": "BASIC", "pctfree": 5, "priority": 100},
+            {"policy_name": "{TABLE}_TIER_COLD_60M", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 200},
             {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300}
         ]'
     );
@@ -488,12 +488,12 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'EVENTS_COMPLIANCE',
-        'ILM policies for audit/compliance event tables with 7-year retention',
+        'ILM policies for audit/compliance event tables with 7-year retention (HOT=24m, WARM=24-60m, COLD=60-84m)',
         'EVENTS',
         '[
             {"policy_name": "{TABLE}_COMPRESS_90D", "age_days": 90, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_WARM_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "ARCHIVE HIGH", "priority": 200},
-            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+            {"policy_name": "{TABLE}_TIER_WARM_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "pctfree": 5, "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_60M", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 300},
             {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 400},
             {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
         ]'
@@ -552,11 +552,11 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'HIST_MONTHLY',
-        'Historical tables with monthly snapshots - 3 year retention',
+        'Historical tables with monthly snapshots - 3 year retention (HOT=24m, COLD=24-36m)',
         'HIST',
         '[
             {"policy_name": "{TABLE}_COMPRESS_3M", "age_months": 3, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_COLD_12M", "age_months": 12, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 200},
             {"policy_name": "{TABLE}_READONLY_24M", "age_months": 24, "action": "READ_ONLY", "priority": 300},
             {"policy_name": "{TABLE}_PURGE_36M", "age_months": 36, "action": "DROP", "priority": 900}
         ]'
@@ -570,12 +570,13 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'HIST_YEARLY',
-        'Historical tables with yearly snapshots - 7 year retention',
+        'Historical tables with yearly snapshots - 7 year retention (HOT=24m, WARM=24-60m, COLD=60-84m)',
         'HIST',
         '[
             {"policy_name": "{TABLE}_COMPRESS_12M", "age_months": 12, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_COLD_36M", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 300},
+            {"policy_name": "{TABLE}_TIER_WARM_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "pctfree": 5, "priority": 200},
+            {"policy_name": "{TABLE}_TIER_COLD_60M", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 300},
+            {"policy_name": "{TABLE}_READONLY_60M", "age_months": 60, "action": "READ_ONLY", "priority": 400},
             {"policy_name": "{TABLE}_PURGE_84M", "age_months": 84, "action": "DROP", "priority": 900}
         ]'
     );
@@ -588,12 +589,12 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'HIST_COMPLIANCE',
-        'Historical tables for compliance - permanent retention with compression',
+        'Historical tables for compliance - permanent retention with compression (HOT=24m, COLD=>24m)',
         'HIST',
         '[
             {"policy_name": "{TABLE}_COMPRESS_6M", "age_months": 6, "action": "COMPRESS", "compression": "QUERY HIGH", "priority": 100},
-            {"policy_name": "{TABLE}_TIER_COLD_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 200},
-            {"policy_name": "{TABLE}_READONLY_36M", "age_months": 36, "action": "READ_ONLY", "priority": 300}
+            {"policy_name": "{TABLE}_TIER_COLD_24M", "age_months": 24, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "pctfree": 0, "priority": 200},
+            {"policy_name": "{TABLE}_READONLY_24M", "age_months": 24, "action": "READ_ONLY", "priority": 300}
         ]'
     );
 
