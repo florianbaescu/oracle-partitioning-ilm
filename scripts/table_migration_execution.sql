@@ -3446,7 +3446,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         target_tablespace VARCHAR2(30) PATH '$.tablespace',
                         pct_free_val NUMBER PATH '$.pctfree',
                         priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
-                        enabled CHAR(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
+                        enabled VARCHAR2(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
                     )
                 ) jt
             WHERE t.template_name = v_template.template_name
