@@ -44,87 +44,84 @@ PROMPT SECTION 2: Creating Test Tables
 PROMPT ========================================
 PROMPT
 
--- Drop test tables if they exist
+-- Create test_sales_3y if it doesn't exist
+DECLARE
+    v_count NUMBER;
 BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.test_sales_3y PURGE';
-    DBMS_OUTPUT.PUT_LINE('Dropped existing test_sales_3y');
-EXCEPTION
-    WHEN OTHERS THEN
-        IF SQLCODE = -942 THEN
-            DBMS_OUTPUT.PUT_LINE('test_sales_3y does not exist');
-        ELSE
-            RAISE;
-        END IF;
+    SELECT COUNT(*) INTO v_count
+    FROM all_tables
+    WHERE owner = 'CMR' AND table_name = 'TEST_SALES_3Y';
+
+    IF v_count > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('test_sales_3y already exists (skipping creation)');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Creating test table: test_sales_3y (3 years of data)...');
+        EXECUTE IMMEDIATE '
+            CREATE TABLE cmr.test_sales_3y AS
+            SELECT
+                ROWNUM as sale_id,
+                TRUNC(SYSDATE) - LEVEL as sale_date,
+                ''PRODUCT_'' || MOD(LEVEL, 100) as product_name,
+                ROUND(DBMS_RANDOM.VALUE(10, 1000), 2) as amount
+            FROM dual
+            CONNECT BY LEVEL <= 1095';
+        DBMS_OUTPUT.PUT_LINE('Created test_sales_3y with 1,095 rows (3 years)');
+    END IF;
 END;
 /
 
+-- Create test_sales_12y if it doesn't exist
+DECLARE
+    v_count NUMBER;
 BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.test_sales_12y PURGE';
-    DBMS_OUTPUT.PUT_LINE('Dropped existing test_sales_12y');
-EXCEPTION
-    WHEN OTHERS THEN
-        IF SQLCODE = -942 THEN
-            DBMS_OUTPUT.PUT_LINE('test_sales_12y does not exist');
-        ELSE
-            RAISE;
-        END IF;
+    SELECT COUNT(*) INTO v_count
+    FROM all_tables
+    WHERE owner = 'CMR' AND table_name = 'TEST_SALES_12Y';
+
+    IF v_count > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('test_sales_12y already exists (skipping creation)');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Creating test table: test_sales_12y (12 years of data)...');
+        EXECUTE IMMEDIATE '
+            CREATE TABLE cmr.test_sales_12y AS
+            SELECT
+                ROWNUM as sale_id,
+                TO_DATE(''2013-01-01'', ''YYYY-MM-DD'') + LEVEL as sale_date,
+                ''PRODUCT_'' || MOD(LEVEL, 100) as product_name,
+                ROUND(DBMS_RANDOM.VALUE(10, 1000), 2) as amount
+            FROM dual
+            CONNECT BY LEVEL <= 4380';
+        DBMS_OUTPUT.PUT_LINE('Created test_sales_12y with 4,380 rows (12 years)');
+    END IF;
 END;
 /
 
+-- Create test_events_90d if it doesn't exist
+DECLARE
+    v_count NUMBER;
 BEGIN
-    EXECUTE IMMEDIATE 'DROP TABLE cmr.test_events_90d PURGE';
-    DBMS_OUTPUT.PUT_LINE('Dropped existing test_events_90d');
-EXCEPTION
-    WHEN OTHERS THEN
-        IF SQLCODE = -942 THEN
-            DBMS_OUTPUT.PUT_LINE('test_events_90d does not exist');
-        ELSE
-            RAISE;
-        END IF;
+    SELECT COUNT(*) INTO v_count
+    FROM all_tables
+    WHERE owner = 'CMR' AND table_name = 'TEST_EVENTS_90D';
+
+    IF v_count > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('test_events_90d already exists (skipping creation)');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Creating test table: test_events_90d (90 days of data)...');
+        EXECUTE IMMEDIATE '
+            CREATE TABLE cmr.test_events_90d AS
+            SELECT
+                ROWNUM as event_id,
+                TRUNC(SYSDATE) - LEVEL as event_date,
+                ''EVENT_'' || MOD(LEVEL, 50) as event_type,
+                ''User_'' || MOD(LEVEL, 1000) as user_id
+            FROM dual
+            CONNECT BY LEVEL <= 90';
+        DBMS_OUTPUT.PUT_LINE('Created test_events_90d with 90 rows (90 days)');
+    END IF;
 END;
 /
 
-PROMPT
-PROMPT Creating test table: test_sales_3y (3 years of data)...
-
-CREATE TABLE cmr.test_sales_3y AS
-SELECT
-    ROWNUM as sale_id,
-    TRUNC(SYSDATE) - LEVEL as sale_date,
-    'PRODUCT_' || MOD(LEVEL, 100) as product_name,
-    ROUND(DBMS_RANDOM.VALUE(10, 1000), 2) as amount
-FROM dual
-CONNECT BY LEVEL <= 1095;
-
-PROMPT Created test_sales_3y with 1,095 rows (3 years)
-PROMPT
-
-PROMPT Creating test table: test_sales_12y (12 years of data)...
-
-CREATE TABLE cmr.test_sales_12y AS
-SELECT
-    ROWNUM as sale_id,
-    TO_DATE('2013-01-01', 'YYYY-MM-DD') + LEVEL as sale_date,
-    'PRODUCT_' || MOD(LEVEL, 100) as product_name,
-    ROUND(DBMS_RANDOM.VALUE(10, 1000), 2) as amount
-FROM dual
-CONNECT BY LEVEL <= 4380;
-
-PROMPT Created test_sales_12y with 4,380 rows (12 years)
-PROMPT
-
-PROMPT Creating test table: test_events_90d (90 days of data)...
-
-CREATE TABLE cmr.test_events_90d AS
-SELECT
-    ROWNUM as event_id,
-    TRUNC(SYSDATE) - LEVEL as event_date,
-    'EVENT_' || MOD(LEVEL, 50) as event_type,
-    'User_' || MOD(LEVEL, 1000) as user_id
-FROM dual
-CONNECT BY LEVEL <= 90;
-
-PROMPT Created test_events_90d with 90 rows (90 days)
 PROMPT
 
 -- =============================================================================
@@ -137,35 +134,57 @@ PROMPT
 
 DECLARE
     v_task_id NUMBER;
+    v_analysis_exists NUMBER;
 BEGIN
-    -- Create migration task with tiered template
-    INSERT INTO cmr.dwh_migration_tasks (
-        task_name,
-        source_owner,
-        source_table,
-        partition_type,
-        partition_key,
-        migration_method,
-        enable_row_movement,
-        ilm_policy_template,
-        status
-    ) VALUES (
-        'Test 3Y Tiered',
-        'CMR',
-        'TEST_SALES_3Y',
-        'RANGE(sale_date)',
-        'sale_date',
-        'CTAS',
-        'Y',
-        'FACT_TABLE_STANDARD_TIERED',
-        'PENDING'
-    ) RETURNING task_id INTO v_task_id;
+    -- Create or reuse migration task with tiered template
+    MERGE INTO cmr.dwh_migration_tasks t
+    USING (SELECT 'Test 3Y Tiered' AS task_name FROM DUAL) s
+    ON (t.task_name = s.task_name)
+    WHEN NOT MATCHED THEN
+        INSERT (
+            task_name,
+            source_owner,
+            source_table,
+            partition_type,
+            partition_key,
+            migration_method,
+            enable_row_movement,
+            ilm_policy_template,
+            status
+        ) VALUES (
+            'Test 3Y Tiered',
+            'CMR',
+            'TEST_SALES_3Y',
+            'RANGE(sale_date)',
+            'sale_date',
+            'CTAS',
+            'Y',
+            'FACT_TABLE_STANDARD_TIERED',
+            'PENDING'
+        )
+    WHEN MATCHED THEN
+        UPDATE SET
+            status = CASE WHEN status IN ('FAILED', 'COMPLETED') THEN 'PENDING' ELSE status END,
+            error_message = NULL;
 
-    DBMS_OUTPUT.PUT_LINE('Created task_id: ' || v_task_id);
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Test 3Y Tiered';
 
-    -- Run analysis
-    DBMS_OUTPUT.PUT_LINE('Running analysis...');
-    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Using task_id: ' || v_task_id);
+
+    -- Check if analysis already exists
+    SELECT COUNT(*) INTO v_analysis_exists
+    FROM cmr.dwh_migration_analysis
+    WHERE task_id = v_task_id;
+
+    IF v_analysis_exists > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('Analysis already exists (skipping re-analysis)');
+    ELSE
+        -- Run analysis
+        DBMS_OUTPUT.PUT_LINE('Running analysis...');
+        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
@@ -234,35 +253,57 @@ PROMPT
 
 DECLARE
     v_task_id NUMBER;
+    v_analysis_exists NUMBER;
 BEGIN
-    -- Create migration task
-    INSERT INTO cmr.dwh_migration_tasks (
-        task_name,
-        source_owner,
-        source_table,
-        partition_type,
-        partition_key,
-        migration_method,
-        enable_row_movement,
-        ilm_policy_template,
-        status
-    ) VALUES (
-        'Test 12Y Tiered',
-        'CMR',
-        'TEST_SALES_12Y',
-        'RANGE(sale_date)',
-        'sale_date',
-        'CTAS',
-        'Y',
-        'FACT_TABLE_STANDARD_TIERED',
-        'PENDING'
-    ) RETURNING task_id INTO v_task_id;
+    -- Create or reuse migration task
+    MERGE INTO cmr.dwh_migration_tasks t
+    USING (SELECT 'Test 12Y Tiered' AS task_name FROM DUAL) s
+    ON (t.task_name = s.task_name)
+    WHEN NOT MATCHED THEN
+        INSERT (
+            task_name,
+            source_owner,
+            source_table,
+            partition_type,
+            partition_key,
+            migration_method,
+            enable_row_movement,
+            ilm_policy_template,
+            status
+        ) VALUES (
+            'Test 12Y Tiered',
+            'CMR',
+            'TEST_SALES_12Y',
+            'RANGE(sale_date)',
+            'sale_date',
+            'CTAS',
+            'Y',
+            'FACT_TABLE_STANDARD_TIERED',
+            'PENDING'
+        )
+    WHEN MATCHED THEN
+        UPDATE SET
+            status = CASE WHEN status IN ('FAILED', 'COMPLETED') THEN 'PENDING' ELSE status END,
+            error_message = NULL;
 
-    DBMS_OUTPUT.PUT_LINE('Created task_id: ' || v_task_id);
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Test 12Y Tiered';
 
-    -- Run analysis
-    DBMS_OUTPUT.PUT_LINE('Running analysis...');
-    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Using task_id: ' || v_task_id);
+
+    -- Check if analysis already exists
+    SELECT COUNT(*) INTO v_analysis_exists
+    FROM cmr.dwh_migration_analysis
+    WHERE task_id = v_task_id;
+
+    IF v_analysis_exists > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('Analysis already exists (skipping re-analysis)');
+    ELSE
+        -- Run analysis
+        DBMS_OUTPUT.PUT_LINE('Running analysis...');
+        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
@@ -318,35 +359,57 @@ PROMPT
 
 DECLARE
     v_task_id NUMBER;
+    v_analysis_exists NUMBER;
 BEGIN
-    -- Create migration task with events template
-    INSERT INTO cmr.dwh_migration_tasks (
-        task_name,
-        source_owner,
-        source_table,
-        partition_type,
-        partition_key,
-        migration_method,
-        enable_row_movement,
-        ilm_policy_template,
-        status
-    ) VALUES (
-        'Test Events 90d Tiered',
-        'CMR',
-        'TEST_EVENTS_90D',
-        'RANGE(event_date)',
-        'event_date',
-        'CTAS',
-        'Y',
-        'EVENTS_SHORT_RETENTION_TIERED',
-        'PENDING'
-    ) RETURNING task_id INTO v_task_id;
+    -- Create or reuse migration task with events template
+    MERGE INTO cmr.dwh_migration_tasks t
+    USING (SELECT 'Test Events 90d Tiered' AS task_name FROM DUAL) s
+    ON (t.task_name = s.task_name)
+    WHEN NOT MATCHED THEN
+        INSERT (
+            task_name,
+            source_owner,
+            source_table,
+            partition_type,
+            partition_key,
+            migration_method,
+            enable_row_movement,
+            ilm_policy_template,
+            status
+        ) VALUES (
+            'Test Events 90d Tiered',
+            'CMR',
+            'TEST_EVENTS_90D',
+            'RANGE(event_date)',
+            'event_date',
+            'CTAS',
+            'Y',
+            'EVENTS_SHORT_RETENTION_TIERED',
+            'PENDING'
+        )
+    WHEN MATCHED THEN
+        UPDATE SET
+            status = CASE WHEN status IN ('FAILED', 'COMPLETED') THEN 'PENDING' ELSE status END,
+            error_message = NULL;
 
-    DBMS_OUTPUT.PUT_LINE('Created task_id: ' || v_task_id);
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Test Events 90d Tiered';
 
-    -- Run analysis
-    DBMS_OUTPUT.PUT_LINE('Running analysis...');
-    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Using task_id: ' || v_task_id);
+
+    -- Check if analysis already exists
+    SELECT COUNT(*) INTO v_analysis_exists
+    FROM cmr.dwh_migration_analysis
+    WHERE task_id = v_task_id;
+
+    IF v_analysis_exists > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('Analysis already exists (skipping re-analysis)');
+    ELSE
+        -- Run analysis
+        DBMS_OUTPUT.PUT_LINE('Running analysis...');
+        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
@@ -400,37 +463,59 @@ PROMPT
 
 DECLARE
     v_task_id NUMBER;
+    v_analysis_exists NUMBER;
 BEGIN
-    -- Create migration task with NON-TIERED template
-    INSERT INTO cmr.dwh_migration_tasks (
-        task_name,
-        source_owner,
-        source_table,
-        partition_type,
-        partition_key,
-        interval_clause,
-        migration_method,
-        enable_row_movement,
-        ilm_policy_template,
-        status
-    ) VALUES (
-        'Test Non-Tiered',
-        'CMR',
-        'TEST_SALES_3Y',
-        'RANGE(sale_date)',
-        'sale_date',
-        'NUMTOYMINTERVAL(1,''MONTH'')',
-        'CTAS',
-        'Y',
-        'FACT_TABLE_STANDARD',  -- Non-tiered template
-        'PENDING'
-    ) RETURNING task_id INTO v_task_id;
+    -- Create or reuse migration task with NON-TIERED template
+    MERGE INTO cmr.dwh_migration_tasks t
+    USING (SELECT 'Test Non-Tiered' AS task_name FROM DUAL) s
+    ON (t.task_name = s.task_name)
+    WHEN NOT MATCHED THEN
+        INSERT (
+            task_name,
+            source_owner,
+            source_table,
+            partition_type,
+            partition_key,
+            interval_clause,
+            migration_method,
+            enable_row_movement,
+            ilm_policy_template,
+            status
+        ) VALUES (
+            'Test Non-Tiered',
+            'CMR',
+            'TEST_SALES_3Y',
+            'RANGE(sale_date)',
+            'sale_date',
+            'NUMTOYMINTERVAL(1,''MONTH'')',
+            'CTAS',
+            'Y',
+            'FACT_TABLE_STANDARD',  -- Non-tiered template
+            'PENDING'
+        )
+    WHEN MATCHED THEN
+        UPDATE SET
+            status = CASE WHEN status IN ('FAILED', 'COMPLETED') THEN 'PENDING' ELSE status END,
+            error_message = NULL;
 
-    DBMS_OUTPUT.PUT_LINE('Created task_id: ' || v_task_id);
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE task_name = 'Test Non-Tiered';
+
+    DBMS_OUTPUT.PUT_LINE('Using task_id: ' || v_task_id);
     DBMS_OUTPUT.PUT_LINE('Using NON-TIERED template: FACT_TABLE_STANDARD');
 
-    -- Run analysis
-    pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    -- Check if analysis already exists
+    SELECT COUNT(*) INTO v_analysis_exists
+    FROM cmr.dwh_migration_analysis
+    WHERE task_id = v_task_id;
+
+    IF v_analysis_exists > 0 THEN
+        DBMS_OUTPUT.PUT_LINE('Analysis already exists (skipping re-analysis)');
+    ELSE
+        -- Run analysis
+        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+    END IF;
 
     -- Apply recommendations
     pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
