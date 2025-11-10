@@ -3369,25 +3369,33 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('No ILM policy template specified - attempting auto-detection...');
 
             -- Check for SCD2 column patterns (must be done in SQL context)
+            DECLARE
+                v_count NUMBER;
             BEGIN
-                SELECT CASE WHEN COUNT(*) > 0 THEN TRUE ELSE FALSE END
-                INTO v_has_effective_date
+                SELECT COUNT(*)
+                INTO v_count
                 FROM all_tab_columns
                 WHERE owner = v_task.source_owner
                 AND table_name = v_task.source_table
                 AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM');
+
+                v_has_effective_date := (v_count > 0);
             EXCEPTION
                 WHEN OTHERS THEN
                     v_has_effective_date := FALSE;
             END;
 
+            DECLARE
+                v_count NUMBER;
             BEGIN
-                SELECT CASE WHEN COUNT(*) > 0 THEN TRUE ELSE FALSE END
-                INTO v_has_valid_from_to
+                SELECT COUNT(*)
+                INTO v_count
                 FROM all_tab_columns
                 WHERE owner = v_task.source_owner
                 AND table_name = v_task.source_table
                 AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO');
+
+                v_has_valid_from_to := (v_count > 0);
             EXCEPTION
                 WHEN OTHERS THEN
                     v_has_valid_from_to := FALSE;
