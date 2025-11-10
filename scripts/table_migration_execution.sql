@@ -3431,7 +3431,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 jt.age_months,
                 jt.compression_type,
                 jt.target_tablespace,
-                jt.pctfree AS pct_free,
+                jt.pct_free_val AS pct_free,
                 jt.priority,
                 jt.enabled
             FROM cmr.dwh_migration_ilm_templates t,
@@ -3444,7 +3444,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         age_months NUMBER PATH '$.age_months',
                         compression_type VARCHAR2(50) PATH '$.compression',
                         target_tablespace VARCHAR2(30) PATH '$.tablespace',
-                        pctfree NUMBER PATH '$.pctfree',
+                        pct_free_val NUMBER PATH '$.pctfree',
                         priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
                         enabled CHAR(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
                     )
