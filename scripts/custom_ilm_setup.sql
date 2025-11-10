@@ -77,7 +77,7 @@ CREATE TABLE cmr.dwh_ilm_policies (
     action_type         VARCHAR2(30) NOT NULL,  -- COMPRESS, MOVE, READ_ONLY, DROP, CUSTOM
     target_tablespace   VARCHAR2(30),
     compression_type    VARCHAR2(50),           -- QUERY LOW/HIGH, ARCHIVE LOW/HIGH
-    pctfree             NUMBER,                 -- PCTFREE for MOVE/COMPRESS actions (0-99)
+    pct_free            NUMBER,                 -- PCTFREE for MOVE/COMPRESS actions (0-99)
     custom_action       VARCHAR2(4000),         -- Custom PL/SQL block
 
     -- Execution settings

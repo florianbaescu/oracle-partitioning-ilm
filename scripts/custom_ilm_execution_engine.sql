@@ -424,7 +424,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                         v_queue.table_name,
                         v_queue.partition_name,
                         v_policy.compression_type,
-                        v_policy.pctfree,
+                        v_policy.pct_free,
                         (v_policy.rebuild_indexes = 'Y'),
                         (v_policy.gather_stats = 'Y')
                     );
@@ -436,7 +436,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                         v_queue.partition_name,
                         v_policy.target_tablespace,
                         v_policy.compression_type,
-                        v_policy.pctfree,
+                        v_policy.pct_free,
                         (v_policy.rebuild_indexes = 'Y'),
                         (v_policy.gather_stats = 'Y')
                     );

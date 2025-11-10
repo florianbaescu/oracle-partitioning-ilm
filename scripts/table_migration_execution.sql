@@ -3480,7 +3480,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         age_months,
                         compression_type,
                         target_tablespace,
-                        pctfree,
+                        pct_free,
                         priority,
                         enabled,
                         created_by
