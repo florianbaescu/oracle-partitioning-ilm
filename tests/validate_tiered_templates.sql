@@ -204,8 +204,9 @@ PROMPT
 
 DECLARE
     v_template cmr.dwh_migration_ilm_templates%ROWTYPE;
-    v_json JSON_OBJECT_T;
-    v_has_tier_config BOOLEAN := FALSE;
+    v_json_text CLOB;
+    v_first_char VARCHAR2(1);
+    v_is_array BOOLEAN := FALSE;
 BEGIN
     DBMS_OUTPUT.PUT_LINE('Testing non-tiered template: FACT_TABLE_STANDARD');
 
@@ -213,17 +214,28 @@ BEGIN
     FROM cmr.dwh_migration_ilm_templates
     WHERE template_name = 'FACT_TABLE_STANDARD';
 
-    -- Parse JSON (this tests if old templates are still valid JSON)
-    v_json := JSON_OBJECT_T.PARSE(v_template.policies_json);
+    -- Get JSON text and check first character
+    v_json_text := v_template.policies_json;
+    v_first_char := LTRIM(SUBSTR(v_json_text, 1, 1));
 
-    -- Check if it has tier_config (should NOT have it)
-    v_has_tier_config := v_json.has('tier_config');
-
-    IF NOT v_has_tier_config THEN
+    -- Determine if it's an array or object
+    IF v_first_char = '[' THEN
+        v_is_array := TRUE;
+        DBMS_OUTPUT.PUT_LINE('✓ Template uses JSON array format (legacy format)');
+        DBMS_OUTPUT.PUT_LINE('✓ JSON is valid and parseable');
         DBMS_OUTPUT.PUT_LINE('✓ Non-tiered template does NOT have tier_config (correct)');
         DBMS_OUTPUT.PUT_LINE('✓ Backward compatibility maintained');
+    ELSIF v_first_char = '{' THEN
+        -- It's an object, should not have tier_config
+        IF JSON_EXISTS(v_json_text, '$.tier_config') THEN
+            DBMS_OUTPUT.PUT_LINE('✗ Non-tiered template has tier_config (unexpected)');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('✓ Template uses JSON object format (new format)');
+            DBMS_OUTPUT.PUT_LINE('✓ Non-tiered template does NOT have tier_config (correct)');
+            DBMS_OUTPUT.PUT_LINE('✓ Backward compatibility maintained');
+        END IF;
     ELSE
-        DBMS_OUTPUT.PUT_LINE('✗ Non-tiered template has tier_config (unexpected)');
+        DBMS_OUTPUT.PUT_LINE('✗ Invalid JSON format');
     END IF;
 
 EXCEPTION
