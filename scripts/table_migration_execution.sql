@@ -3370,30 +3370,26 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             -- Check for SCD2 column patterns (must be done in SQL context)
             BEGIN
-                SELECT 1 INTO v_has_effective_date
-                FROM dual
-                WHERE EXISTS (
-                    SELECT 1 FROM all_tab_columns
-                    WHERE owner = v_task.source_owner
-                    AND table_name = v_task.source_table
-                    AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM')
-                );
+                SELECT CASE WHEN COUNT(*) > 0 THEN TRUE ELSE FALSE END
+                INTO v_has_effective_date
+                FROM all_tab_columns
+                WHERE owner = v_task.source_owner
+                AND table_name = v_task.source_table
+                AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM');
             EXCEPTION
-                WHEN NO_DATA_FOUND THEN
+                WHEN OTHERS THEN
                     v_has_effective_date := FALSE;
             END;
 
             BEGIN
-                SELECT 1 INTO v_has_valid_from_to
-                FROM dual
-                WHERE EXISTS (
-                    SELECT 1 FROM all_tab_columns
-                    WHERE owner = v_task.source_owner
-                    AND table_name = v_task.source_table
-                    AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO')
-                );
+                SELECT CASE WHEN COUNT(*) > 0 THEN TRUE ELSE FALSE END
+                INTO v_has_valid_from_to
+                FROM all_tab_columns
+                WHERE owner = v_task.source_owner
+                AND table_name = v_task.source_table
+                AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO');
             EXCEPTION
-                WHEN NO_DATA_FOUND THEN
+                WHEN OTHERS THEN
                     v_has_valid_from_to := FALSE;
             END;
 
