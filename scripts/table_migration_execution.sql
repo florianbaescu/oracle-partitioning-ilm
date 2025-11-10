@@ -113,6 +113,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     ) AS
         v_duration NUMBER;
     BEGIN
+        -- Initialize execution_id if not already set
+        -- This handles cases where log_step is called outside of execute_migration
+        IF g_execution_id IS NULL THEN
+            SELECT cmr.dwh_mig_execution_seq.NEXTVAL INTO g_execution_id FROM dual;
+        END IF;
+
         v_duration := EXTRACT(SECOND FROM (p_end_time - p_start_time)) +
                      EXTRACT(MINUTE FROM (p_end_time - p_start_time)) * 60 +
                      EXTRACT(HOUR FROM (p_end_time - p_start_time)) * 3600;
