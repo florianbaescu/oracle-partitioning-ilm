@@ -623,9 +623,10 @@ WHEN NOT MATCHED THEN
 -- See docs/planning/ILM_AWARE_PARTITIONING_PLAN.md for detailed explanation.
 -- =============================================================================
 
--- Tiered Fact Table - 7 Year Retention
--- NOTE: Age thresholds at 12m, 36m, 84m are aligned between tier_config and policies
+-- Tiered Fact Table - Standard Retention
+-- NOTE: Age thresholds at 24m, 60m are aligned between tier_config and policies
 --       tier_config places existing data, policies manage future partitions
+--       HOT=2y (24 months), WARM=2-5y (24-60 months), COLD=>5y (>60 months)
 MERGE INTO cmr.dwh_migration_ilm_templates t
 USING (SELECT 'FACT_TABLE_STANDARD_TIERED' AS template_name FROM DUAL) s
 ON (t.template_name = s.template_name)
@@ -633,35 +634,33 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'FACT_TABLE_STANDARD_TIERED',
-        'ILM-aware partitioning: HOT=1y monthly/TBS_HOT/no compression, WARM=3y yearly/TBS_WARM/BASIC, COLD=7y yearly/TBS_COLD/OLTP',
+        'ILM-aware partitioning: HOT=2y monthly/TBS_HOT/no compression, WARM=2-5y yearly/TBS_WARM/BASIC, COLD=>5y yearly/TBS_COLD/OLTP',
         'FACT',
         '{
             "tier_config": {
                 "enabled": true,
                 "hot": {
-                    "age_months": 12,
+                    "age_months": 24,
                     "interval": "MONTHLY",
                     "tablespace": "TBS_HOT",
                     "compression": "NONE"
                 },
                 "warm": {
-                    "age_months": 36,
+                    "age_months": 60,
                     "interval": "YEARLY",
                     "tablespace": "TBS_WARM",
                     "compression": "BASIC"
                 },
                 "cold": {
-                    "age_months": 84,
+                    "age_months": null,
                     "interval": "YEARLY",
                     "tablespace": "TBS_COLD",
                     "compression": "OLTP"
                 }
             },
             "policies": [
-                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "priority": 200, "comment": "Ongoing: move partitions to WARM at 12m (aligns with tier_config.hot.age_months)"},
-                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "priority": 300, "comment": "Ongoing: move partitions to COLD at 36m (aligns with tier_config.warm.age_months)"},
-                {"policy_name": "{TABLE}_READONLY", "age_months": 84, "action": "READ_ONLY", "priority": 400, "comment": "Ongoing: make partitions read-only at 84m (aligns with tier_config.cold.age_months)"},
-                {"policy_name": "{TABLE}_PURGE", "age_months": 84, "action": "DROP", "priority": 900, "comment": "Ongoing: drop partitions at 84m (retention limit)"}
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m (aligns with tier_config.hot.age_months)"},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m (aligns with tier_config.warm.age_months)"}
             ]
         }'
     );
@@ -707,6 +706,8 @@ WHEN NOT MATCHED THEN
     );
 
 -- Tiered SCD2 Table - Permanent Retention
+-- NOTE: Age thresholds at 24m, 60m are aligned between tier_config and policies
+--       HOT=2y (24 months), WARM=2-5y (24-60 months), COLD=>5y (>60 months, permanent)
 MERGE INTO cmr.dwh_migration_ilm_templates t
 USING (SELECT 'SCD2_VALID_FROM_TO_TIERED' AS template_name FROM DUAL) s
 ON (t.template_name = s.template_name)
@@ -714,13 +715,13 @@ WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'SCD2_VALID_FROM_TO_TIERED',
-        'ILM-aware partitioning for SCD2: HOT=1y monthly/TBS_HOT, WARM=5y yearly/TBS_WARM/QUERY HIGH, COLD=permanent yearly/TBS_COLD/ARCHIVE HIGH',
+        'ILM-aware partitioning for SCD2: HOT=2y monthly/TBS_HOT, WARM=2-5y yearly/TBS_WARM/QUERY HIGH, COLD=>5y yearly/TBS_COLD/ARCHIVE HIGH (permanent)',
         'SCD2',
         '{
             "tier_config": {
                 "enabled": true,
                 "hot": {
-                    "age_months": 12,
+                    "age_months": 24,
                     "interval": "MONTHLY",
                     "tablespace": "TBS_HOT",
                     "compression": "NONE"
@@ -739,9 +740,9 @@ WHEN NOT MATCHED THEN
                 }
             },
             "policies": [
-                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
-                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
-                {"policy_name": "{TABLE}_READONLY", "age_months": 60, "action": "READ_ONLY", "priority": 400}
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 24, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200, "comment": "Ongoing: move partitions to WARM at 24m"},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300, "comment": "Ongoing: move partitions to COLD at 60m"},
+                {"policy_name": "{TABLE}_READONLY", "age_months": 60, "action": "READ_ONLY", "priority": 400, "comment": "Ongoing: make partitions read-only at 60m (permanent retention)"}
             ]
         }'
     );

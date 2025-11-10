@@ -491,9 +491,11 @@ PROMPT ========================================
 PROMPT Test Suite Complete
 PROMPT ========================================
 PROMPT
-PROMPT Expected Results:
+PROMPT Expected Results (based on HOT=2y, WARM=2-5y, COLD=>5y):
 PROMPT   - Test Case 1 (3Y): Should generate WARM + HOT partitions
+PROMPT                        (HOT: last 2y monthly, WARM: 2-3y ago yearly)
 PROMPT   - Test Case 2 (12Y): Should generate COLD + WARM + HOT partitions
+PROMPT                         (COLD: >5y ago yearly, WARM: 2-5y ago yearly, HOT: last 2y monthly)
 PROMPT   - Test Case 3 (90d): Should generate COLD + WARM + HOT with daily/weekly intervals
 PROMPT   - Test Case 4: Should use uniform interval partitioning (backward compatible)
 PROMPT
