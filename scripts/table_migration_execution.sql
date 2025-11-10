@@ -158,7 +158,86 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     END create_backup_table;
 
 
+    -- ==========================================================================
+    -- Enhanced build_partition_ddl with Tiered Partitioning Support
+    -- ==========================================================================
     PROCEDURE build_partition_ddl(
+        p_task dwh_migration_tasks%ROWTYPE,
+        p_ddl OUT CLOB
+    ) AS
+        v_template cmr.dwh_migration_ilm_templates%ROWTYPE;
+        v_template_json JSON_OBJECT_T;
+        v_tier_config JSON_OBJECT_T;
+        v_tier_enabled BOOLEAN := FALSE;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Building Partition DDL');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Table: ' || p_task.source_owner || '.' || p_task.source_table);
+
+        -- Check if task uses ILM template
+        IF p_task.ilm_policy_template IS NOT NULL THEN
+            BEGIN
+                -- Read template (same pattern as apply_ilm_policies)
+                SELECT * INTO v_template
+                FROM cmr.dwh_migration_ilm_templates
+                WHERE template_name = p_task.ilm_policy_template;
+
+                DBMS_OUTPUT.PUT_LINE('ILM template: ' || v_template.template_name);
+
+                -- Parse JSON
+                IF v_template.policies_json IS NOT NULL THEN
+                    v_template_json := JSON_OBJECT_T.PARSE(v_template.policies_json);
+
+                    -- Check for tier_config
+                    IF v_template_json.has('tier_config') THEN
+                        v_tier_config := TREAT(v_template_json.get('tier_config') AS JSON_OBJECT_T);
+
+                        -- Check if tier partitioning is enabled
+                        IF v_tier_config.has('enabled') AND
+                           v_tier_config.get_boolean('enabled') = TRUE THEN
+                            v_tier_enabled := TRUE;
+                            DBMS_OUTPUT.PUT_LINE('  Tier partitioning: ENABLED');
+                        ELSE
+                            DBMS_OUTPUT.PUT_LINE('  Tier partitioning: DISABLED in template');
+                        END IF;
+                    ELSE
+                        DBMS_OUTPUT.PUT_LINE('  Tier configuration: NOT FOUND in template');
+                    END IF;
+                END IF;
+
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Template not found: ' || p_task.ilm_policy_template);
+                    DBMS_OUTPUT.PUT_LINE('  Falling back to uniform interval partitioning');
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('WARNING: Error reading template: ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('  Falling back to uniform interval partitioning');
+            END;
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('No ILM template specified');
+        END IF;
+
+        -- Route to appropriate builder
+        IF v_tier_enabled THEN
+            DBMS_OUTPUT.PUT_LINE('Using tiered partition builder');
+            DBMS_OUTPUT.PUT_LINE('');
+            build_tiered_partitions(p_task, v_tier_config, p_ddl);
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Using uniform interval partition builder');
+            DBMS_OUTPUT.PUT_LINE('');
+            build_uniform_partitions(p_task, p_ddl);
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('========================================');
+
+    END build_partition_ddl;
+
+
+    -- ==========================================================================
+    -- Helper: build_uniform_partitions (Existing Logic)
+    -- ==========================================================================
+    PROCEDURE build_uniform_partitions(
         p_task dwh_migration_tasks%ROWTYPE,
         p_ddl OUT CLOB
     ) AS
@@ -456,7 +535,578 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             p_ddl := p_ddl || CHR(10) || 'ENABLE ROW MOVEMENT';
         END IF;
 
-    END build_partition_ddl;
+    END build_uniform_partitions;
+
+
+    -- ==========================================================================
+    -- Helper: build_tiered_partitions (NEW - ILM-Aware Partitioning)
+    -- ==========================================================================
+    PROCEDURE build_tiered_partitions(
+        p_task dwh_migration_tasks%ROWTYPE,
+        p_tier_config JSON_OBJECT_T,
+        p_ddl OUT CLOB
+    ) AS
+        -- Tier configuration
+        v_hot_config JSON_OBJECT_T;
+        v_warm_config JSON_OBJECT_T;
+        v_cold_config JSON_OBJECT_T;
+
+        v_hot_months NUMBER;
+        v_hot_days NUMBER;
+        v_hot_interval VARCHAR2(20);
+        v_hot_tablespace VARCHAR2(128);
+        v_hot_compression VARCHAR2(50);
+
+        v_warm_months NUMBER;
+        v_warm_days NUMBER;
+        v_warm_interval VARCHAR2(20);
+        v_warm_tablespace VARCHAR2(128);
+        v_warm_compression VARCHAR2(50);
+
+        v_cold_months NUMBER;
+        v_cold_days NUMBER;
+        v_cold_interval VARCHAR2(20);
+        v_cold_tablespace VARCHAR2(128);
+        v_cold_compression VARCHAR2(50);
+
+        -- Date ranges
+        v_min_date DATE;
+        v_max_date DATE;
+        v_current_date DATE := SYSDATE;
+        v_hot_cutoff DATE;
+        v_warm_cutoff DATE;
+        v_cold_cutoff DATE;
+
+        -- Partition generation
+        v_partition_list CLOB;
+        v_partition_name VARCHAR2(128);
+        v_partition_date DATE;
+        v_next_date DATE;
+        v_columns CLOB;
+
+        v_cold_count NUMBER := 0;
+        v_warm_count NUMBER := 0;
+        v_hot_count NUMBER := 0;
+
+        -- Logging
+        v_step_start TIMESTAMP;
+        v_step_number NUMBER := 10;
+        v_error_msg VARCHAR2(4000);
+
+    BEGIN
+        -- Log step start
+        v_step_start := SYSTIMESTAMP;
+
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Building Tiered Partition DDL');
+        DBMS_OUTPUT.PUT_LINE('========================================');
+
+        -- Initialize partition list CLOB with SESSION duration
+        DBMS_LOB.CREATETEMPORARY(v_partition_list, TRUE, DBMS_LOB.SESSION);
+
+        -- ====================================================================
+        -- Validate tier_config structure
+        -- ====================================================================
+        DBMS_OUTPUT.PUT_LINE('Validating tier configuration...');
+
+        -- Validate HOT tier
+        IF NOT p_tier_config.has('hot') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20100, 'tier_config.hot is missing');
+        END IF;
+
+        v_hot_config := TREAT(p_tier_config.get('hot') AS JSON_OBJECT_T);
+        IF NOT v_hot_config.has('interval') OR NOT v_hot_config.has('tablespace') OR NOT v_hot_config.has('compression') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20101, 'tier_config.hot missing required fields (interval, tablespace, compression)');
+        END IF;
+
+        IF NOT v_hot_config.has('age_months') AND NOT v_hot_config.has('age_days') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20102, 'tier_config.hot must have either age_months or age_days');
+        END IF;
+
+        -- Validate WARM tier
+        IF NOT p_tier_config.has('warm') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20103, 'tier_config.warm is missing');
+        END IF;
+
+        v_warm_config := TREAT(p_tier_config.get('warm') AS JSON_OBJECT_T);
+        IF NOT v_warm_config.has('interval') OR NOT v_warm_config.has('tablespace') OR NOT v_warm_config.has('compression') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20104, 'tier_config.warm missing required fields (interval, tablespace, compression)');
+        END IF;
+
+        -- Validate COLD tier
+        IF NOT p_tier_config.has('cold') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20105, 'tier_config.cold is missing');
+        END IF;
+
+        v_cold_config := TREAT(p_tier_config.get('cold') AS JSON_OBJECT_T);
+        IF NOT v_cold_config.has('interval') OR NOT v_cold_config.has('tablespace') OR NOT v_cold_config.has('compression') THEN
+            IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_partition_list);
+            END IF;
+            RAISE_APPLICATION_ERROR(-20106, 'tier_config.cold missing required fields (interval, tablespace, compression)');
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('  ✓ Tier configuration validated');
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- Parse tier configurations (already retrieved above during validation)
+        IF v_hot_config.has('age_months') THEN
+            v_hot_months := v_hot_config.get_number('age_months');
+        END IF;
+        IF v_hot_config.has('age_days') THEN
+            v_hot_days := v_hot_config.get_number('age_days');
+        END IF;
+        v_hot_interval := v_hot_config.get_string('interval');
+        v_hot_tablespace := v_hot_config.get_string('tablespace');
+        v_hot_compression := v_hot_config.get_string('compression');
+
+        -- WARM tier (already retrieved during validation)
+        IF v_warm_config.has('age_months') THEN
+            v_warm_months := v_warm_config.get_number('age_months');
+        END IF;
+        IF v_warm_config.has('age_days') THEN
+            v_warm_days := v_warm_config.get_number('age_days');
+        END IF;
+        v_warm_interval := v_warm_config.get_string('interval');
+        v_warm_tablespace := v_warm_config.get_string('tablespace');
+        v_warm_compression := v_warm_config.get_string('compression');
+
+        -- COLD tier (already retrieved during validation)
+        IF v_cold_config.has('age_months') AND NOT v_cold_config.get('age_months').is_null() THEN
+            v_cold_months := v_cold_config.get_number('age_months');
+        END IF;
+        IF v_cold_config.has('age_days') THEN
+            v_cold_days := v_cold_config.get_number('age_days');
+        END IF;
+        v_cold_interval := v_cold_config.get_string('interval');
+        v_cold_tablespace := v_cold_config.get_string('tablespace');
+        v_cold_compression := v_cold_config.get_string('compression');
+
+        -- Calculate tier boundary dates
+        IF v_hot_months IS NOT NULL THEN
+            v_hot_cutoff := ADD_MONTHS(v_current_date, -v_hot_months);
+        ELSIF v_hot_days IS NOT NULL THEN
+            v_hot_cutoff := v_current_date - v_hot_days;
+        END IF;
+
+        IF v_warm_months IS NOT NULL THEN
+            v_warm_cutoff := ADD_MONTHS(v_current_date, -v_warm_months);
+        ELSIF v_warm_days IS NOT NULL THEN
+            v_warm_cutoff := v_current_date - v_warm_days;
+        END IF;
+
+        IF v_cold_months IS NOT NULL THEN
+            v_cold_cutoff := ADD_MONTHS(v_current_date, -v_cold_months);
+        ELSIF v_cold_days IS NOT NULL THEN
+            v_cold_cutoff := v_current_date - v_cold_days;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Tier boundaries:');
+        IF v_cold_cutoff IS NOT NULL THEN
+            DBMS_OUTPUT.PUT_LINE('  COLD: < ' || TO_CHAR(v_cold_cutoff, 'YYYY-MM-DD') ||
+                                 ' (' || v_cold_interval || ' partitions)');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('  COLD: all data before WARM cutoff (' || v_cold_interval || ' partitions, permanent retention)');
+        END IF;
+        DBMS_OUTPUT.PUT_LINE('  WARM: ' || TO_CHAR(v_warm_cutoff, 'YYYY-MM-DD') ||
+                             ' to ' || TO_CHAR(v_hot_cutoff, 'YYYY-MM-DD') ||
+                             ' (' || v_warm_interval || ' partitions)');
+        DBMS_OUTPUT.PUT_LINE('  HOT:  > ' || TO_CHAR(v_hot_cutoff, 'YYYY-MM-DD') ||
+                             ' (' || v_hot_interval || ' partitions)');
+
+        -- Get source data date range from analysis
+        BEGIN
+            SELECT partition_boundary_min_date, partition_boundary_max_date
+            INTO v_min_date, v_max_date
+            FROM cmr.dwh_migration_analysis
+            WHERE task_id = p_task.task_id;
+
+            DBMS_OUTPUT.PUT_LINE('Source data range: ' ||
+                               TO_CHAR(v_min_date, 'YYYY-MM-DD') || ' to ' ||
+                               TO_CHAR(v_max_date, 'YYYY-MM-DD'));
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_partition_list);
+                END IF;
+                RAISE_APPLICATION_ERROR(-20001,
+                    'No analysis data found for task_id: ' || p_task.task_id ||
+                    '. Run analyze_table() first.');
+        END;
+
+        -- ====================================================================
+        -- COLD TIER: Yearly/Monthly partitions for data older than warm_cutoff
+        -- ====================================================================
+        DBMS_OUTPUT.PUT_LINE('');
+        IF v_cold_cutoff IS NOT NULL AND v_min_date < v_cold_cutoff THEN
+            DBMS_OUTPUT.PUT_LINE('Generating COLD tier partitions...');
+
+            IF UPPER(v_cold_interval) = 'YEARLY' THEN
+                v_partition_date := TRUNC(v_min_date, 'YYYY');
+                WHILE v_partition_date < v_cold_cutoff LOOP
+                    v_next_date := ADD_MONTHS(v_partition_date, 12);
+                    v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+
+                    DBMS_LOB.APPEND(v_partition_list,
+                        '    PARTITION ' || v_partition_name ||
+                        ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                        ' TABLESPACE ' || v_cold_tablespace);
+
+                    IF v_cold_compression != 'NONE' THEN
+                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                    END IF;
+
+                    DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                    v_cold_count := v_cold_count + 1;
+                    v_partition_date := v_next_date;
+                END LOOP;
+            ELSIF UPPER(v_cold_interval) = 'MONTHLY' THEN
+                v_partition_date := TRUNC(v_min_date, 'MM');
+                WHILE v_partition_date < v_cold_cutoff LOOP
+                    v_next_date := ADD_MONTHS(v_partition_date, 1);
+                    v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
+
+                    DBMS_LOB.APPEND(v_partition_list,
+                        '    PARTITION ' || v_partition_name ||
+                        ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                        ' TABLESPACE ' || v_cold_tablespace);
+
+                    IF v_cold_compression != 'NONE' THEN
+                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                    END IF;
+
+                    DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                    v_cold_count := v_cold_count + 1;
+                    v_partition_date := v_next_date;
+                END LOOP;
+            END IF;
+
+            DBMS_OUTPUT.PUT_LINE('  Generated ' || v_cold_count || ' COLD partitions');
+        ELSIF v_cold_cutoff IS NULL THEN
+            -- Permanent retention: all data before warm_cutoff goes to COLD
+            DBMS_OUTPUT.PUT_LINE('Generating COLD tier partitions (permanent retention)...');
+
+            IF UPPER(v_cold_interval) = 'YEARLY' THEN
+                v_partition_date := TRUNC(v_min_date, 'YYYY');
+                WHILE v_partition_date < v_warm_cutoff LOOP
+                    v_next_date := ADD_MONTHS(v_partition_date, 12);
+                    v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+
+                    DBMS_LOB.APPEND(v_partition_list,
+                        '    PARTITION ' || v_partition_name ||
+                        ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                        ' TABLESPACE ' || v_cold_tablespace);
+
+                    IF v_cold_compression != 'NONE' THEN
+                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                    END IF;
+
+                    DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                    v_cold_count := v_cold_count + 1;
+                    v_partition_date := v_next_date;
+                END LOOP;
+            END IF;
+
+            DBMS_OUTPUT.PUT_LINE('  Generated ' || v_cold_count || ' COLD partitions');
+        END IF;
+
+        -- ====================================================================
+        -- WARM TIER: Yearly/Monthly partitions between cold_cutoff and hot_cutoff
+        -- ====================================================================
+        DBMS_OUTPUT.PUT_LINE('Generating WARM tier partitions...');
+
+        IF v_cold_cutoff IS NOT NULL THEN
+            v_partition_date := TRUNC(GREATEST(v_min_date, v_cold_cutoff), 'YYYY');
+        ELSE
+            v_partition_date := TRUNC(GREATEST(v_min_date, v_warm_cutoff), 'YYYY');
+        END IF;
+
+        IF UPPER(v_warm_interval) = 'YEARLY' THEN
+            WHILE v_partition_date < v_hot_cutoff LOOP
+                v_next_date := ADD_MONTHS(v_partition_date, 12);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_warm_tablespace);
+
+                IF v_warm_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_warm_count := v_warm_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
+        ELSIF UPPER(v_warm_interval) = 'MONTHLY' THEN
+            v_partition_date := TRUNC(v_partition_date, 'MM');
+            WHILE v_partition_date < v_hot_cutoff LOOP
+                v_next_date := ADD_MONTHS(v_partition_date, 1);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_warm_tablespace);
+
+                IF v_warm_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_warm_count := v_warm_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('  Generated ' || v_warm_count || ' WARM partitions');
+
+        -- ====================================================================
+        -- HOT TIER: Monthly/Daily partitions for recent data
+        -- ====================================================================
+        DBMS_OUTPUT.PUT_LINE('Generating HOT tier partitions...');
+
+        IF UPPER(v_hot_interval) = 'MONTHLY' THEN
+            v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff), 'MM');
+            WHILE v_partition_date <= TRUNC(v_current_date, 'MM') LOOP
+                v_next_date := ADD_MONTHS(v_partition_date, 1);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_hot_tablespace);
+
+                IF v_hot_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_hot_count := v_hot_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
+        ELSIF UPPER(v_hot_interval) = 'DAILY' THEN
+            v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff));
+            WHILE v_partition_date <= TRUNC(v_current_date) LOOP
+                v_next_date := v_partition_date + 1;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_hot_tablespace);
+
+                IF v_hot_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_hot_count := v_hot_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
+        ELSIF UPPER(v_hot_interval) = 'WEEKLY' THEN
+            v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff), 'IW');
+            WHILE v_partition_date <= TRUNC(v_current_date, 'IW') LOOP
+                v_next_date := v_partition_date + 7;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_hot_tablespace);
+
+                IF v_hot_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_hot_count := v_hot_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('  Generated ' || v_hot_count || ' HOT partitions');
+
+        -- Remove trailing comma from last partition
+        v_partition_list := RTRIM(v_partition_list, ',' || CHR(10));
+
+        -- ====================================================================
+        -- Build complete CREATE TABLE DDL
+        -- ====================================================================
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('Assembling CREATE TABLE DDL...');
+
+        -- Get column definitions (reuse existing logic from build_uniform_partitions)
+        DECLARE
+            v_requires_conversion CHAR(1);
+            v_date_column VARCHAR2(128);
+        BEGIN
+            -- Check if date conversion is required
+            BEGIN
+                SELECT requires_conversion, date_column_name
+                INTO v_requires_conversion, v_date_column
+                FROM cmr.dwh_migration_analysis
+                WHERE task_id = p_task.task_id;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_requires_conversion := 'N';
+            END;
+
+            -- Get column definitions
+            IF v_requires_conversion = 'Y' AND v_date_column IS NOT NULL THEN
+                -- Build column list with date conversion
+                SELECT LISTAGG(
+                    CASE
+                        WHEN column_name = v_date_column THEN
+                            column_name || '_CONVERTED DATE NOT NULL'
+                        ELSE
+                            column_name || ' ' || data_type ||
+                            CASE
+                                WHEN data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR')
+                                    THEN '(' || data_length || ')'
+                                WHEN data_type = 'NUMBER' AND data_precision IS NOT NULL
+                                    THEN '(' || data_precision ||
+                                        CASE WHEN data_scale IS NOT NULL AND data_scale > 0
+                                            THEN ',' || data_scale ELSE '' END || ')'
+                                ELSE ''
+                            END ||
+                            CASE WHEN nullable = 'N' THEN ' NOT NULL' ELSE '' END
+                    END,
+                    ', '
+                ) WITHIN GROUP (ORDER BY column_id)
+                INTO v_columns
+                FROM dba_tab_columns
+                WHERE owner = p_task.source_owner
+                AND table_name = p_task.source_table;
+            ELSE
+                -- Standard column list
+                SELECT LISTAGG(
+                    column_name || ' ' || data_type ||
+                    CASE
+                        WHEN data_type IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR')
+                            THEN '(' || data_length || ')'
+                        WHEN data_type = 'NUMBER' AND data_precision IS NOT NULL
+                            THEN '(' || data_precision ||
+                                CASE WHEN data_scale IS NOT NULL AND data_scale > 0
+                                    THEN ',' || data_scale ELSE '' END || ')'
+                        ELSE ''
+                    END ||
+                    CASE WHEN nullable = 'N' THEN ' NOT NULL' ELSE '' END,
+                    ', '
+                ) WITHIN GROUP (ORDER BY column_id)
+                INTO v_columns
+                FROM dba_tab_columns
+                WHERE owner = p_task.source_owner
+                AND table_name = p_task.source_table;
+            END IF;
+        END;
+
+        -- Build DDL
+        p_ddl := 'CREATE TABLE ' || p_task.source_owner || '.' || p_task.source_table || '_PART' || CHR(10);
+        p_ddl := p_ddl || '(' || CHR(10) || v_columns || CHR(10) || ')' || CHR(10);
+        p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
+
+        -- INTERVAL creates future HOT partitions automatically
+        IF UPPER(v_hot_interval) = 'MONTHLY' THEN
+            p_ddl := p_ddl || 'INTERVAL(NUMTOYMINTERVAL(1,''MONTH''))' || CHR(10);
+        ELSIF UPPER(v_hot_interval) = 'DAILY' THEN
+            p_ddl := p_ddl || 'INTERVAL(NUMTODSINTERVAL(1,''DAY''))' || CHR(10);
+        ELSIF UPPER(v_hot_interval) = 'WEEKLY' THEN
+            p_ddl := p_ddl || 'INTERVAL(NUMTODSINTERVAL(7,''DAY''))' || CHR(10);
+        END IF;
+
+        -- Add explicit partition list
+        p_ddl := p_ddl || '(' || CHR(10);
+        p_ddl := p_ddl || v_partition_list || CHR(10);
+        p_ddl := p_ddl || ')' || CHR(10);
+
+        -- Add parallel clause if specified
+        IF p_task.parallel_degree > 1 THEN
+            p_ddl := p_ddl || 'PARALLEL ' || p_task.parallel_degree || CHR(10);
+        END IF;
+
+        -- Add row movement
+        IF p_task.enable_row_movement = 'Y' THEN
+            p_ddl := p_ddl || 'ENABLE ROW MOVEMENT';
+        END IF;
+
+        -- Clean up temporary LOB
+        IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_partition_list);
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('========================================');
+        DBMS_OUTPUT.PUT_LINE('Tiered Partition DDL Summary:');
+        DBMS_OUTPUT.PUT_LINE('  COLD tier: ' || v_cold_count || ' partitions (' || v_cold_interval || ')');
+        DBMS_OUTPUT.PUT_LINE('  WARM tier: ' || v_warm_count || ' partitions (' || v_warm_interval || ')');
+        DBMS_OUTPUT.PUT_LINE('  HOT tier: ' || v_hot_count || ' partitions (' || v_hot_interval || ')');
+        DBMS_OUTPUT.PUT_LINE('  Total: ' || (v_cold_count + v_warm_count + v_hot_count) || ' explicit partitions');
+        DBMS_OUTPUT.PUT_LINE('  Future partitions: INTERVAL ' || v_hot_interval || ' in ' || v_hot_tablespace);
+        DBMS_OUTPUT.PUT_LINE('========================================');
+
+        -- Log step completion
+        log_step(
+            p_task_id => p_task.task_id,
+            p_step_number => v_step_number,
+            p_step_name => 'Build Tiered Partitions',
+            p_step_type => 'DDL_GENERATION',
+            p_sql => p_ddl,
+            p_status => 'SUCCESS',
+            p_start_time => v_step_start,
+            p_end_time => SYSTIMESTAMP
+        );
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_error_msg := SQLERRM;
+
+            -- Log failure to table
+            BEGIN
+                log_step(
+                    p_task_id => p_task.task_id,
+                    p_step_number => v_step_number,
+                    p_step_name => 'Build Tiered Partitions',
+                    p_step_type => 'DDL_GENERATION',
+                    p_sql => NULL,
+                    p_status => 'FAILED',
+                    p_start_time => v_step_start,
+                    p_end_time => SYSTIMESTAMP,
+                    p_error_code => SQLCODE,
+                    p_error_message => v_error_msg
+                );
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+
+            -- Clean up LOB in case of error
+            BEGIN
+                IF DBMS_LOB.ISTEMPORARY(v_partition_list) = 1 THEN
+                    DBMS_LOB.FREETEMPORARY(v_partition_list);
+                END IF;
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+
+            DBMS_OUTPUT.PUT_LINE('ERROR: Failed to build tiered partition DDL: ' || v_error_msg);
+            RAISE;
+    END build_tiered_partitions;
 
 
     -- -------------------------------------------------------------------------
@@ -2813,13 +3463,36 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_policy_count NUMBER;
         v_eligible_count NUMBER;
         v_validation_passed BOOLEAN := TRUE;
+        v_step_start TIMESTAMP := SYSTIMESTAMP;
+        v_step_number NUMBER;
+        v_validation_details CLOB;
+        v_error_msg VARCHAR2(4000);
     BEGIN
+        -- Get next step number
+        SELECT NVL(MAX(step_number), 0) + 1 INTO v_step_number
+        FROM cmr.dwh_migration_execution_log
+        WHERE task_id = p_task_id;
+
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
 
         IF v_task.apply_ilm_policies != 'Y' OR v_task.ilm_policy_template IS NULL THEN
             DBMS_OUTPUT.PUT_LINE('ILM policies not applied - skipping validation');
+
+            -- Log skip reason
+            log_step(
+                p_task_id => p_task_id,
+                p_step_number => v_step_number,
+                p_step_name => 'Validate ILM Policies',
+                p_step_type => 'VALIDATION',
+                p_sql => NULL,
+                p_status => 'SKIPPED',
+                p_start_time => v_step_start,
+                p_end_time => SYSTIMESTAMP,
+                p_error_message => 'ILM policies not applied or no template specified'
+            );
+
             RETURN;
         END IF;
 
@@ -2830,6 +3503,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
         DBMS_OUTPUT.PUT_LINE('');
 
+        -- Initialize validation details log
+        DBMS_LOB.CREATETEMPORARY(v_validation_details, TRUE, DBMS_LOB.SESSION);
+        DBMS_LOB.APPEND(v_validation_details, 'ILM Policy Validation Report' || CHR(10));
+        DBMS_LOB.APPEND(v_validation_details, 'Table: ' || v_task.source_owner || '.' || v_task.source_table || CHR(10));
+        DBMS_LOB.APPEND(v_validation_details, CHR(10));
+
         -- Check if policies were created
         SELECT COUNT(*) INTO v_policy_count
         FROM cmr.dwh_ilm_policies
@@ -2838,9 +3517,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         IF v_policy_count = 0 THEN
             DBMS_OUTPUT.PUT_LINE('✗ FAILED: No ILM policies found for table');
+            DBMS_LOB.APPEND(v_validation_details, '✗ FAILED: No ILM policies found for table' || CHR(10));
             v_validation_passed := FALSE;
         ELSE
             DBMS_OUTPUT.PUT_LINE('✓ Found ' || v_policy_count || ' ILM policies');
+            DBMS_LOB.APPEND(v_validation_details, '✓ Found ' || v_policy_count || ' ILM policies' || CHR(10));
 
             -- Display each policy
             FOR pol IN (
@@ -2856,22 +3537,33 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 DBMS_OUTPUT.PUT_LINE('    Type: ' || pol.policy_type);
                 DBMS_OUTPUT.PUT_LINE('    Action: ' || pol.action_type);
                 DBMS_OUTPUT.PUT_LINE('    Enabled: ' || pol.enabled);
+
+                DBMS_LOB.APPEND(v_validation_details, CHR(10) || '  Policy: ' || pol.policy_name || CHR(10));
+                DBMS_LOB.APPEND(v_validation_details, '    Type: ' || pol.policy_type || CHR(10));
+                DBMS_LOB.APPEND(v_validation_details, '    Action: ' || pol.action_type || CHR(10));
+                DBMS_LOB.APPEND(v_validation_details, '    Enabled: ' || pol.enabled || CHR(10));
+
                 IF pol.age_days IS NOT NULL THEN
                     DBMS_OUTPUT.PUT_LINE('    Trigger: ' || pol.age_days || ' days');
+                    DBMS_LOB.APPEND(v_validation_details, '    Trigger: ' || pol.age_days || ' days' || CHR(10));
                 END IF;
                 IF pol.age_months IS NOT NULL THEN
                     DBMS_OUTPUT.PUT_LINE('    Trigger: ' || pol.age_months || ' months');
+                    DBMS_LOB.APPEND(v_validation_details, '    Trigger: ' || pol.age_months || ' months' || CHR(10));
                 END IF;
                 IF pol.compression_type IS NOT NULL THEN
                     DBMS_OUTPUT.PUT_LINE('    Compression: ' || pol.compression_type);
+                    DBMS_LOB.APPEND(v_validation_details, '    Compression: ' || pol.compression_type || CHR(10));
                 END IF;
                 IF pol.target_tablespace IS NOT NULL THEN
                     DBMS_OUTPUT.PUT_LINE('    Tablespace: ' || pol.target_tablespace);
+                    DBMS_LOB.APPEND(v_validation_details, '    Tablespace: ' || pol.target_tablespace || CHR(10));
                 END IF;
             END LOOP;
         END IF;
 
         DBMS_OUTPUT.PUT_LINE('');
+        DBMS_LOB.APPEND(v_validation_details, CHR(10));
 
         -- Check if table is partitioned (required for partition-level ILM)
         DECLARE
@@ -2884,12 +3576,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             IF v_partitioned = 'YES' THEN
                 DBMS_OUTPUT.PUT_LINE('✓ Table is partitioned (ILM can operate on partitions)');
+                DBMS_LOB.APPEND(v_validation_details, '✓ Table is partitioned (ILM can operate on partitions)' || CHR(10));
             ELSE
                 DBMS_OUTPUT.PUT_LINE('⚠ WARNING: Table is not partitioned (ILM will operate on entire table)');
+                DBMS_LOB.APPEND(v_validation_details, '⚠ WARNING: Table is not partitioned (ILM will operate on entire table)' || CHR(10));
             END IF;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 DBMS_OUTPUT.PUT_LINE('✗ FAILED: Table not found');
+                DBMS_LOB.APPEND(v_validation_details, '✗ FAILED: Table not found' || CHR(10));
                 v_validation_passed := FALSE;
         END;
 
@@ -2908,15 +3603,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('');
             DBMS_OUTPUT.PUT_LINE('✓ Policy evaluation successful');
             DBMS_OUTPUT.PUT_LINE('  Eligible partitions now: ' || v_eligible_count);
+
+            DBMS_LOB.APPEND(v_validation_details, CHR(10) || '✓ Policy evaluation successful' || CHR(10));
+            DBMS_LOB.APPEND(v_validation_details, '  Eligible partitions now: ' || v_eligible_count || CHR(10));
+
             IF v_eligible_count > 0 THEN
                 DBMS_OUTPUT.PUT_LINE('  Note: These partitions are ready for ILM actions');
+                DBMS_LOB.APPEND(v_validation_details, '  Note: These partitions are ready for ILM actions' || CHR(10));
             ELSE
                 DBMS_OUTPUT.PUT_LINE('  Note: No partitions currently eligible (expected for new tables)');
+                DBMS_LOB.APPEND(v_validation_details, '  Note: No partitions currently eligible (expected for new tables)' || CHR(10));
             END IF;
 
         EXCEPTION
             WHEN OTHERS THEN
-                DBMS_OUTPUT.PUT_LINE('✗ FAILED: Policy evaluation error: ' || SQLERRM);
+                v_error_msg := SQLERRM;
+                DBMS_OUTPUT.PUT_LINE('✗ FAILED: Policy evaluation error: ' || v_error_msg);
+                DBMS_LOB.APPEND(v_validation_details, '✗ FAILED: Policy evaluation error: ' || v_error_msg || CHR(10));
                 v_validation_passed := FALSE;
         END;
 
@@ -2924,15 +3627,56 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_OUTPUT.PUT_LINE('========================================');
         IF v_validation_passed THEN
             DBMS_OUTPUT.PUT_LINE('ILM Validation: PASSED');
+            DBMS_LOB.APPEND(v_validation_details, CHR(10) || 'ILM Validation: PASSED' || CHR(10));
         ELSE
             DBMS_OUTPUT.PUT_LINE('ILM Validation: FAILED');
+            DBMS_LOB.APPEND(v_validation_details, CHR(10) || 'ILM Validation: FAILED' || CHR(10));
         END IF;
         DBMS_OUTPUT.PUT_LINE('========================================');
         DBMS_OUTPUT.PUT_LINE('');
 
+        -- Log validation results to table
+        log_step(
+            p_task_id => p_task_id,
+            p_step_number => v_step_number,
+            p_step_name => 'Validate ILM Policies',
+            p_step_type => 'VALIDATION',
+            p_sql => v_validation_details,
+            p_status => CASE WHEN v_validation_passed THEN 'SUCCESS' ELSE 'FAILED' END,
+            p_start_time => v_step_start,
+            p_end_time => SYSTIMESTAMP,
+            p_error_message => CASE WHEN NOT v_validation_passed THEN 'ILM policy validation failed - see details in sql_statement' END
+        );
+
+        -- Cleanup temporary LOB
+        IF DBMS_LOB.ISTEMPORARY(v_validation_details) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(v_validation_details);
+        END IF;
+
     EXCEPTION
         WHEN OTHERS THEN
-            DBMS_OUTPUT.PUT_LINE('ERROR validating ILM policies: ' || SQLERRM);
+            v_error_msg := SQLERRM;
+            DBMS_OUTPUT.PUT_LINE('ERROR validating ILM policies: ' || v_error_msg);
+
+            -- Log error
+            log_step(
+                p_task_id => p_task_id,
+                p_step_number => v_step_number,
+                p_step_name => 'Validate ILM Policies',
+                p_step_type => 'VALIDATION',
+                p_sql => v_validation_details,
+                p_status => 'ERROR',
+                p_start_time => v_step_start,
+                p_end_time => SYSTIMESTAMP,
+                p_error_code => SQLCODE,
+                p_error_message => v_error_msg
+            );
+
+            -- Cleanup temporary LOB
+            IF DBMS_LOB.ISTEMPORARY(v_validation_details) = 1 THEN
+                DBMS_LOB.FREETEMPORARY(v_validation_details);
+            END IF;
+
             RAISE;
     END validate_ilm_policies;
 

@@ -594,6 +594,158 @@ WHEN NOT MATCHED THEN
         ]'
     );
 
+-- =============================================================================
+-- SECTION 1B: TIERED ILM TEMPLATES (ILM-Aware Initial Partitioning)
+-- =============================================================================
+-- These templates include tier_config for age-stratified partition creation
+-- during migration. Creates HOT/WARM/COLD partitions with different intervals,
+-- tablespaces, and compression - minimizing post-migration ILM work.
+--
+-- IMPORTANT: tier_config vs policies - TWO COMPONENTS WORKING TOGETHER:
+--
+--   tier_config: ONE-TIME partition creation at migration time
+--     - Analyzes existing data age distribution
+--     - Creates COLD/WARM/HOT partitions with appropriate intervals
+--     - Places historical data in correct tier immediately
+--     - Result: Zero post-migration moves for existing data
+--
+--   policies: ONGOING lifecycle management post-migration
+--     - Applied by ILM scheduler to ALL partitions (old and new)
+--     - Manages future partitions as they age
+--     - Ensures uniform lifecycle treatment
+--     - Result: Automated tier transitions for new partitions
+--
+--   Age thresholds MUST ALIGN between tier_config and policies!
+--   Example: tier_config.warm.age_months=36 should match a MOVE policy at 36m
+--            This ensures consistent treatment: historical data placed in WARM
+--            at migration, future data moved to WARM at 36 months.
+--
+-- See docs/planning/ILM_AWARE_PARTITIONING_PLAN.md for detailed explanation.
+-- =============================================================================
+
+-- Tiered Fact Table - 7 Year Retention
+-- NOTE: Age thresholds at 12m, 36m, 84m are aligned between tier_config and policies
+--       tier_config places existing data, policies manage future partitions
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'FACT_TABLE_STANDARD_TIERED' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'FACT_TABLE_STANDARD_TIERED',
+        'ILM-aware partitioning: HOT=1y monthly/TBS_HOT/no compression, WARM=3y yearly/TBS_WARM/BASIC, COLD=7y yearly/TBS_COLD/OLTP',
+        'FACT',
+        '{
+            "tier_config": {
+                "enabled": true,
+                "hot": {
+                    "age_months": 12,
+                    "interval": "MONTHLY",
+                    "tablespace": "TBS_HOT",
+                    "compression": "NONE"
+                },
+                "warm": {
+                    "age_months": 36,
+                    "interval": "YEARLY",
+                    "tablespace": "TBS_WARM",
+                    "compression": "BASIC"
+                },
+                "cold": {
+                    "age_months": 84,
+                    "interval": "YEARLY",
+                    "tablespace": "TBS_COLD",
+                    "compression": "OLTP"
+                }
+            },
+            "policies": [
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "BASIC", "priority": 200, "comment": "Ongoing: move partitions to WARM at 12m (aligns with tier_config.hot.age_months)"},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 36, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "OLTP", "priority": 300, "comment": "Ongoing: move partitions to COLD at 36m (aligns with tier_config.warm.age_months)"},
+                {"policy_name": "{TABLE}_READONLY", "age_months": 84, "action": "READ_ONLY", "priority": 400, "comment": "Ongoing: make partitions read-only at 84m (aligns with tier_config.cold.age_months)"},
+                {"policy_name": "{TABLE}_PURGE", "age_months": 84, "action": "DROP", "priority": 900, "comment": "Ongoing: drop partitions at 84m (retention limit)"}
+            ]
+        }'
+    );
+
+-- Tiered Events Table - 90 Day Retention
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'EVENTS_SHORT_RETENTION_TIERED' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'EVENTS_SHORT_RETENTION_TIERED',
+        'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT, WARM=30d weekly/TBS_WARM/QUERY HIGH, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH',
+        'EVENTS',
+        '{
+            "tier_config": {
+                "enabled": true,
+                "hot": {
+                    "age_days": 7,
+                    "interval": "DAILY",
+                    "tablespace": "TBS_HOT",
+                    "compression": "NONE"
+                },
+                "warm": {
+                    "age_days": 30,
+                    "interval": "WEEKLY",
+                    "tablespace": "TBS_WARM",
+                    "compression": "QUERY HIGH"
+                },
+                "cold": {
+                    "age_days": 90,
+                    "interval": "MONTHLY",
+                    "tablespace": "TBS_COLD",
+                    "compression": "ARCHIVE HIGH"
+                }
+            },
+            "policies": [
+                {"policy_name": "{TABLE}_TIER_WARM", "age_days": 7, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+                {"policy_name": "{TABLE}_PURGE", "age_days": 90, "action": "DROP", "priority": 900}
+            ]
+        }'
+    );
+
+-- Tiered SCD2 Table - Permanent Retention
+MERGE INTO cmr.dwh_migration_ilm_templates t
+USING (SELECT 'SCD2_VALID_FROM_TO_TIERED' AS template_name FROM DUAL) s
+ON (t.template_name = s.template_name)
+WHEN NOT MATCHED THEN
+    INSERT (template_name, description, table_type, policies_json)
+    VALUES (
+        'SCD2_VALID_FROM_TO_TIERED',
+        'ILM-aware partitioning for SCD2: HOT=1y monthly/TBS_HOT, WARM=5y yearly/TBS_WARM/QUERY HIGH, COLD=permanent yearly/TBS_COLD/ARCHIVE HIGH',
+        'SCD2',
+        '{
+            "tier_config": {
+                "enabled": true,
+                "hot": {
+                    "age_months": 12,
+                    "interval": "MONTHLY",
+                    "tablespace": "TBS_HOT",
+                    "compression": "NONE"
+                },
+                "warm": {
+                    "age_months": 60,
+                    "interval": "YEARLY",
+                    "tablespace": "TBS_WARM",
+                    "compression": "QUERY HIGH"
+                },
+                "cold": {
+                    "age_months": null,
+                    "interval": "YEARLY",
+                    "tablespace": "TBS_COLD",
+                    "compression": "ARCHIVE HIGH"
+                }
+            },
+            "policies": [
+                {"policy_name": "{TABLE}_TIER_WARM", "age_months": 12, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "priority": 200},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_months": 60, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "priority": 300},
+                {"policy_name": "{TABLE}_READONLY", "age_months": 60, "action": "READ_ONLY", "priority": 400}
+            ]
+        }'
+    );
+
 COMMIT;
 
 
