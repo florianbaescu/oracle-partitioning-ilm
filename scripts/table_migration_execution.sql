@@ -1704,13 +1704,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('Table: ' || v_task.source_owner || '.' || v_task.source_table);
             DBMS_OUTPUT.PUT_LINE('Method: CTAS (Create Table As Select)');
+            DBMS_OUTPUT.PUT_LINE('Rename mode: ' || CASE WHEN NVL(v_task.rename_original_table, 'Y') = 'Y'
+                                                         THEN 'Original->_OLD, Migrated->Original'
+                                                         ELSE 'Original unchanged, Migrated->_MIGR' END);
             DBMS_OUTPUT.PUT_LINE('');
         ELSE
             DBMS_OUTPUT.PUT_LINE('Migrating using CTAS method: ' || v_task.source_table);
         END IF;
 
-        v_new_table := v_task.source_table || '_PART';
-        v_old_table := v_task.source_table || '_OLD';
+        -- Determine naming based on rename_original_table parameter
+        IF NVL(v_task.rename_original_table, 'Y') = 'Y' THEN
+            -- Default behavior: rename original to _OLD, migrated becomes original name
+            v_new_table := v_task.source_table || '_PART';
+            v_old_table := v_task.source_table || '_OLD';
+        ELSE
+            -- New behavior: keep original unchanged, migrated stays as _MIGR
+            v_new_table := v_task.source_table || '_MIGR';
+            v_old_table := NULL;  -- No rename of original table
+        END IF;
 
         -- Step 1: Build partition DDL
         v_start := SYSTIMESTAMP;
@@ -1905,34 +1916,36 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END IF;
         v_step := v_step + 10;
 
-        -- Step 7: Rename tables
-        v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_task.source_table ||
-                ' RENAME TO ' || v_old_table;
+        -- Step 7: Rename tables (conditional based on rename_original_table parameter)
+        IF NVL(v_task.rename_original_table, 'Y') = 'Y' THEN
+            -- Default behavior: rename original to _OLD, migrated becomes original name
+            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_task.source_table ||
+                    ' RENAME TO ' || v_old_table;
 
-        IF p_simulate THEN
-            DBMS_OUTPUT.PUT_LINE('Step 6: RENAME TABLES (CUTOVER)');
-            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
-            DBMS_OUTPUT.PUT_LINE(v_sql || ';');
-            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
-                    ' RENAME TO ' || v_task.source_table;
-            DBMS_OUTPUT.PUT_LINE(v_sql || ';');
-            DBMS_OUTPUT.PUT_LINE('');
-            DBMS_OUTPUT.PUT_LINE('Step 7: RENAME INDEXES');
-            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
-            DBMS_OUTPUT.PUT_LINE('(Indexes with _MIGR suffix will be renamed to original names)');
-            DBMS_OUTPUT.PUT_LINE('');
-            DBMS_OUTPUT.PUT_LINE('========================================');
-            DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
-            DBMS_OUTPUT.PUT_LINE('========================================');
-            DBMS_OUTPUT.PUT_LINE('');
-            DBMS_OUTPUT.PUT_LINE('Summary:');
-            DBMS_OUTPUT.PUT_LINE('  - Original table will be renamed to: ' || v_old_table);
-            DBMS_OUTPUT.PUT_LINE('  - New partitioned table will become: ' || v_task.source_table);
-            DBMS_OUTPUT.PUT_LINE('  - Backup preserved for rollback: ' || v_old_table);
-            DBMS_OUTPUT.PUT_LINE('');
-            DBMS_OUTPUT.PUT_LINE('To execute this migration, call:');
-            DBMS_OUTPUT.PUT_LINE('  EXEC pck_dwh_table_migration_executor.execute_migration(p_task_id => ' || p_task_id || ');');
-            DBMS_OUTPUT.PUT_LINE('');
+            IF p_simulate THEN
+                DBMS_OUTPUT.PUT_LINE('Step 6: RENAME TABLES (CUTOVER)');
+                DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                DBMS_OUTPUT.PUT_LINE(v_sql || ';');
+                v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_new_table ||
+                        ' RENAME TO ' || v_task.source_table;
+                DBMS_OUTPUT.PUT_LINE(v_sql || ';');
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('Step 7: RENAME INDEXES');
+                DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+                DBMS_OUTPUT.PUT_LINE('(Indexes with _MIGR suffix will be renamed to original names)');
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('========================================');
+                DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
+                DBMS_OUTPUT.PUT_LINE('========================================');
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('Summary:');
+                DBMS_OUTPUT.PUT_LINE('  - Original table will be renamed to: ' || v_old_table);
+                DBMS_OUTPUT.PUT_LINE('  - New partitioned table will become: ' || v_task.source_table);
+                DBMS_OUTPUT.PUT_LINE('  - Backup preserved for rollback: ' || v_old_table);
+                DBMS_OUTPUT.PUT_LINE('');
+                DBMS_OUTPUT.PUT_LINE('To execute this migration, call:');
+                DBMS_OUTPUT.PUT_LINE('  EXEC pck_dwh_table_migration_executor.execute_migration(p_task_id => ' || p_task_id || ');');
+                DBMS_OUTPUT.PUT_LINE('');
         ELSE
             v_start := SYSTIMESTAMP;
 
@@ -2115,6 +2128,40 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('  Original table renamed to: ' || v_old_table);
             DBMS_OUTPUT.PUT_LINE('  New partitioned table: ' || v_task.source_table);
         END IF;
+    ELSE
+        -- Alternative path: rename_original_table='N' - keep original table, migrated stays as _MIGR
+        IF p_simulate THEN
+            DBMS_OUTPUT.PUT_LINE('Step 6: SKIP TABLE RENAME (CUTOVER)');
+            DBMS_OUTPUT.PUT_LINE('----------------------------------------');
+            DBMS_OUTPUT.PUT_LINE('Original table will remain unchanged: ' || v_task.source_owner || '.' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('Migrated table will keep name: ' || v_new_table);
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE');
+            DBMS_OUTPUT.PUT_LINE('========================================');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('Summary:');
+            DBMS_OUTPUT.PUT_LINE('  - Original table remains: ' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('  - New partitioned table: ' || v_new_table);
+            DBMS_OUTPUT.PUT_LINE('  - No backup created (original unchanged)');
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('To execute this migration, call:');
+            DBMS_OUTPUT.PUT_LINE('  EXEC pck_dwh_table_migration_executor.execute_migration(p_task_id => ' || p_task_id || ');');
+            DBMS_OUTPUT.PUT_LINE('');
+        ELSE
+            -- No table rename needed, just log completion
+            DBMS_OUTPUT.PUT_LINE('Migration completed successfully');
+            DBMS_OUTPUT.PUT_LINE('  Original table unchanged: ' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('  New partitioned table: ' || v_new_table);
+
+            -- Update task - no backup since original unchanged
+            UPDATE cmr.dwh_migration_tasks
+            SET backup_table_name = NULL,
+                can_rollback = 'N'
+            WHERE task_id = p_task_id;
+            COMMIT;
+        END IF;
+    END IF;
 
     EXCEPTION
         WHEN OTHERS THEN
@@ -2349,6 +2396,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('  6. Gather statistics on interim table');
             DBMS_OUTPUT.PUT_LINE('  7. DBMS_REDEFINITION.FINISH_REDEF_TABLE');
             DBMS_OUTPUT.PUT_LINE('     (Final atomic swap - brief lock ~seconds)');
+            IF NVL(v_task.rename_original_table, 'Y') = 'N' THEN
+                DBMS_OUTPUT.PUT_LINE('  8. Rename tables (rename_original_table=N):');
+                DBMS_OUTPUT.PUT_LINE('     - Partitioned table renamed to: ' || v_task.source_table || '_MIGR');
+                DBMS_OUTPUT.PUT_LINE('     - Original structure renamed back to: ' || v_task.source_table);
+            END IF;
             DBMS_OUTPUT.PUT_LINE('');
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('SIMULATION COMPLETE - ONLINE Method');
@@ -2356,6 +2408,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             DBMS_OUTPUT.PUT_LINE('Summary:');
             DBMS_OUTPUT.PUT_LINE('  - Table will remain accessible during migration');
             DBMS_OUTPUT.PUT_LINE('  - Only brief lock during final swap');
+            IF NVL(v_task.rename_original_table, 'Y') = 'Y' THEN
+                DBMS_OUTPUT.PUT_LINE('  - Final result: ' || v_task.source_table || ' (partitioned)');
+                DBMS_OUTPUT.PUT_LINE('  - Interim/backup: ' || v_interim_table);
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  - Original unchanged: ' || v_task.source_table);
+                DBMS_OUTPUT.PUT_LINE('  - Partitioned table: ' || v_task.source_table || '_MIGR');
+            END IF;
             DBMS_OUTPUT.PUT_LINE('  - Interim table: ' || v_interim_table);
 
             IF v_has_pk THEN
@@ -2495,16 +2554,52 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END;
         v_step := v_step + 10;
 
-        -- Update task - interim table becomes the backup
-        UPDATE cmr.dwh_migration_tasks
-        SET backup_table_name = v_interim_table,
-            can_rollback = 'Y'
-        WHERE task_id = p_task_id;
-        COMMIT;
+        -- Step 8: Handle table naming based on rename_original_table parameter
+        IF NVL(v_task.rename_original_table, 'Y') = 'N' THEN
+            -- Alternative behavior: rename swapped tables to keep original name unchanged
+            -- After FINISH_REDEF_TABLE:
+            --   - Original table name now has partitioned structure
+            --   - Interim table name now has original structure
+            -- We need to swap them back and rename appropriately
+            v_step := v_step + 10;
+            v_start := SYSTIMESTAMP;
+            DBMS_OUTPUT.PUT_LINE('  Adjusting table names (rename_original_table=N)...');
 
-        DBMS_OUTPUT.PUT_LINE('Online migration completed successfully');
-        DBMS_OUTPUT.PUT_LINE('  Table migrated: ' || v_task.source_table || ' (now partitioned)');
-        DBMS_OUTPUT.PUT_LINE('  Interim table available: ' || v_interim_table || ' (for rollback)');
+            -- Rename current source_table (partitioned) to _MIGR
+            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_task.source_table ||
+                    ' RENAME TO ' || v_task.source_table || '_MIGR';
+            EXECUTE IMMEDIATE v_sql;
+
+            -- Rename interim table (original structure) back to source_table
+            v_sql := 'ALTER TABLE ' || v_task.source_owner || '.' || v_interim_table ||
+                    ' RENAME TO ' || v_task.source_table;
+            EXECUTE IMMEDIATE v_sql;
+
+            log_step(p_task_id, v_step, 'Rename tables (keep original unchanged)', 'RENAME', v_sql,
+                    'SUCCESS', v_start, SYSTIMESTAMP);
+
+            -- Update task - no true backup since original unchanged
+            UPDATE cmr.dwh_migration_tasks
+            SET backup_table_name = NULL,
+                can_rollback = 'N'
+            WHERE task_id = p_task_id;
+            COMMIT;
+
+            DBMS_OUTPUT.PUT_LINE('Online migration completed successfully');
+            DBMS_OUTPUT.PUT_LINE('  Original table unchanged: ' || v_task.source_table);
+            DBMS_OUTPUT.PUT_LINE('  New partitioned table: ' || v_task.source_table || '_MIGR');
+        ELSE
+            -- Default behavior: keep Oracle's swap (original is now partitioned)
+            UPDATE cmr.dwh_migration_tasks
+            SET backup_table_name = v_interim_table,
+                can_rollback = 'Y'
+            WHERE task_id = p_task_id;
+            COMMIT;
+
+            DBMS_OUTPUT.PUT_LINE('Online migration completed successfully');
+            DBMS_OUTPUT.PUT_LINE('  Table migrated: ' || v_task.source_table || ' (now partitioned)');
+            DBMS_OUTPUT.PUT_LINE('  Interim table available: ' || v_interim_table || ' (for rollback)');
+        END IF;
 
     EXCEPTION
         WHEN OTHERS THEN

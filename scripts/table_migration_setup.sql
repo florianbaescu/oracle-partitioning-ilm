@@ -71,6 +71,7 @@ BEGIN
             enable_row_movement CHAR(1) DEFAULT ''Y'',
             automatic_list      CHAR(1) DEFAULT ''N'',
             list_default_values VARCHAR2(4000),
+            rename_original_table CHAR(1) DEFAULT ''Y'',          -- Y: rename original to _OLD, migrated becomes original name; N: keep original unchanged, migrated stays as _MIGR
 
             -- ILM integration
             apply_ilm_policies  CHAR(1) DEFAULT ''Y'',
@@ -103,7 +104,8 @@ BEGIN
             CONSTRAINT fk_mig_task_project FOREIGN KEY (project_id) REFERENCES cmr.dwh_migration_projects(project_id),
             CONSTRAINT chk_task_status CHECK (status IN (''PENDING'', ''ANALYZING'', ''ANALYZED'', ''READY'', ''RUNNING'', ''COMPLETED'', ''FAILED'', ''ROLLED_BACK'')),
             CONSTRAINT chk_mig_method CHECK (migration_method IN (''CTAS'', ''ONLINE'', ''EXCHANGE'')),
-            CONSTRAINT chk_automatic_list CHECK (automatic_list IN (''Y'', ''N''))
+            CONSTRAINT chk_automatic_list CHECK (automatic_list IN (''Y'', ''N'')),
+            CONSTRAINT chk_rename_original CHECK (rename_original_table IN (''Y'', ''N''))
         )';
     DBMS_OUTPUT.PUT_LINE('Created table: dwh_migration_tasks');
 EXCEPTION
@@ -156,6 +158,7 @@ COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.enable_row_movement IS 'Enable row movement for partitioned table - allows Oracle to move rows between partitions when partition key values change (recommended for partitioned tables)';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.automatic_list IS 'Enable AUTOMATIC LIST partitioning (Oracle 12.2+). Creates partitions automatically for new values.';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.list_default_values IS 'Default values for P_XDEF partition (e.g., ''NAV'' for VARCHAR, -1 for NUMBER, DATE ''5999-12-31'' for DATE). If NULL, framework determines based on data type.';
+COMMENT ON COLUMN cmr.dwh_migration_tasks.rename_original_table IS 'Y (default): rename original table to _OLD and migrated table becomes original name; N: keep original table name unchanged, migrated table stays as _MIGR suffix';
 
 
 -- -----------------------------------------------------------------------------
