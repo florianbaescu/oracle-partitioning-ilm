@@ -157,6 +157,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_OUTPUT.PUT_LINE('  Backup created: ' || p_backup_name);
     END create_backup_table;
 
+    -- ==========================================================================
+    -- Forward Declarations for Private Procedures
+    -- ==========================================================================
+
+    PROCEDURE build_tiered_partitions(
+        p_task dwh_migration_tasks%ROWTYPE,
+        p_tier_config JSON_OBJECT_T,
+        p_ddl OUT CLOB
+    );
+
+    PROCEDURE build_uniform_partitions(
+        p_task dwh_migration_tasks%ROWTYPE,
+        p_ddl OUT CLOB
+    );
 
     -- ==========================================================================
     -- Enhanced build_partition_ddl with Tiered Partitioning Support
@@ -3343,6 +3357,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_error_msg VARCHAR2(4000);
         v_detected_template VARCHAR2(100);
         v_auto_detected BOOLEAN := FALSE;
+        v_has_effective_date BOOLEAN;
+        v_has_valid_from_to BOOLEAN;
     BEGIN
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
@@ -3352,23 +3368,42 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         IF v_task.ilm_policy_template IS NULL THEN
             DBMS_OUTPUT.PUT_LINE('No ILM policy template specified - attempting auto-detection...');
 
+            -- Check for SCD2 column patterns (must be done in SQL context)
+            BEGIN
+                SELECT 1 INTO v_has_effective_date
+                FROM dual
+                WHERE EXISTS (
+                    SELECT 1 FROM all_tab_columns
+                    WHERE owner = v_task.source_owner
+                    AND table_name = v_task.source_table
+                    AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM')
+                );
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_has_effective_date := FALSE;
+            END;
+
+            BEGIN
+                SELECT 1 INTO v_has_valid_from_to
+                FROM dual
+                WHERE EXISTS (
+                    SELECT 1 FROM all_tab_columns
+                    WHERE owner = v_task.source_owner
+                    AND table_name = v_task.source_table
+                    AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO')
+                );
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_has_valid_from_to := FALSE;
+            END;
+
             -- Auto-detect based on table naming patterns
             v_detected_template := CASE
                 -- SCD2 patterns
                 WHEN REGEXP_LIKE(v_task.source_table, '_SCD2$|_HIST$|_HISTORICAL$', 'i') THEN
                     CASE
-                        WHEN EXISTS (
-                            SELECT 1 FROM all_tab_columns
-                            WHERE owner = v_task.source_owner
-                            AND table_name = v_task.source_table
-                            AND column_name IN ('EFFECTIVE_DATE', 'EFFECTIVE_FROM')
-                        ) THEN 'SCD2_EFFECTIVE_DATE'
-                        WHEN EXISTS (
-                            SELECT 1 FROM all_tab_columns
-                            WHERE owner = v_task.source_owner
-                            AND table_name = v_task.source_table
-                            AND column_name IN ('VALID_FROM_DTTM', 'VALID_TO_DTTM', 'VALID_FROM', 'VALID_TO')
-                        ) THEN 'SCD2_VALID_FROM_TO'
+                        WHEN v_has_effective_date THEN 'SCD2_EFFECTIVE_DATE'
+                        WHEN v_has_valid_from_to THEN 'SCD2_VALID_FROM_TO'
                         ELSE 'HIST_TABLE'
                     END
                 -- Events patterns
