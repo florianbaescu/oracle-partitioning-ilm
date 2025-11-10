@@ -3431,7 +3431,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 jt.age_months,
                 jt.compression_type,
                 jt.target_tablespace,
-                jt.pctfree,
+                jt.pctfree AS pct_free,
                 jt.priority,
                 jt.enabled
             FROM cmr.dwh_migration_ilm_templates t,
@@ -3494,7 +3494,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         policy_rec.age_months,
                         policy_rec.compression_type,
                         policy_rec.target_tablespace,
-                        policy_rec.pctfree,
+                        policy_rec.pct_free,
                         policy_rec.priority,
                         policy_rec.enabled,
                         USER || ' (Migration Task ' || p_task_id || ')'
