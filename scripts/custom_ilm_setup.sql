@@ -438,33 +438,9 @@ COMMENT ON TABLE cmr.dwh_ilm_threshold_profiles IS
 -- Insert commonly used threshold profiles
 MERGE INTO cmr.dwh_ilm_threshold_profiles t
 USING (SELECT 'DEFAULT' AS profile_name,
-              'Standard aging profile (matches global config)' AS description,
-              90 AS hot_threshold_days,
-              365 AS warm_threshold_days,
-              1095 AS cold_threshold_days
-       FROM dual) s
-ON (t.profile_name = s.profile_name)
-WHEN NOT MATCHED THEN
-    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
-    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
-
-MERGE INTO cmr.dwh_ilm_threshold_profiles t
-USING (SELECT 'FAST_AGING' AS profile_name,
-              'Fast aging for transactional data (sales, orders)' AS description,
-              30 AS hot_threshold_days,
-              90 AS warm_threshold_days,
-              180 AS cold_threshold_days
-       FROM dual) s
-ON (t.profile_name = s.profile_name)
-WHEN NOT MATCHED THEN
-    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
-    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
-
-MERGE INTO cmr.dwh_ilm_threshold_profiles t
-USING (SELECT 'SLOW_AGING' AS profile_name,
-              'Slow aging for reference/master data' AS description,
-              180 AS hot_threshold_days,
-              730 AS warm_threshold_days,
+              'Standard aging profile: HOT=0-24m (730d), WARM=24-60m (1825d), COLD=>60m' AS description,
+              730 AS hot_threshold_days,
+              1825 AS warm_threshold_days,
               1825 AS cold_threshold_days
        FROM dual) s
 ON (t.profile_name = s.profile_name)
@@ -473,10 +449,34 @@ WHEN NOT MATCHED THEN
     VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
 
 MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'FAST_AGING' AS profile_name,
+              'Fast aging for high-volume transactional data: HOT=0-3m (90d), WARM=3-12m (365d), COLD=>12m' AS description,
+              90 AS hot_threshold_days,
+              365 AS warm_threshold_days,
+              365 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (SELECT 'SLOW_AGING' AS profile_name,
+              'Slow aging for reference/master data: HOT=0-36m (1095d), WARM=36-84m (2555d), COLD=>84m' AS description,
+              1095 AS hot_threshold_days,
+              2555 AS warm_threshold_days,
+              2555 AS cold_threshold_days
+       FROM dual) s
+ON (t.profile_name = s.profile_name)
+WHEN NOT MATCHED THEN
+    INSERT (profile_name, description, hot_threshold_days, warm_threshold_days, cold_threshold_days)
+    VALUES (s.profile_name, s.description, s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days);
+
+MERGE INTO cmr.dwh_ilm_threshold_profiles t
 USING (SELECT 'AGGRESSIVE_ARCHIVE' AS profile_name,
-              'Aggressive archival for high-volume data' AS description,
-              14 AS hot_threshold_days,
-              30 AS warm_threshold_days,
+              'Aggressive archival for high-volume data: HOT=0-30d, WARM=30-90d, COLD=>90d' AS description,
+              30 AS hot_threshold_days,
+              90 AS warm_threshold_days,
               90 AS cold_threshold_days
        FROM dual) s
 ON (t.profile_name = s.profile_name)
