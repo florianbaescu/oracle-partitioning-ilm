@@ -96,6 +96,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
     END get_dwh_ilm_config;
 
     -- ==========================================================================
+    -- Helper Function: Generate Compression Clause
+    -- ==========================================================================
+
+    FUNCTION get_compression_clause(p_compression_type VARCHAR2) RETURN VARCHAR2 AS
+    BEGIN
+        IF p_compression_type IS NULL OR UPPER(p_compression_type) = 'NONE' THEN
+            RETURN '';
+        ELSIF UPPER(p_compression_type) = 'BASIC' THEN
+            -- BASIC compression uses COMPRESS or COMPRESS BASIC (not COMPRESS FOR BASIC)
+            RETURN ' COMPRESS BASIC';
+        ELSE
+            -- Advanced compression: OLTP, QUERY HIGH, QUERY LOW, ARCHIVE HIGH, etc.
+            RETURN ' COMPRESS FOR ' || p_compression_type;
+        END IF;
+    END get_compression_clause;
+
+    -- ==========================================================================
     -- Private Logging Procedure
     -- ==========================================================================
 
@@ -397,7 +414,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END;
 
         IF p_task.use_compression = 'Y' THEN
-            v_storage_clause := v_storage_clause || ' COMPRESS FOR ' || p_task.compression_type;
+            v_storage_clause := v_storage_clause || get_compression_clause(p_task.compression_type);
         END IF;
         IF p_task.parallel_degree > 1 THEN
             v_storage_clause := v_storage_clause || ' PARALLEL ' || p_task.parallel_degree;
@@ -812,7 +829,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         ' TABLESPACE ' || v_cold_tablespace);
 
                     IF v_cold_compression != 'NONE' THEN
-                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                        DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_cold_compression));
                     END IF;
 
                     DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
@@ -832,7 +849,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         ' TABLESPACE ' || v_cold_tablespace);
 
                     IF v_cold_compression != 'NONE' THEN
-                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                        DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_cold_compression));
                     END IF;
 
                     DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
@@ -859,7 +876,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         ' TABLESPACE ' || v_cold_tablespace);
 
                     IF v_cold_compression != 'NONE' THEN
-                        DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_cold_compression);
+                        DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_cold_compression));
                     END IF;
 
                     DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_cold_pctfree);
@@ -894,7 +911,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' TABLESPACE ' || v_warm_tablespace);
 
                 IF v_warm_compression != 'NONE' THEN
-                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_warm_compression));
                 END IF;
 
                 DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_warm_pctfree);
@@ -914,7 +931,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' TABLESPACE ' || v_warm_tablespace);
 
                 IF v_warm_compression != 'NONE' THEN
-                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_warm_compression);
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_warm_compression));
                 END IF;
 
                 DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_warm_pctfree);
@@ -943,7 +960,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' TABLESPACE ' || v_hot_tablespace);
 
                 IF v_hot_compression != 'NONE' THEN
-                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_hot_compression));
                 END IF;
 
                 DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
@@ -963,7 +980,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' TABLESPACE ' || v_hot_tablespace);
 
                 IF v_hot_compression != 'NONE' THEN
-                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_hot_compression));
                 END IF;
 
                 DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
@@ -983,7 +1000,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     ' TABLESPACE ' || v_hot_tablespace);
 
                 IF v_hot_compression != 'NONE' THEN
-                    DBMS_LOB.APPEND(v_partition_list, ' COMPRESS FOR ' || v_hot_compression);
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_hot_compression));
                 END IF;
 
                 DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_hot_pctfree);
