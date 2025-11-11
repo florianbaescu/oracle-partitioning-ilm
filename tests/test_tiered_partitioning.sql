@@ -2,6 +2,18 @@
 -- Comprehensive Test Suite for Tiered Partitioning
 -- Tests end-to-end functionality of ILM-aware partition generation
 -- =============================================================================
+--
+-- IMPORTANT: This test suite runs in SIMULATE mode (p_simulate => TRUE)
+--            - DDL is generated and displayed but NOT executed
+--            - No actual tables are created or migrated
+--            - No execution log entries are created (log only populated in real execution)
+--            - Test tables and tasks are reused if they already exist
+--
+-- To run actual migrations (non-simulate):
+--   Change p_simulate => TRUE to p_simulate => FALSE in execute_migration calls
+--   WARNING: This will actually create partitioned tables and modify data
+--
+-- =============================================================================
 
 SET SERVEROUTPUT ON SIZE UNLIMITED
 SET LINESIZE 200
@@ -224,18 +236,11 @@ BEGIN
         DBMS_OUTPUT.PUT_LINE('Strategy: ' || rec.recommended_strategy);
     END LOOP;
 
-    -- Query execution log
+    -- Note: Execution log is only populated when p_simulate => FALSE
+    -- In simulate mode, we only generate DDL without executing or logging
     DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('Execution Log:');
-    FOR log_rec IN (
-        SELECT step_name, status, duration_seconds
-        FROM cmr.dwh_migration_execution_log
-        WHERE task_id = v_task_id
-        ORDER BY step_number
-    ) LOOP
-        DBMS_OUTPUT.PUT_LINE('  ' || log_rec.step_name || ': ' || log_rec.status ||
-                           ' (' || ROUND(log_rec.duration_seconds, 2) || 's)');
-    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('Note: Running in SIMULATE mode - no execution log entries created');
+    DBMS_OUTPUT.PUT_LINE('      (Execution log only populated when p_simulate => FALSE)');
 
     COMMIT;
 END;
@@ -559,18 +564,22 @@ WHERE task_name LIKE 'Test%'
 ORDER BY task_id;
 
 PROMPT
-PROMPT Execution log summary:
+PROMPT Analysis results:
 SELECT
     t.task_name,
-    l.step_name,
-    l.status,
-    ROUND(l.duration_seconds, 2) as duration_sec
-FROM cmr.dwh_migration_execution_log l
-JOIN cmr.dwh_migration_tasks t ON t.task_id = l.task_id
+    a.table_rows,
+    TO_CHAR(a.partition_boundary_min_date, 'YYYY-MM-DD') as min_date,
+    TO_CHAR(a.partition_boundary_max_date, 'YYYY-MM-DD') as max_date,
+    a.partition_range_years,
+    SUBSTR(a.recommended_strategy, 1, 40) as strategy
+FROM cmr.dwh_migration_tasks t
+JOIN cmr.dwh_migration_analysis a ON a.task_id = t.task_id
 WHERE t.task_name LIKE 'Test%'
-  AND l.step_name LIKE '%Partition%'
-ORDER BY t.task_id, l.step_number;
+ORDER BY t.task_id;
 
+PROMPT
+PROMPT Note: Execution log is empty because all tests ran in SIMULATE mode
+PROMPT       To see execution log entries, run execute_migration with p_simulate => FALSE
 PROMPT
 PROMPT ========================================
 PROMPT Test Suite Complete
