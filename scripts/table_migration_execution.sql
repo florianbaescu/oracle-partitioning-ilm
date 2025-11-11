@@ -1089,6 +1089,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Build DDL
         p_ddl := 'CREATE TABLE ' || p_task.source_owner || '.' || p_task.source_table || '_PART' || CHR(10);
         p_ddl := p_ddl || '(' || CHR(10) || v_columns || CHR(10) || ')' || CHR(10);
+
+        -- Add table-level storage from HOT tier (active data defaults)
+        p_ddl := p_ddl || 'TABLESPACE ' || v_hot_tablespace || CHR(10);
+        IF v_hot_compression != 'NONE' THEN
+            p_ddl := p_ddl || get_compression_clause(v_hot_compression) || CHR(10);
+        END IF;
+        p_ddl := p_ddl || 'PCTFREE ' || v_hot_pctfree || CHR(10);
+
         p_ddl := p_ddl || 'PARTITION BY ' || p_task.partition_type || CHR(10);
 
         -- INTERVAL creates future HOT partitions automatically
@@ -1122,6 +1130,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         DBMS_OUTPUT.PUT_LINE('========================================');
         DBMS_OUTPUT.PUT_LINE('Tiered Partition DDL Summary:');
+        DBMS_OUTPUT.PUT_LINE('  Table defaults (from HOT tier):');
+        DBMS_OUTPUT.PUT_LINE('    - Tablespace: ' || v_hot_tablespace);
+        DBMS_OUTPUT.PUT_LINE('    - Compression: ' || v_hot_compression);
+        DBMS_OUTPUT.PUT_LINE('    - PCTFREE: ' || v_hot_pctfree);
         DBMS_OUTPUT.PUT_LINE('  COLD tier: ' || v_cold_count || ' partitions (' || v_cold_interval || ')');
         DBMS_OUTPUT.PUT_LINE('  WARM tier: ' || v_warm_count || ' partitions (' || v_warm_interval || ')');
         DBMS_OUTPUT.PUT_LINE('  HOT tier: ' || v_hot_count || ' partitions (' || v_hot_interval || ')');
