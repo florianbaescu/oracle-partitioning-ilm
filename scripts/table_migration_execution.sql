@@ -821,6 +821,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_partition_date := TRUNC(v_min_date, 'YYYY');
                 WHILE v_partition_date < v_cold_cutoff LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 12);
+
+                    -- If next_date would exceed cold_cutoff, create partial year partition ending at cold_cutoff
+                    IF v_next_date > v_cold_cutoff THEN
+                        v_next_date := v_cold_cutoff;
+                    END IF;
+
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
 
                     DBMS_LOB.APPEND(v_partition_list,
@@ -868,6 +874,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_partition_date := TRUNC(v_min_date, 'YYYY');
                 WHILE v_partition_date < v_warm_cutoff LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 12);
+
+                    -- If next_date would exceed warm_cutoff, create partial year partition ending at warm_cutoff
+                    IF v_next_date > v_warm_cutoff THEN
+                        v_next_date := v_warm_cutoff;
+                    END IF;
+
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
 
                     DBMS_LOB.APPEND(v_partition_list,
@@ -903,6 +915,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         IF UPPER(v_warm_interval) = 'YEARLY' THEN
             WHILE v_partition_date < v_hot_cutoff LOOP
                 v_next_date := ADD_MONTHS(v_partition_date, 12);
+
+                -- If next_date would exceed hot_cutoff, create partial year partition ending at hot_cutoff
+                IF v_next_date > v_hot_cutoff THEN
+                    v_next_date := v_hot_cutoff;
+                END IF;
+
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
 
                 DBMS_LOB.APPEND(v_partition_list,
