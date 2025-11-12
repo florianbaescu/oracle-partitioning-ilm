@@ -58,6 +58,13 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_partition_name VARCHAR2
     );
 
+    -- Partition merge for tiered partitioning
+    PROCEDURE merge_monthly_into_yearly(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_monthly_partition VARCHAR2
+    );
+
 END pck_dwh_ilm_execution_engine;
 /
 
@@ -309,6 +316,38 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         END IF;
 
         DBMS_OUTPUT.PUT_LINE('  Move completed successfully');
+
+        -- Auto-merge monthly partitions into yearly if enabled
+        DECLARE
+            v_auto_merge VARCHAR2(10);
+        BEGIN
+            -- Check if auto-merge is enabled
+            SELECT config_value INTO v_auto_merge
+            FROM cmr.dwh_ilm_config
+            WHERE config_key = 'AUTO_MERGE_PARTITIONS';
+
+            IF v_auto_merge = 'Y' THEN
+                -- Only attempt merge for monthly partitions (P_YYYY_MM format)
+                IF REGEXP_LIKE(p_partition_name, '^P_\d{4}_\d{2}$') THEN
+                    BEGIN
+                        DBMS_OUTPUT.PUT_LINE('  Auto-merge enabled, checking for merge opportunities...');
+                        merge_monthly_into_yearly(p_table_owner, p_table_name, p_partition_name);
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            -- Log warning but don't fail the move operation
+                            DBMS_OUTPUT.PUT_LINE('  Warning: Merge failed but move succeeded - ' || SQLERRM);
+                    END;
+                END IF;
+            END IF;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                -- Config not found, skip merge
+                NULL;
+            WHEN OTHERS THEN
+                -- Any other error, log warning but don't fail move
+                DBMS_OUTPUT.PUT_LINE('  Warning: Error checking auto-merge config - ' || SQLERRM);
+        END;
+
     END move_partition;
 
 
@@ -656,6 +695,231 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         DBMS_OUTPUT.PUT_LINE('Total actions executed: ' || v_total_count);
         DBMS_OUTPUT.PUT_LINE('========================================');
     END execute_pending_actions;
+
+
+    -- ==========================================================================
+    -- Partition Merge for Tiered Partitioning
+    -- ==========================================================================
+
+    PROCEDURE merge_monthly_into_yearly(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_monthly_partition VARCHAR2
+    ) AS
+        v_start_time TIMESTAMP := SYSTIMESTAMP;
+        v_yearly_partition VARCHAR2(128);
+        v_year VARCHAR2(4);
+        v_merge_sql VARCHAR2(4000);
+        v_duration NUMBER;
+        v_row_count NUMBER := 0;
+        v_lock_timeout NUMBER;
+        v_yearly_exists NUMBER;
+        v_partitions_adjacent NUMBER;
+        v_error_msg VARCHAR2(4000);
+
+        -- Partition info
+        v_monthly_high_value LONG;
+        v_yearly_high_value LONG;
+        v_monthly_tablespace VARCHAR2(128);
+        v_yearly_tablespace VARCHAR2(128);
+    BEGIN
+        -- Validate monthly partition name format (P_YYYY_MM)
+        IF NOT REGEXP_LIKE(p_monthly_partition, '^P_\d{4}_\d{2}$') THEN
+            -- Not a monthly partition, skip merge
+            INSERT INTO cmr.dwh_ilm_partition_merges (
+                table_owner, table_name, source_partition, target_partition,
+                merge_status, error_message, duration_seconds
+            ) VALUES (
+                p_table_owner, p_table_name, p_monthly_partition, NULL,
+                'SKIPPED', 'Not a monthly partition format', 0
+            );
+            COMMIT;
+            RETURN;
+        END IF;
+
+        -- Extract year from monthly partition name (P_2023_11 -> 2023)
+        v_year := SUBSTR(p_monthly_partition, 3, 4);
+        v_yearly_partition := 'P_' || v_year;
+
+        DBMS_OUTPUT.PUT_LINE('  Checking merge: ' || p_monthly_partition || ' -> ' || v_yearly_partition);
+
+        -- Check if yearly partition exists
+        BEGIN
+            SELECT COUNT(*), MAX(tablespace_name), MAX(high_value)
+            INTO v_yearly_exists, v_yearly_tablespace, v_yearly_high_value
+            FROM dba_tab_partitions
+            WHERE table_owner = p_table_owner
+            AND table_name = p_table_name
+            AND partition_name = v_yearly_partition;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_error_msg := 'Error checking yearly partition: ' || SQLERRM;
+                INSERT INTO cmr.dwh_ilm_partition_merges (
+                    table_owner, table_name, source_partition, target_partition,
+                    merge_status, error_message, duration_seconds
+                ) VALUES (
+                    p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                    'FAILED', v_error_msg, EXTRACT(SECOND FROM (SYSTIMESTAMP - v_start_time))
+                );
+                COMMIT;
+                RETURN;
+        END;
+
+        IF v_yearly_exists = 0 THEN
+            -- No yearly partition exists, skip merge
+            INSERT INTO cmr.dwh_ilm_partition_merges (
+                table_owner, table_name, source_partition, target_partition,
+                merge_status, error_message, duration_seconds
+            ) VALUES (
+                p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                'SKIPPED', 'Yearly partition does not exist', 0
+            );
+            COMMIT;
+            RETURN;
+        END IF;
+
+        -- Get monthly partition info
+        BEGIN
+            SELECT tablespace_name, high_value
+            INTO v_monthly_tablespace, v_monthly_high_value
+            FROM dba_tab_partitions
+            WHERE table_owner = p_table_owner
+            AND table_name = p_table_name
+            AND partition_name = p_monthly_partition;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_error_msg := 'Monthly partition not found';
+                INSERT INTO cmr.dwh_ilm_partition_merges (
+                    table_owner, table_name, source_partition, target_partition,
+                    merge_status, error_message, duration_seconds
+                ) VALUES (
+                    p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                    'FAILED', v_error_msg, EXTRACT(SECOND FROM (SYSTIMESTAMP - v_start_time))
+                );
+                COMMIT;
+                RETURN;
+        END;
+
+        -- Check if partitions are in same tablespace (required for merge)
+        IF v_monthly_tablespace != v_yearly_tablespace THEN
+            INSERT INTO cmr.dwh_ilm_partition_merges (
+                table_owner, table_name, source_partition, target_partition,
+                merge_status, error_message, duration_seconds
+            ) VALUES (
+                p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                'SKIPPED', 'Partitions in different tablespaces: ' || v_yearly_tablespace || ' vs ' || v_monthly_tablespace, 0
+            );
+            COMMIT;
+            RETURN;
+        END IF;
+
+        -- Check if partitions are adjacent (Oracle requirement for merge)
+        -- Yearly partition's high_value should equal monthly partition's low bound
+        -- This is implicitly true if yearly partition ends where monthly begins
+        BEGIN
+            -- Get partition position
+            SELECT COUNT(*)
+            INTO v_partitions_adjacent
+            FROM dba_tab_partitions
+            WHERE table_owner = p_table_owner
+            AND table_name = p_table_name
+            AND partition_position BETWEEN
+                (SELECT partition_position FROM dba_tab_partitions
+                 WHERE table_owner = p_table_owner AND table_name = p_table_name
+                 AND partition_name = v_yearly_partition)
+            AND
+                (SELECT partition_position FROM dba_tab_partitions
+                 WHERE table_owner = p_table_owner AND table_name = p_table_name
+                 AND partition_name = p_monthly_partition);
+
+            IF v_partitions_adjacent != 2 THEN
+                -- Partitions not adjacent
+                INSERT INTO cmr.dwh_ilm_partition_merges (
+                    table_owner, table_name, source_partition, target_partition,
+                    merge_status, error_message, duration_seconds
+                ) VALUES (
+                    p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                    'SKIPPED', 'Partitions not adjacent (positions differ)', 0
+                );
+                COMMIT;
+                RETURN;
+            END IF;
+        END;
+
+        -- Get lock timeout from config
+        BEGIN
+            SELECT TO_NUMBER(config_value)
+            INTO v_lock_timeout
+            FROM cmr.dwh_ilm_config
+            WHERE config_key = 'MERGE_LOCK_TIMEOUT';
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_lock_timeout := 30; -- Default 30 seconds
+        END;
+
+        -- Set DDL lock timeout
+        EXECUTE IMMEDIATE 'ALTER SESSION SET DDL_LOCK_TIMEOUT = ' || v_lock_timeout;
+
+        -- Execute merge
+        BEGIN
+            v_merge_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                          ' MERGE PARTITIONS ' || v_yearly_partition || ', ' || p_monthly_partition ||
+                          ' INTO PARTITION ' || v_yearly_partition ||
+                          ' UPDATE INDEXES';
+
+            DBMS_OUTPUT.PUT_LINE('  Executing: ' || v_merge_sql);
+
+            EXECUTE IMMEDIATE v_merge_sql;
+
+            -- Get row count from merged partition
+            BEGIN
+                SELECT num_rows INTO v_row_count
+                FROM dba_tab_partitions
+                WHERE table_owner = p_table_owner
+                AND table_name = p_table_name
+                AND partition_name = v_yearly_partition;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_row_count := NULL;
+            END;
+
+            v_duration := EXTRACT(SECOND FROM (SYSTIMESTAMP - v_start_time));
+
+            -- Log success
+            INSERT INTO cmr.dwh_ilm_partition_merges (
+                table_owner, table_name, source_partition, target_partition,
+                merge_status, error_message, duration_seconds, rows_merged
+            ) VALUES (
+                p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                'SUCCESS', NULL, v_duration, v_row_count
+            );
+
+            COMMIT;
+
+            DBMS_OUTPUT.PUT_LINE('  └─> Merged successfully (' || ROUND(v_duration, 2) || 's)');
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_error_msg := SQLERRM;
+                v_duration := EXTRACT(SECOND FROM (SYSTIMESTAMP - v_start_time));
+
+                -- Log failure
+                INSERT INTO cmr.dwh_ilm_partition_merges (
+                    table_owner, table_name, source_partition, target_partition,
+                    merge_status, error_message, duration_seconds
+                ) VALUES (
+                    p_table_owner, p_table_name, p_monthly_partition, v_yearly_partition,
+                    'FAILED', v_error_msg, v_duration
+                );
+
+                COMMIT;
+
+                DBMS_OUTPUT.PUT_LINE('  └─> Merge failed: ' || v_error_msg);
+
+                -- Don't raise exception - allow move to succeed even if merge fails
+        END;
+
+    END merge_monthly_into_yearly;
 
 END pck_dwh_ilm_execution_engine;
 /
