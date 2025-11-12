@@ -36,6 +36,14 @@ BEGIN
             IF SQLCODE != -942 THEN RAISE; END IF;
     END;
 
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_partition_merges CASCADE CONSTRAINTS PURGE';
+        DBMS_OUTPUT.PUT_LINE('Dropped table: dwh_ilm_partition_merges');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN RAISE; END IF;
+    END;
+
     -- Drop parent tables (except dwh_ilm_config and dwh_ilm_threshold_profiles which are preserved)
     BEGIN
         EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_policies CASCADE CONSTRAINTS PURGE';
@@ -220,6 +228,32 @@ COMMENT ON TABLE cmr.dwh_ilm_evaluation_queue IS 'Queue of partitions eligible f
 
 
 -- -----------------------------------------------------------------------------
+-- ILM Partition Merges Tracking
+-- -----------------------------------------------------------------------------
+-- Tracks partition merge operations for tiered partitioning
+
+CREATE TABLE cmr.dwh_ilm_partition_merges (
+    merge_id            NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    merge_date          TIMESTAMP DEFAULT SYSTIMESTAMP,
+    table_owner         VARCHAR2(128) NOT NULL,
+    table_name          VARCHAR2(128) NOT NULL,
+    source_partition    VARCHAR2(128) NOT NULL,  -- Monthly partition (P_2023_11)
+    target_partition    VARCHAR2(128) NOT NULL,  -- Yearly partition (P_2023)
+    merge_status        VARCHAR2(20) NOT NULL,   -- SUCCESS, FAILED, SKIPPED
+    error_message       VARCHAR2(4000),
+    duration_seconds    NUMBER,
+    rows_merged         NUMBER,
+
+    CONSTRAINT chk_merge_status CHECK (merge_status IN ('SUCCESS', 'FAILED', 'SKIPPED'))
+);
+
+CREATE INDEX idx_merge_status ON cmr.dwh_ilm_partition_merges(merge_status, merge_date);
+CREATE INDEX idx_merge_table ON cmr.dwh_ilm_partition_merges(table_owner, table_name);
+
+COMMENT ON TABLE cmr.dwh_ilm_partition_merges IS 'Audit trail of partition merge operations in tiered partitioning';
+
+
+-- -----------------------------------------------------------------------------
 -- ILM Configuration
 -- -----------------------------------------------------------------------------
 -- Create config table only if it doesn't exist (preserves custom settings on rerun)
@@ -365,6 +399,22 @@ WHEN NOT MATCHED THEN
 MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'ALERT_INTERVAL_HOURS' AS config_key, '4' AS config_value,
               'Minimum hours between alert emails (prevents spam)' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'AUTO_MERGE_PARTITIONS' AS config_key, 'Y' AS config_value,
+              'Enable automatic partition merging when moving monthly partitions to WARM/COLD tiers' AS description FROM dual) s
+ON (t.config_key = s.config_key)
+WHEN NOT MATCHED THEN
+    INSERT (config_key, config_value, description)
+    VALUES (s.config_key, s.config_value, s.description);
+
+MERGE INTO cmr.dwh_ilm_config t
+USING (SELECT 'MERGE_LOCK_TIMEOUT' AS config_key, '30' AS config_value,
+              'Lock timeout for partition merge operations (seconds)' AS description FROM dual) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
