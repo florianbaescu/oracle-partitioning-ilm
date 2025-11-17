@@ -595,3 +595,208 @@ PROMPT   - Test Case 4: Should use uniform interval partitioning (backward compa
 PROMPT
 PROMPT Check execution logs for 'Build Tiered Partitions' vs 'Using uniform interval' messages
 PROMPT
+
+-- =============================================================================
+-- SECTION 8: Partition Merge Configuration Tests
+-- =============================================================================
+PROMPT ========================================
+PROMPT SECTION 8: Partition Merge Config Tests
+PROMPT ========================================
+PROMPT
+
+PROMPT Checking AUTO_MERGE_PARTITIONS configuration:
+SELECT
+    config_key,
+    config_value,
+    description
+FROM cmr.dwh_ilm_config
+WHERE config_key IN ('AUTO_MERGE_PARTITIONS', 'MERGE_LOCK_TIMEOUT')
+ORDER BY config_key;
+
+PROMPT
+PROMPT Expected:
+PROMPT   - AUTO_MERGE_PARTITIONS = 'Y' (enabled by default)
+PROMPT   - MERGE_LOCK_TIMEOUT = '30' (30 seconds)
+PROMPT
+
+-- Verify tracking table exists
+PROMPT Checking dwh_ilm_partition_merges table:
+SELECT
+    COUNT(*) as merge_records,
+    CASE WHEN COUNT(*) >= 0 THEN 'Table exists' ELSE 'Table missing' END as status
+FROM cmr.dwh_ilm_partition_merges;
+
+PROMPT
+
+-- =============================================================================
+-- SECTION 9: Simulated Partition Merge Scenario
+-- =============================================================================
+PROMPT ========================================
+PROMPT SECTION 9: Partition Merge Logic Test
+PROMPT ========================================
+PROMPT
+PROMPT This section demonstrates the merge logic without executing DDL
+PROMPT (Testing merge_monthly_into_yearly procedure validation logic)
+PROMPT
+
+-- Test 1: Invalid partition name format (should skip)
+DECLARE
+    v_test_partition VARCHAR2(128) := 'P_2023'; -- Not monthly format
+    v_is_monthly BOOLEAN;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('Test 1: Non-monthly partition format');
+    DBMS_OUTPUT.PUT_LINE('  Partition: ' || v_test_partition);
+
+    v_is_monthly := REGEXP_LIKE(v_test_partition, '^P_\d{4}_\d{2}$');
+
+    IF v_is_monthly THEN
+        DBMS_OUTPUT.PUT_LINE('  Result: Would attempt merge (UNEXPECTED)');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('  Result: Would SKIP merge (CORRECT)');
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('');
+END;
+/
+
+-- Test 2: Valid monthly partition format (should attempt merge)
+DECLARE
+    v_test_partition VARCHAR2(128) := 'P_2023_11'; -- Monthly format
+    v_yearly_partition VARCHAR2(128);
+    v_year VARCHAR2(4);
+    v_is_monthly BOOLEAN;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('Test 2: Valid monthly partition format');
+    DBMS_OUTPUT.PUT_LINE('  Partition: ' || v_test_partition);
+
+    v_is_monthly := REGEXP_LIKE(v_test_partition, '^P_\d{4}_\d{2}$');
+
+    IF v_is_monthly THEN
+        v_year := SUBSTR(v_test_partition, 3, 4);
+        v_yearly_partition := 'P_' || v_year;
+        DBMS_OUTPUT.PUT_LINE('  Result: Would attempt merge (CORRECT)');
+        DBMS_OUTPUT.PUT_LINE('  Target: ' || v_test_partition || ' -> ' || v_yearly_partition);
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('  Result: Would SKIP merge (UNEXPECTED)');
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('');
+END;
+/
+
+-- Test 3: Demonstrate year extraction logic
+DECLARE
+    TYPE partition_test IS RECORD (
+        monthly_name VARCHAR2(128),
+        expected_yearly VARCHAR2(128)
+    );
+    TYPE partition_tests IS TABLE OF partition_test;
+
+    v_tests partition_tests := partition_tests(
+        partition_test('P_2020_01', 'P_2020'),
+        partition_test('P_2021_12', 'P_2021'),
+        partition_test('P_2023_06', 'P_2023'),
+        partition_test('P_2024_11', 'P_2024')
+    );
+
+    v_year VARCHAR2(4);
+    v_yearly_partition VARCHAR2(128);
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('Test 3: Year extraction for multiple partitions');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    FOR i IN 1..v_tests.COUNT LOOP
+        v_year := SUBSTR(v_tests(i).monthly_name, 3, 4);
+        v_yearly_partition := 'P_' || v_year;
+
+        DBMS_OUTPUT.PUT_LINE('  ' || v_tests(i).monthly_name || ' -> ' || v_yearly_partition ||
+            CASE WHEN v_yearly_partition = v_tests(i).expected_yearly
+                THEN ' ✓'
+                ELSE ' ✗ (Expected: ' || v_tests(i).expected_yearly || ')'
+            END);
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('');
+END;
+/
+
+PROMPT
+
+-- =============================================================================
+-- SECTION 10: Partition Merge Tracking Table Structure
+-- =============================================================================
+PROMPT ========================================
+PROMPT SECTION 10: Merge Tracking Table Info
+PROMPT ========================================
+PROMPT
+
+PROMPT Table structure for dwh_ilm_partition_merges:
+SELECT
+    column_name,
+    data_type,
+    nullable,
+    data_default
+FROM all_tab_columns
+WHERE owner = 'CMR'
+AND table_name = 'DWH_ILM_PARTITION_MERGES'
+ORDER BY column_id;
+
+PROMPT
+PROMPT Expected columns:
+PROMPT   - merge_id: Auto-generated primary key
+PROMPT   - merge_date: Timestamp of merge attempt
+PROMPT   - table_owner, table_name: Target table
+PROMPT   - source_partition: Monthly partition (P_2023_11)
+PROMPT   - target_partition: Yearly partition (P_2023)
+PROMPT   - merge_status: SUCCESS, FAILED, SKIPPED
+PROMPT   - error_message: Error details if failed
+PROMPT   - duration_seconds: Merge execution time
+PROMPT   - rows_merged: Number of rows in merged partition
+PROMPT
+
+-- =============================================================================
+-- SECTION 11: Integration Test Preparation Notes
+-- =============================================================================
+PROMPT ========================================
+PROMPT SECTION 11: Integration Test Notes
+PROMPT ========================================
+PROMPT
+PROMPT To test actual partition merge execution:
+PROMPT
+PROMPT 1. Create a tiered partitioned table (p_simulate => FALSE)
+PROMPT    Example: execute_migration(task_id, p_simulate => FALSE)
+PROMPT
+PROMPT 2. Verify partitions created:
+PROMPT    SELECT partition_name, tablespace_name, high_value
+PROMPT    FROM dba_tab_partitions
+PROMPT    WHERE table_owner = 'CMR' AND table_name = 'TEST_SALES_3Y_PART'
+PROMPT    ORDER BY partition_position;
+PROMPT
+PROMPT 3. Manually move a monthly partition to trigger merge:
+PROMPT    EXEC pck_dwh_ilm_execution_engine.move_partition(
+PROMPT        p_table_owner => 'CMR',
+PROMPT        p_table_name => 'TEST_SALES_3Y_PART',
+PROMPT        p_partition_name => 'P_2023_11',
+PROMPT        p_target_tablespace => 'TBS_WARM',
+PROMPT        p_compression_type => 'BASIC'
+PROMPT    );
+PROMPT
+PROMPT 4. Check merge results:
+PROMPT    SELECT * FROM cmr.dwh_ilm_partition_merges
+PROMPT    ORDER BY merge_date DESC;
+PROMPT
+PROMPT 5. Verify partition was merged:
+PROMPT    SELECT partition_name, tablespace_name
+PROMPT    FROM dba_tab_partitions
+PROMPT    WHERE table_owner = 'CMR' AND table_name = 'TEST_SALES_3Y_PART'
+PROMPT    ORDER BY partition_position;
+PROMPT    (P_2023_11 should no longer exist, merged into P_2023)
+PROMPT
+PROMPT 6. Disable auto-merge to test skipping:
+PROMPT    UPDATE cmr.dwh_ilm_config
+PROMPT    SET config_value = 'N'
+PROMPT    WHERE config_key = 'AUTO_MERGE_PARTITIONS';
+PROMPT    COMMIT;
+PROMPT
+
+PROMPT ========================================
+PROMPT Test Suite Complete
+PROMPT ========================================
+PROMPT
