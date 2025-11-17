@@ -3155,6 +3155,17 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             WHERE task_id = p_task_id;
             COMMIT;
 
+            -- Initialize partition access tracking with proper temperature calculation
+            BEGIN
+                DBMS_OUTPUT.PUT_LINE('Initializing partition access tracking...');
+                cmr.dwh_refresh_partition_access_tracking(v_task.source_owner, v_task.source_table);
+                DBMS_OUTPUT.PUT_LINE('  Partition tracking initialized successfully');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('  Warning: Partition tracking initialization failed - ' || SQLERRM);
+                    -- Don't fail the migration if tracking fails
+            END;
+
             DBMS_OUTPUT.PUT_LINE('========================================');
             DBMS_OUTPUT.PUT_LINE('Migration Completed Successfully');
             DBMS_OUTPUT.PUT_LINE('Duration: ' ||
