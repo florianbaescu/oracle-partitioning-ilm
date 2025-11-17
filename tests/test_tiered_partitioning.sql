@@ -195,19 +195,19 @@ BEGIN
     ELSE
         -- Run analysis
         DBMS_OUTPUT.PUT_LINE('Running analysis...');
-        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+        cmr.pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
     END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
-    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+    cmr.pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
 
     -- Preview DDL (simulate mode)
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
     DBMS_OUTPUT.PUT_LINE('GENERATING TIERED PARTITION DDL');
     DBMS_OUTPUT.PUT_LINE('========================================');
-    pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
+    cmr.pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
 
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
@@ -307,19 +307,19 @@ BEGIN
     ELSE
         -- Run analysis
         DBMS_OUTPUT.PUT_LINE('Running analysis...');
-        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+        cmr.pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
     END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
-    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+    cmr.pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
 
     -- Preview DDL
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
     DBMS_OUTPUT.PUT_LINE('GENERATING TIERED PARTITION DDL (12 YEARS)');
     DBMS_OUTPUT.PUT_LINE('========================================');
-    pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
+    cmr.pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
 
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
@@ -413,19 +413,19 @@ BEGIN
     ELSE
         -- Run analysis
         DBMS_OUTPUT.PUT_LINE('Running analysis...');
-        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+        cmr.pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
     END IF;
 
     -- Apply recommendations
     DBMS_OUTPUT.PUT_LINE('Applying recommendations...');
-    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+    cmr.pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
 
     -- Preview DDL
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
     DBMS_OUTPUT.PUT_LINE('GENERATING TIERED PARTITION DDL (EVENTS)');
     DBMS_OUTPUT.PUT_LINE('========================================');
-    pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
+    cmr.pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
 
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
@@ -519,18 +519,18 @@ BEGIN
         DBMS_OUTPUT.PUT_LINE('Analysis already exists (skipping re-analysis)');
     ELSE
         -- Run analysis
-        pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
+        cmr.pck_dwh_table_migration_analyzer.analyze_table(v_task_id);
     END IF;
 
     -- Apply recommendations
-    pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
+    cmr.pck_dwh_table_migration_executor.apply_recommendations(v_task_id);
 
     -- Preview DDL (should use uniform partitioning)
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('========================================');
     DBMS_OUTPUT.PUT_LINE('GENERATING UNIFORM PARTITION DDL');
     DBMS_OUTPUT.PUT_LINE('========================================');
-    pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
+    cmr.pck_dwh_table_migration_executor.execute_migration(v_task_id, p_simulate => TRUE);
 
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('Expected: Should use uniform interval partitioning (build_uniform_partitions)');
@@ -770,7 +770,7 @@ PROMPT    WHERE table_owner = 'CMR' AND table_name = 'TEST_SALES_3Y_PART'
 PROMPT    ORDER BY partition_position;
 PROMPT
 PROMPT 3. Manually move a monthly partition to trigger merge:
-PROMPT    EXEC pck_dwh_ilm_execution_engine.move_partition(
+PROMPT    EXEC cmr.pck_dwh_ilm_execution_engine.move_partition(
 PROMPT        p_table_owner => 'CMR',
 PROMPT        p_table_name => 'TEST_SALES_3Y_PART',
 PROMPT        p_partition_name => 'P_2023_11',
