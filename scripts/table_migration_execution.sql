@@ -3476,7 +3476,14 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_auto_detected BOOLEAN := FALSE;
         v_has_effective_date BOOLEAN;
         v_has_valid_from_to BOOLEAN;
+        v_step_number NUMBER;
+        v_step_start TIMESTAMP := SYSTIMESTAMP;
+        v_step_details CLOB;
     BEGIN
+        -- Get next step number
+        SELECT NVL(MAX(step_number), 0) + 1 INTO v_step_number
+        FROM cmr.dwh_migration_execution_log
+        WHERE task_id = p_task_id;
         SELECT * INTO v_task
         FROM cmr.dwh_migration_tasks
         WHERE task_id = p_task_id;
@@ -3692,16 +3699,59 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     WHERE profile_name = v_profile_name;
 
                     DBMS_OUTPUT.PUT_LINE('  Threshold profile ID: ' || v_threshold_profile_id);
+
+                    -- Log success
+                    log_step(
+                        p_task_id => p_task_id,
+                        p_step_number => v_step_number,
+                        p_step_name => 'Create Threshold Profile',
+                        p_step_type => 'ILM_SETUP',
+                        p_sql => TO_CLOB('Created threshold profile: ' || v_profile_name ||
+                                        ' (HOT=' || v_min_age_days || 'd, WARM=' || NVL(v_mid_age_days, v_max_age_days) ||
+                                        'd, COLD=' || v_max_age_days || 'd) from ' || v_policy_count || ' policies'),
+                        p_status => 'SUCCESS',
+                        p_start_time => v_step_start,
+                        p_end_time => SYSTIMESTAMP
+                    );
+                    v_step_number := v_step_number + 1;
                 ELSE
                     DBMS_OUTPUT.PUT_LINE('No age-based policies found - temperature will use DEFAULT profile');
                     v_threshold_profile_id := NULL;
+
+                    -- Log that no profile was created
+                    log_step(
+                        p_task_id => p_task_id,
+                        p_step_number => v_step_number,
+                        p_step_name => 'Create Threshold Profile',
+                        p_step_type => 'ILM_SETUP',
+                        p_sql => TO_CLOB('No age-based policies found in template - using DEFAULT profile for temperature calculation'),
+                        p_status => 'SKIPPED',
+                        p_start_time => v_step_start,
+                        p_end_time => SYSTIMESTAMP
+                    );
+                    v_step_number := v_step_number + 1;
                 END IF;
 
             EXCEPTION
                 WHEN OTHERS THEN
-                    DBMS_OUTPUT.PUT_LINE('Warning: Could not create threshold profile from policies: ' || SQLERRM);
+                    v_error_msg := SQLERRM;
+                    DBMS_OUTPUT.PUT_LINE('Warning: Could not create threshold profile from policies: ' || v_error_msg);
                     DBMS_OUTPUT.PUT_LINE('         Temperature calculation will use DEFAULT profile');
                     v_threshold_profile_id := NULL;
+
+                    -- Log error
+                    log_step(
+                        p_task_id => p_task_id,
+                        p_step_number => v_step_number,
+                        p_step_name => 'Create Threshold Profile',
+                        p_step_type => 'ILM_SETUP',
+                        p_sql => TO_CLOB('Attempted to create threshold profile from template policies'),
+                        p_status => 'FAILED',
+                        p_start_time => v_step_start,
+                        p_end_time => SYSTIMESTAMP,
+                        p_error_message => v_error_msg
+                    );
+                    v_step_number := v_step_number + 1;
             END;
 
             IF v_is_tiered THEN
@@ -3941,13 +3991,52 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         DBMS_OUTPUT.PUT_LINE('Policies skipped: ' || v_policies_skipped);
         DBMS_OUTPUT.PUT_LINE('');
 
+        -- Log summary
+        log_step(
+            p_task_id => p_task_id,
+            p_step_number => v_step_number,
+            p_step_name => 'Apply ILM Policies',
+            p_step_type => 'ILM_SETUP',
+            p_sql => TO_CLOB('Applied ILM policies from template: ' || v_task.ilm_policy_template ||
+                            '. Created: ' || v_policies_created || ', Skipped: ' || v_policies_skipped),
+            p_status => CASE WHEN v_policies_created > 0 THEN 'SUCCESS' ELSE 'WARNING' END,
+            p_start_time => v_step_start,
+            p_end_time => SYSTIMESTAMP
+        );
+
         COMMIT;
 
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
-            DBMS_OUTPUT.PUT_LINE('Warning: ILM template not found: ' || v_task.ilm_policy_template);
+            v_error_msg := 'ILM template not found: ' || v_task.ilm_policy_template;
+            DBMS_OUTPUT.PUT_LINE('Warning: ' || v_error_msg);
+
+            log_step(
+                p_task_id => p_task_id,
+                p_step_number => v_step_number,
+                p_step_name => 'Apply ILM Policies',
+                p_step_type => 'ILM_SETUP',
+                p_sql => TO_CLOB('Attempted to apply ILM policies'),
+                p_status => 'FAILED',
+                p_start_time => v_step_start,
+                p_end_time => SYSTIMESTAMP,
+                p_error_message => v_error_msg
+            );
         WHEN OTHERS THEN
-            DBMS_OUTPUT.PUT_LINE('ERROR applying ILM policies: ' || SQLERRM);
+            v_error_msg := SQLERRM;
+            DBMS_OUTPUT.PUT_LINE('ERROR applying ILM policies: ' || v_error_msg);
+
+            log_step(
+                p_task_id => p_task_id,
+                p_step_number => v_step_number,
+                p_step_name => 'Apply ILM Policies',
+                p_step_type => 'ILM_SETUP',
+                p_sql => TO_CLOB('Attempted to apply ILM policies'),
+                p_status => 'FAILED',
+                p_start_time => v_step_start,
+                p_end_time => SYSTIMESTAMP,
+                p_error_message => v_error_msg
+            );
             RAISE;
     END apply_ilm_policies;
 
