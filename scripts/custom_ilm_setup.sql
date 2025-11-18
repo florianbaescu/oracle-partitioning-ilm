@@ -2142,8 +2142,26 @@ END;
 -- =============================================================================
 
 -- Grant access to other schemas if needed
+-- Example grants for ILM tables and views:
+
+-- Tables (if other schemas need to manage ILM policies)
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON cmr.dwh_ilm_policies TO <schema>;
--- GRANT SELECT ON v_ilm_active_policies TO <schema>;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON cmr.dwh_ilm_evaluation_queue TO <schema>;
+-- GRANT SELECT ON cmr.dwh_ilm_execution_log TO <schema>;
+-- GRANT SELECT ON cmr.dwh_ilm_partition_access TO <schema>;
+-- GRANT SELECT ON cmr.dwh_ilm_partition_merges TO <schema>;
+
+-- Views (read-only access for monitoring/reporting)
+-- GRANT SELECT ON cmr.v_dwh_ilm_active_policies TO <schema>;
+-- GRANT SELECT ON cmr.v_dwh_ilm_policy_summary TO <schema>;
+-- GRANT SELECT ON cmr.v_dwh_ilm_policy_thresholds TO <schema>;
+-- GRANT SELECT ON cmr.v_dwh_ilm_partition_dashboard TO <schema>;
+-- GRANT SELECT ON cmr.v_dwh_ilm_policy_effectiveness TO <schema>;
+
+-- Migration tables and views (if other schemas need migration access)
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON cmr.dwh_migration_tasks TO <schema>;
+-- GRANT SELECT ON cmr.dwh_migration_analysis TO <schema>;
+-- GRANT SELECT ON cmr.v_dwh_migration_dashboard TO <schema>;
 
 
 -- =============================================================================
