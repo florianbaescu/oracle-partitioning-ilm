@@ -1560,13 +1560,8 @@ AS
     -- Note: get_partition_date is now a standalone function (see SECTION 4)
 
 BEGIN
-    -- Get thresholds from DEFAULT profile
-    SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
-    INTO v_hot_threshold, v_warm_threshold, v_cold_threshold
-    FROM cmr.dwh_ilm_threshold_profiles
-    WHERE profile_name = 'DEFAULT';
-
     -- Merge partition data with age calculated from high_value
+    -- Temperature is calculated using table-specific threshold profile if available
     MERGE INTO cmr.dwh_ilm_partition_access a
     USING (
         SELECT
@@ -1583,12 +1578,31 @@ BEGIN
                 WHEN get_partition_date(tp.table_owner, tp.table_name, tp.partition_name) IS NOT NULL THEN
                     TRUNC(SYSDATE - get_partition_date(tp.table_owner, tp.table_name, tp.partition_name))
                 ELSE 10000  -- Very old if can't determine
-            END AS calculated_age_days
+            END AS calculated_age_days,
+            -- Get table-specific thresholds from ILM policy profile, or DEFAULT if no policy
+            COALESCE(prof.hot_threshold_days, defprof.hot_threshold_days) AS hot_threshold,
+            COALESCE(prof.warm_threshold_days, defprof.warm_threshold_days) AS warm_threshold,
+            COALESCE(prof.cold_threshold_days, defprof.cold_threshold_days) AS cold_threshold
         FROM dba_tab_partitions tp
         LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
             AND s.partition_name = tp.partition_name
+        -- Join to ILM policies to get threshold profile
+        LEFT JOIN (
+            SELECT DISTINCT table_owner, table_name, threshold_profile_id
+            FROM cmr.dwh_ilm_policies
+            WHERE enabled = 'Y'
+        ) pol ON pol.table_owner = tp.table_owner AND pol.table_name = tp.table_name
+        -- Join to threshold profile if policy has one
+        LEFT JOIN cmr.dwh_ilm_threshold_profiles prof
+            ON prof.profile_id = pol.threshold_profile_id
+        -- Cross join DEFAULT profile as fallback
+        CROSS JOIN (
+            SELECT hot_threshold_days, warm_threshold_days, cold_threshold_days
+            FROM cmr.dwh_ilm_threshold_profiles
+            WHERE profile_name = 'DEFAULT'
+        ) defprof
         WHERE tp.table_owner = p_table_owner
         AND (p_table_name IS NULL OR tp.table_name = p_table_name)
     ) src
@@ -1612,8 +1626,8 @@ BEGIN
         a.days_since_write = src.calculated_age_days,
         a.days_since_read = src.calculated_age_days,  -- Assume read age = write age
         a.temperature = CASE
-            WHEN src.calculated_age_days < v_hot_threshold THEN 'HOT'
-            WHEN src.calculated_age_days < v_warm_threshold THEN 'WARM'
+            WHEN src.calculated_age_days < src.hot_threshold THEN 'HOT'
+            WHEN src.calculated_age_days < src.warm_threshold THEN 'WARM'
             ELSE 'COLD'
         END,
         a.last_updated = SYSTIMESTAMP
@@ -1629,8 +1643,8 @@ BEGIN
         src.calculated_age_days,
         src.calculated_age_days,
         CASE
-            WHEN src.calculated_age_days < v_hot_threshold THEN 'HOT'
-            WHEN src.calculated_age_days < v_warm_threshold THEN 'WARM'
+            WHEN src.calculated_age_days < src.hot_threshold THEN 'HOT'
+            WHEN src.calculated_age_days < src.warm_threshold THEN 'WARM'
             ELSE 'COLD'
         END,
         SYSTIMESTAMP
@@ -1683,13 +1697,8 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('Initializing partition access tracking for ' ||
                         p_table_owner || '.' || p_table_name);
 
-    -- Get thresholds from DEFAULT profile
-    SELECT hot_threshold_days, warm_threshold_days
-    INTO v_hot_threshold, v_warm_threshold
-    FROM cmr.dwh_ilm_threshold_profiles
-    WHERE profile_name = 'DEFAULT';
-
     -- Initialize tracking for all partitions with age calculated from high_value
+    -- Uses table-specific threshold profile if available, otherwise DEFAULT
     MERGE INTO cmr.dwh_ilm_partition_access a
     USING (
         SELECT
@@ -1702,12 +1711,30 @@ BEGIN
             s.tablespace_name,
             -- Note: Cannot extract date from high_value directly (LONG type)
             -- Using SYSDATE as fallback - will be updated by refresh procedure
-            SYSDATE AS estimated_write_date
+            SYSDATE AS estimated_write_date,
+            -- Get table-specific thresholds from ILM policy profile, or DEFAULT if no policy
+            COALESCE(prof.hot_threshold_days, defprof.hot_threshold_days) AS hot_threshold,
+            COALESCE(prof.warm_threshold_days, defprof.warm_threshold_days) AS warm_threshold
         FROM dba_tab_partitions tp
         LEFT JOIN dba_segments s
             ON s.owner = tp.table_owner
             AND s.segment_name = tp.table_name
             AND s.partition_name = tp.partition_name
+        -- Join to ILM policies to get threshold profile
+        LEFT JOIN (
+            SELECT DISTINCT table_owner, table_name, threshold_profile_id
+            FROM cmr.dwh_ilm_policies
+            WHERE enabled = 'Y'
+        ) pol ON pol.table_owner = tp.table_owner AND pol.table_name = tp.table_name
+        -- Join to threshold profile if policy has one
+        LEFT JOIN cmr.dwh_ilm_threshold_profiles prof
+            ON prof.profile_id = pol.threshold_profile_id
+        -- Cross join DEFAULT profile as fallback
+        CROSS JOIN (
+            SELECT hot_threshold_days, warm_threshold_days
+            FROM cmr.dwh_ilm_threshold_profiles
+            WHERE profile_name = 'DEFAULT'
+        ) defprof
         WHERE tp.table_owner = p_table_owner
         AND tp.table_name = p_table_name
     ) src
@@ -1726,8 +1753,8 @@ BEGIN
         TRUNC(SYSDATE - src.estimated_write_date),
         TRUNC(SYSDATE - src.estimated_write_date),
         CASE
-            WHEN TRUNC(SYSDATE - src.estimated_write_date) < v_hot_threshold THEN 'HOT'
-            WHEN TRUNC(SYSDATE - src.estimated_write_date) < v_warm_threshold THEN 'WARM'
+            WHEN TRUNC(SYSDATE - src.estimated_write_date) < src.hot_threshold THEN 'HOT'
+            WHEN TRUNC(SYSDATE - src.estimated_write_date) < src.warm_threshold THEN 'WARM'
             ELSE 'COLD'
         END,
         SYSTIMESTAMP
