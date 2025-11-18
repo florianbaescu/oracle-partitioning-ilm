@@ -3676,7 +3676,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         t.hot_threshold_days = s.hot_threshold_days,
                         t.warm_threshold_days = s.warm_threshold_days,
                         t.cold_threshold_days = s.cold_threshold_days,
-                        t.updated_date = SYSDATE
+                        t.modified_by = USER,
+                        t.modified_date = SYSTIMESTAMP
                     WHEN NOT MATCHED THEN INSERT (
                         profile_name, description,
                         hot_threshold_days, warm_threshold_days, cold_threshold_days
