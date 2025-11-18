@@ -3583,11 +3583,92 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Determine correct JSON path based on template type
         DECLARE
             v_is_tiered BOOLEAN := FALSE;
+            v_threshold_profile_id NUMBER := NULL;
         BEGIN
             v_is_tiered := JSON_EXISTS(v_template.policies_json, '$.tier_config');
 
             IF v_is_tiered THEN
                 DBMS_OUTPUT.PUT_LINE('Tiered template detected - using JSON path: $.policies[*]');
+
+                -- Create or get threshold profile from tier_config
+                DECLARE
+                    v_template_json JSON_OBJECT_T;
+                    v_tier_config JSON_OBJECT_T;
+                    v_hot_config JSON_OBJECT_T;
+                    v_warm_config JSON_OBJECT_T;
+                    v_profile_name VARCHAR2(100);
+                    v_hot_months NUMBER;
+                    v_warm_months NUMBER;
+                    v_hot_days NUMBER;
+                    v_warm_days NUMBER;
+                    v_cold_days NUMBER;
+                BEGIN
+                    v_template_json := JSON_OBJECT_T.PARSE(v_template.policies_json);
+                    v_tier_config := TREAT(v_template_json.get('tier_config') AS JSON_OBJECT_T);
+
+                    -- Extract tier age thresholds
+                    IF v_tier_config.has('hot') THEN
+                        v_hot_config := TREAT(v_tier_config.get('hot') AS JSON_OBJECT_T);
+                        v_hot_months := v_hot_config.get_number('age_months');
+                        v_hot_days := ROUND(v_hot_months * 30.44); -- Average days per month
+                    END IF;
+
+                    IF v_tier_config.has('warm') THEN
+                        v_warm_config := TREAT(v_tier_config.get('warm') AS JSON_OBJECT_T);
+                        v_warm_months := v_warm_config.get_number('age_months');
+                        v_warm_days := ROUND(v_warm_months * 30.44);
+                    END IF;
+
+                    -- COLD threshold = WARM threshold (data older than WARM is COLD)
+                    v_cold_days := v_warm_days;
+
+                    -- Profile name based on template
+                    v_profile_name := v_template.template_name || '_THRESHOLDS';
+
+                    DBMS_OUTPUT.PUT_LINE('Creating/updating threshold profile: ' || v_profile_name);
+                    DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_hot_days || ' days (' || v_hot_months || ' months)');
+                    DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || v_warm_days || ' days (' || v_warm_months || ' months)');
+                    DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_cold_days || ' days');
+
+                    -- Create or update threshold profile
+                    MERGE INTO cmr.dwh_ilm_threshold_profiles t
+                    USING (
+                        SELECT
+                            v_profile_name AS profile_name,
+                            'Auto-generated from template: ' || v_template.template_name AS description,
+                            v_hot_days AS hot_threshold_days,
+                            v_warm_days AS warm_threshold_days,
+                            v_cold_days AS cold_threshold_days
+                        FROM dual
+                    ) s
+                    ON (t.profile_name = s.profile_name)
+                    WHEN MATCHED THEN UPDATE SET
+                        t.description = s.description,
+                        t.hot_threshold_days = s.hot_threshold_days,
+                        t.warm_threshold_days = s.warm_threshold_days,
+                        t.cold_threshold_days = s.cold_threshold_days,
+                        t.updated_date = SYSDATE
+                    WHEN NOT MATCHED THEN INSERT (
+                        profile_name, description,
+                        hot_threshold_days, warm_threshold_days, cold_threshold_days
+                    ) VALUES (
+                        s.profile_name, s.description,
+                        s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days
+                    );
+
+                    -- Get profile_id
+                    SELECT profile_id INTO v_threshold_profile_id
+                    FROM cmr.dwh_ilm_threshold_profiles
+                    WHERE profile_name = v_profile_name;
+
+                    DBMS_OUTPUT.PUT_LINE('  Threshold profile ID: ' || v_threshold_profile_id);
+
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('Warning: Could not create threshold profile from tier_config: ' || SQLERRM);
+                        DBMS_OUTPUT.PUT_LINE('         Temperature calculation will use DEFAULT profile');
+                        v_threshold_profile_id := NULL;
+                END;
 
                 -- Tiered template: policies under $.policies[*]
                 FOR policy_rec IN (
@@ -3637,7 +3718,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         ELSE COALESCE(policy_rec.policy_type, 'CUSTOM')
                     END;
 
-                    -- Insert policy
+                    -- Insert policy with threshold profile
                     INSERT INTO cmr.dwh_ilm_policies (
                         policy_name,
                         table_owner,
@@ -3651,6 +3732,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         pct_free,
                         priority,
                         enabled,
+                        threshold_profile_id,
                         created_by
                     ) VALUES (
                         policy_rec.policy_name,
@@ -3665,6 +3747,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         policy_rec.pct_free,
                         policy_rec.priority,
                         policy_rec.enabled,
+                        v_threshold_profile_id,
                         USER || ' (Migration Task ' || p_task_id || ')'
                     ) RETURNING policy_id INTO v_policy_id;
 
@@ -3749,7 +3832,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 ELSE COALESCE(policy_rec.policy_type, 'CUSTOM')
                             END;
 
-                            -- Insert policy
+                            -- Insert policy (no threshold profile for non-tiered)
                             INSERT INTO cmr.dwh_ilm_policies (
                                 policy_name,
                                 table_owner,
@@ -3763,6 +3846,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 pct_free,
                                 priority,
                                 enabled,
+                                threshold_profile_id,
                                 created_by
                             ) VALUES (
                                 policy_rec.policy_name,
@@ -3777,6 +3861,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                                 policy_rec.pct_free,
                                 policy_rec.priority,
                                 policy_rec.enabled,
+                                NULL,  -- Non-tiered templates use DEFAULT profile
                                 USER || ' (Migration Task ' || p_task_id || ')'
                             ) RETURNING policy_id INTO v_policy_id;
 
