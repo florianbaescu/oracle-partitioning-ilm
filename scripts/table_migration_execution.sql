@@ -3580,82 +3580,46 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- Parse JSON and create policies using JSON_TABLE
         -- NOTE: Tiered templates have structure {"tier_config":{...}, "policies":[...]}
         --       Non-tiered templates have structure [{...}, {...}] (array at root)
-        -- Check if this is a tiered template
+        -- Determine correct JSON path based on template type
         DECLARE
             v_is_tiered BOOLEAN := FALSE;
         BEGIN
             v_is_tiered := JSON_EXISTS(v_template.policies_json, '$.tier_config');
 
             IF v_is_tiered THEN
-                DBMS_OUTPUT.PUT_LINE('Parsing tiered template policies ($.policies[*])...');
-            ELSE
-                DBMS_OUTPUT.PUT_LINE('Parsing non-tiered template policies ($[*])...');
-            END IF;
-        END;
+                DBMS_OUTPUT.PUT_LINE('Tiered template detected - using JSON path: $.policies[*]');
 
-        FOR policy_rec IN (
-            SELECT
-                REPLACE(jt.policy_name, '{TABLE}', v_task.source_table) AS policy_name,
-                jt.policy_type,
-                jt.action_type,
-                jt.age_days,
-                jt.age_months,
-                jt.compression_type,
-                jt.target_tablespace,
-                jt.pct_free_val AS pct_free,
-                jt.priority,
-                jt.enabled
-            FROM cmr.dwh_migration_ilm_templates t,
-                -- Tiered templates: policies are under $.policies[*]
-                -- Non-tiered templates: policies are at root $[*]
-                JSON_TABLE(t.policies_json, '$.policies[*]'
-                    COLUMNS (
-                        policy_name VARCHAR2(100) PATH '$.policy_name',
-                        policy_type VARCHAR2(30) PATH '$.policy_type' DEFAULT 'COMPRESSION' ON EMPTY,
-                        action_type VARCHAR2(30) PATH '$.action',
-                        age_days NUMBER PATH '$.age_days',
-                        age_months NUMBER PATH '$.age_months',
-                        compression_type VARCHAR2(50) PATH '$.compression',
-                        target_tablespace VARCHAR2(30) PATH '$.tablespace',
-                        pct_free_val NUMBER PATH '$.pctfree',
-                        priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
-                        enabled VARCHAR2(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
-                    ) ERROR ON ERROR
-                ) jt
-            WHERE t.template_name = v_template.template_name
-
-            UNION ALL
-
-            SELECT
-                REPLACE(jt.policy_name, '{TABLE}', v_task.source_table) AS policy_name,
-                jt.policy_type,
-                jt.action_type,
-                jt.age_days,
-                jt.age_months,
-                jt.compression_type,
-                jt.target_tablespace,
-                jt.pct_free_val AS pct_free,
-                jt.priority,
-                jt.enabled
-            FROM cmr.dwh_migration_ilm_templates t,
-                JSON_TABLE(t.policies_json, '$[*]'
-                    COLUMNS (
-                        policy_name VARCHAR2(100) PATH '$.policy_name',
-                        policy_type VARCHAR2(30) PATH '$.policy_type' DEFAULT 'COMPRESSION' ON EMPTY,
-                        action_type VARCHAR2(30) PATH '$.action',
-                        age_days NUMBER PATH '$.age_days',
-                        age_months NUMBER PATH '$.age_months',
-                        compression_type VARCHAR2(50) PATH '$.compression',
-                        target_tablespace VARCHAR2(30) PATH '$.tablespace',
-                        pct_free_val NUMBER PATH '$.pctfree',
-                        priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
-                        enabled VARCHAR2(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
-                    ) ERROR ON ERROR
-                ) jt
-            WHERE t.template_name = v_template.template_name
-            AND NOT JSON_EXISTS(t.policies_json, '$.tier_config')
-        ) LOOP
-            BEGIN
+                -- Tiered template: policies under $.policies[*]
+                FOR policy_rec IN (
+                    SELECT
+                        REPLACE(jt.policy_name, '{TABLE}', v_task.source_table) AS policy_name,
+                        jt.policy_type,
+                        jt.action_type,
+                        jt.age_days,
+                        jt.age_months,
+                        jt.compression_type,
+                        jt.target_tablespace,
+                        jt.pct_free_val AS pct_free,
+                        jt.priority,
+                        jt.enabled
+                    FROM cmr.dwh_migration_ilm_templates t,
+                        JSON_TABLE(t.policies_json, '$.policies[*]'
+                            COLUMNS (
+                                policy_name VARCHAR2(100) PATH '$.policy_name',
+                                policy_type VARCHAR2(30) PATH '$.policy_type' DEFAULT 'COMPRESSION' ON EMPTY,
+                                action_type VARCHAR2(30) PATH '$.action',
+                                age_days NUMBER PATH '$.age_days',
+                                age_months NUMBER PATH '$.age_months',
+                                compression_type VARCHAR2(50) PATH '$.compression',
+                                target_tablespace VARCHAR2(30) PATH '$.tablespace',
+                                pct_free_val NUMBER PATH '$.pctfree',
+                                priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
+                                enabled VARCHAR2(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
+                            )
+                        ) jt
+                    WHERE t.template_name = v_template.template_name
+                ) LOOP
+                    BEGIN
                 -- Determine policy type from action if not specified
                 DECLARE
                     v_pol_type VARCHAR2(30);
@@ -3722,17 +3686,131 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('');
                 END;
 
-            EXCEPTION
-                WHEN DUP_VAL_ON_INDEX THEN
-                    -- Policy already exists, skip
-                    v_policies_skipped := v_policies_skipped + 1;
-                    DBMS_OUTPUT.PUT_LINE('⊘ Skipped (already exists): ' || policy_rec.policy_name);
-                WHEN OTHERS THEN
-                    v_error_msg := SQLERRM;
-                    DBMS_OUTPUT.PUT_LINE('✗ Failed to create policy: ' || policy_rec.policy_name);
-                    DBMS_OUTPUT.PUT_LINE('  Error: ' || v_error_msg);
-            END;
-        END LOOP;
+                    EXCEPTION
+                        WHEN DUP_VAL_ON_INDEX THEN
+                            -- Policy already exists, skip
+                            v_policies_skipped := v_policies_skipped + 1;
+                            DBMS_OUTPUT.PUT_LINE('⊘ Skipped (already exists): ' || policy_rec.policy_name);
+                        WHEN OTHERS THEN
+                            v_error_msg := SQLERRM;
+                            DBMS_OUTPUT.PUT_LINE('✗ Failed to create policy: ' || policy_rec.policy_name);
+                            DBMS_OUTPUT.PUT_LINE('  Error: ' || v_error_msg);
+                    END;
+                END LOOP;
+
+            ELSE
+                -- Non-tiered template: policies at root $[*]
+                DBMS_OUTPUT.PUT_LINE('Non-tiered template detected - using JSON path: $[*]');
+
+                FOR policy_rec IN (
+                    SELECT
+                        REPLACE(jt.policy_name, '{TABLE}', v_task.source_table) AS policy_name,
+                        jt.policy_type,
+                        jt.action_type,
+                        jt.age_days,
+                        jt.age_months,
+                        jt.compression_type,
+                        jt.target_tablespace,
+                        jt.pct_free_val AS pct_free,
+                        jt.priority,
+                        jt.enabled
+                    FROM cmr.dwh_migration_ilm_templates t,
+                        JSON_TABLE(t.policies_json, '$[*]'
+                            COLUMNS (
+                                policy_name VARCHAR2(100) PATH '$.policy_name',
+                                policy_type VARCHAR2(30) PATH '$.policy_type' DEFAULT 'COMPRESSION' ON EMPTY,
+                                action_type VARCHAR2(30) PATH '$.action',
+                                age_days NUMBER PATH '$.age_days',
+                                age_months NUMBER PATH '$.age_months',
+                                compression_type VARCHAR2(50) PATH '$.compression',
+                                target_tablespace VARCHAR2(30) PATH '$.tablespace',
+                                pct_free_val NUMBER PATH '$.pctfree',
+                                priority NUMBER PATH '$.priority' DEFAULT 100 ON EMPTY,
+                                enabled VARCHAR2(1) PATH '$.enabled' DEFAULT 'Y' ON EMPTY
+                            )
+                        ) jt
+                    WHERE t.template_name = v_template.template_name
+                ) LOOP
+                    BEGIN
+                        -- Determine policy type from action if not specified
+                        DECLARE
+                            v_pol_type VARCHAR2(30);
+                            v_act_type VARCHAR2(30);
+                        BEGIN
+                            v_act_type := UPPER(policy_rec.action_type);
+
+                            -- Map action to policy type
+                            v_pol_type := CASE v_act_type
+                                WHEN 'COMPRESS' THEN 'COMPRESSION'
+                                WHEN 'MOVE' THEN 'TIERING'
+                                WHEN 'READ_ONLY' THEN 'ARCHIVAL'
+                                WHEN 'DROP' THEN 'PURGE'
+                                WHEN 'TRUNCATE' THEN 'PURGE'
+                                ELSE COALESCE(policy_rec.policy_type, 'CUSTOM')
+                            END;
+
+                            -- Insert policy
+                            INSERT INTO cmr.dwh_ilm_policies (
+                                policy_name,
+                                table_owner,
+                                table_name,
+                                policy_type,
+                                action_type,
+                                age_days,
+                                age_months,
+                                compression_type,
+                                target_tablespace,
+                                pct_free,
+                                priority,
+                                enabled,
+                                created_by
+                            ) VALUES (
+                                policy_rec.policy_name,
+                                v_task.source_owner,
+                                v_task.source_table,
+                                v_pol_type,
+                                v_act_type,
+                                policy_rec.age_days,
+                                policy_rec.age_months,
+                                policy_rec.compression_type,
+                                policy_rec.target_tablespace,
+                                policy_rec.pct_free,
+                                policy_rec.priority,
+                                policy_rec.enabled,
+                                USER || ' (Migration Task ' || p_task_id || ')'
+                            ) RETURNING policy_id INTO v_policy_id;
+
+                            v_policies_created := v_policies_created + 1;
+
+                            DBMS_OUTPUT.PUT_LINE('✓ Created policy: ' || policy_rec.policy_name);
+                            DBMS_OUTPUT.PUT_LINE('  Action: ' || v_act_type ||
+                                CASE
+                                    WHEN policy_rec.age_days IS NOT NULL THEN ' after ' || policy_rec.age_days || ' days'
+                                    WHEN policy_rec.age_months IS NOT NULL THEN ' after ' || policy_rec.age_months || ' months'
+                                    ELSE ''
+                                END);
+                            IF policy_rec.compression_type IS NOT NULL THEN
+                                DBMS_OUTPUT.PUT_LINE('  Compression: ' || policy_rec.compression_type);
+                            END IF;
+                            IF policy_rec.target_tablespace IS NOT NULL THEN
+                                DBMS_OUTPUT.PUT_LINE('  Tablespace: ' || policy_rec.target_tablespace);
+                            END IF;
+                            DBMS_OUTPUT.PUT_LINE('');
+                        END;
+
+                    EXCEPTION
+                        WHEN DUP_VAL_ON_INDEX THEN
+                            -- Policy already exists, skip
+                            v_policies_skipped := v_policies_skipped + 1;
+                            DBMS_OUTPUT.PUT_LINE('⊘ Skipped (already exists): ' || policy_rec.policy_name);
+                        WHEN OTHERS THEN
+                            v_error_msg := SQLERRM;
+                            DBMS_OUTPUT.PUT_LINE('✗ Failed to create policy: ' || policy_rec.policy_name);
+                            DBMS_OUTPUT.PUT_LINE('  Error: ' || v_error_msg);
+                    END;
+                END LOOP;
+            END IF;
+        END;
 
         DBMS_OUTPUT.PUT_LINE('========================================');
         DBMS_OUTPUT.PUT_LINE('ILM Policy Application Summary');
