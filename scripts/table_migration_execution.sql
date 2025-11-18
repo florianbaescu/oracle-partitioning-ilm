@@ -3373,15 +3373,68 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             v_recommended_method := 'CTAS';    -- Default to CTAS for most cases
         END IF;
 
-        -- Apply recommendations to task
-        UPDATE cmr.dwh_migration_tasks
-        SET partition_type = v_partition_type,
-            partition_key = v_partition_key,
-            interval_clause = v_interval_clause,
-            migration_method = v_recommended_method,
-            status = 'READY',
-            validation_status = 'READY'
-        WHERE task_id = p_task_id;
+        -- Determine compression_type from template if tiered, else keep task default
+        DECLARE
+            v_compression_to_use VARCHAR2(50);
+            v_template cmr.dwh_migration_ilm_templates%ROWTYPE;
+            v_template_json JSON_OBJECT_T;
+            v_tier_config JSON_OBJECT_T;
+            v_hot_config JSON_OBJECT_T;
+        BEGIN
+            -- Default: use existing task compression_type (defaults to 'BASIC')
+            v_compression_to_use := v_task.compression_type;
+
+            -- Override if tiered template is specified
+            IF v_task.ilm_policy_template IS NOT NULL THEN
+                BEGIN
+                    SELECT * INTO v_template
+                    FROM cmr.dwh_migration_ilm_templates
+                    WHERE template_name = v_task.ilm_policy_template;
+
+                    -- Parse template JSON
+                    IF v_template.policies_json IS NOT NULL THEN
+                        v_template_json := JSON_OBJECT_T.PARSE(v_template.policies_json);
+
+                        -- Check for tier_config
+                        IF v_template_json.has('tier_config') THEN
+                            v_tier_config := TREAT(v_template_json.get('tier_config') AS JSON_OBJECT_T);
+
+                            -- Check if tiering is enabled
+                            IF v_tier_config.has('enabled') AND
+                               v_tier_config.get_boolean('enabled') = TRUE THEN
+
+                                -- Extract HOT tier compression
+                                IF v_tier_config.has('hot') THEN
+                                    v_hot_config := TREAT(v_tier_config.get('hot') AS JSON_OBJECT_T);
+                                    IF v_hot_config.has('compression') THEN
+                                        v_compression_to_use := v_hot_config.get_string('compression');
+                                        DBMS_OUTPUT.PUT_LINE('  Using HOT tier compression from template: ' || v_compression_to_use);
+                                    END IF;
+                                END IF;
+                            END IF;
+                        END IF;
+                    END IF;
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        -- Template not found, use default
+                        NULL;
+                    WHEN OTHERS THEN
+                        -- JSON parsing error, use default
+                        DBMS_OUTPUT.PUT_LINE('  Warning: Could not parse template compression, using default');
+                END;
+            END IF;
+
+            -- Apply recommendations to task
+            UPDATE cmr.dwh_migration_tasks
+            SET partition_type = v_partition_type,
+                partition_key = v_partition_key,
+                interval_clause = v_interval_clause,
+                migration_method = v_recommended_method,
+                compression_type = v_compression_to_use,
+                status = 'READY',
+                validation_status = 'READY'
+            WHERE task_id = p_task_id;
+        END;
 
         COMMIT;
 

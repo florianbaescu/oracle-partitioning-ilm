@@ -1013,13 +1013,68 @@ WHERE source_table = 'LARGE_FACT_TABLE';
 
 ### Compression During Migration
 
+#### Compression Behavior
+
+The `compression_type` column in `dwh_migration_tasks` determines the compression applied during migration:
+
+**For Uniform (Non-Tiered) Partitioning:**
+- Default: `'BASIC'`
+- All partitions receive the same compression type
+- Can be changed before migration:
+
 ```sql
--- Apply compression during copy
 UPDATE cmr.dwh_migration_tasks
 SET use_compression = 'Y',
-    compression_type = 'QUERY HIGH'
+    compression_type = 'QUERY HIGH'  -- or BASIC, OLTP, etc.
 WHERE task_id = 1;
 ```
+
+**For Tiered Partitioning (ILM Template with tier_config):**
+- `compression_type` is **automatically set from the template's HOT tier** during `apply_recommendations`
+- Each tier uses its own compression from the template:
+  - **HOT tier**: Typically `'NONE'` (no compression for active data)
+  - **WARM tier**: Typically `'BASIC'` (moderate compression)
+  - **COLD tier**: Typically `'OLTP'` or `'ARCHIVE HIGH'` (aggressive compression)
+- Table-level default uses HOT tier compression
+- Example for `FACT_TABLE_STANDARD_TIERED` template:
+
+```sql
+-- After apply_recommendations, compression_type will be 'NONE' (from HOT tier)
+SELECT task_name, ilm_policy_template, compression_type
+FROM cmr.dwh_migration_tasks
+WHERE task_id = 1;
+
+-- Result:
+-- TASK_NAME           ILM_POLICY_TEMPLATE              COMPRESSION_TYPE
+-- Migrate SALES       FACT_TABLE_STANDARD_TIERED       NONE
+--
+-- Actual partitions created:
+--   HOT partitions (< 24 months):   NONE (no compression)
+--   WARM partitions (24-60 months): BASIC
+--   COLD partitions (> 60 months):  OLTP
+```
+
+**Important Notes:**
+- For tiered templates, `compression_type` reflects the **HOT tier** (table default)
+- To see tier-specific compression, query the template:
+  ```sql
+  SELECT template_name, policies_json
+  FROM cmr.dwh_migration_ilm_templates
+  WHERE template_name = 'FACT_TABLE_STANDARD_TIERED';
+  ```
+- ILM policies will automatically move partitions between tiers with appropriate compression changes
+- Manual override of `compression_type` for tiered templates will be **ignored** during migration
+
+#### Compression Types Available
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `NONE` | No compression | Active data, frequent updates (HOT tier) |
+| `BASIC` | Row-level compression | General purpose (WARM tier) |
+| `OLTP` | Advanced OLTP compression | Historical data (COLD tier) |
+| `QUERY HIGH` | Query-optimized | Data warehouse facts/dimensions |
+| `QUERY LOW` | Light query compression | Balance between size and performance |
+| `ARCHIVE HIGH` | Maximum compression | Archival, rarely accessed data |
 
 ### Nologging (Use with Caution)
 

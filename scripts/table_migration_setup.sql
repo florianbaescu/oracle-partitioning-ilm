@@ -63,7 +63,7 @@ BEGIN
             -- Migration strategy
             migration_method    VARCHAR2(30) DEFAULT ''CTAS'',
             use_compression     CHAR(1) DEFAULT ''Y'',
-            compression_type    VARCHAR2(50) DEFAULT ''QUERY HIGH'',
+            compression_type    VARCHAR2(50) DEFAULT ''BASIC'',  -- BASIC for uniform partitioning, overridden by template HOT tier for tiered partitioning
             lob_compression     VARCHAR2(30) DEFAULT ''MEDIUM'',  -- LOB compression: LOW, MEDIUM, HIGH
             lob_deduplicate     CHAR(1) DEFAULT ''N'',            -- LOB deduplication: Y/N
             target_tablespace   VARCHAR2(30),
