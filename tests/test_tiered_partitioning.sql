@@ -796,6 +796,285 @@ PROMPT    WHERE config_key = 'AUTO_MERGE_PARTITIONS';
 PROMPT    COMMIT;
 PROMPT
 
+-- =============================================================================
+-- SECTION 12: ILM Policy Creation and Validation Tests
+-- =============================================================================
+PROMPT ========================================
+PROMPT SECTION 12: ILM Policy Tests
+PROMPT ========================================
+PROMPT
+PROMPT Testing ILM policy creation for both tiered and non-tiered templates
+PROMPT (Verifies fix for JSON_TABLE path: $.policies[*] vs $[*])
+PROMPT
+
+-- Clean up existing policies for test tables
+DELETE FROM cmr.dwh_ilm_policies WHERE table_name = 'TEST_SALES_3Y';
+DELETE FROM cmr.dwh_ilm_policies WHERE table_name = 'TEST_SALES_12Y';
+DELETE FROM cmr.dwh_ilm_policies WHERE table_name = 'TEST_EVENTS_90D';
+COMMIT;
+
+PROMPT
+PROMPT Test 1: Tiered Template - FACT_TABLE_STANDARD_TIERED
+PROMPT ========================================
+
+DECLARE
+    v_task_id NUMBER;
+    v_policy_count NUMBER;
+BEGIN
+    -- Get task ID for TEST_SALES_3Y (tiered)
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE source_table = 'TEST_SALES_3Y'
+    AND task_name = 'Test 3Y Tiered'
+    AND ROWNUM = 1;
+
+    DBMS_OUTPUT.PUT_LINE('Task ID: ' || v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Template: FACT_TABLE_STANDARD_TIERED');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Apply ILM policies
+    cmr.pck_dwh_table_migration_executor.apply_ilm_policies(v_task_id);
+
+    -- Count policies created
+    SELECT COUNT(*) INTO v_policy_count
+    FROM cmr.dwh_ilm_policies
+    WHERE table_name = 'TEST_SALES_3Y';
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('Policies created: ' || v_policy_count);
+
+    IF v_policy_count = 2 THEN
+        DBMS_OUTPUT.PUT_LINE('✓ PASS: Expected 2 policies for tiered template');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('✗ FAIL: Expected 2 policies, got ' || v_policy_count);
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('Note: Test task not found. Tests run in simulate mode may not create tasks.');
+END;
+/
+
+PROMPT
+PROMPT Tiered template policies created:
+SELECT
+    policy_name,
+    policy_type,
+    action_type,
+    age_months,
+    target_tablespace,
+    compression_type,
+    priority,
+    enabled
+FROM cmr.dwh_ilm_policies
+WHERE table_name = 'TEST_SALES_3Y'
+ORDER BY priority;
+
+PROMPT
+PROMPT Expected policies:
+PROMPT   1. TEST_SALES_3Y_TIER_WARM: MOVE to TBS_WARM at 24 months, BASIC compression, priority 200
+PROMPT   2. TEST_SALES_3Y_TIER_COLD: MOVE to TBS_COLD at 60 months, OLTP compression, priority 300
+PROMPT
+
+PROMPT
+PROMPT Test 2: Events Tiered Template - EVENTS_SHORT_RETENTION_TIERED
+PROMPT ========================================
+
+DECLARE
+    v_task_id NUMBER;
+    v_policy_count NUMBER;
+BEGIN
+    -- Get task ID for TEST_EVENTS_90D (tiered)
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE source_table = 'TEST_EVENTS_90D'
+    AND task_name = 'Test Events 90d Tiered'
+    AND ROWNUM = 1;
+
+    DBMS_OUTPUT.PUT_LINE('Task ID: ' || v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Template: EVENTS_SHORT_RETENTION_TIERED');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Apply ILM policies
+    cmr.pck_dwh_table_migration_executor.apply_ilm_policies(v_task_id);
+
+    -- Count policies created
+    SELECT COUNT(*) INTO v_policy_count
+    FROM cmr.dwh_ilm_policies
+    WHERE table_name = 'TEST_EVENTS_90D';
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('Policies created: ' || v_policy_count);
+
+    IF v_policy_count >= 2 THEN
+        DBMS_OUTPUT.PUT_LINE('✓ PASS: Created ' || v_policy_count || ' policies for events tiered template');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('✗ FAIL: Expected at least 2 policies, got ' || v_policy_count);
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('Note: Test task not found.');
+END;
+/
+
+PROMPT
+PROMPT Events template policies created:
+SELECT
+    policy_name,
+    policy_type,
+    action_type,
+    COALESCE(TO_CHAR(age_months), TO_CHAR(age_days) || ' days') as retention,
+    target_tablespace,
+    compression_type
+FROM cmr.dwh_ilm_policies
+WHERE table_name = 'TEST_EVENTS_90D'
+ORDER BY priority;
+
+PROMPT
+
+PROMPT
+PROMPT Test 3: Non-Tiered Template - FACT_TABLE_STANDARD (Backward Compatibility)
+PROMPT ========================================
+
+DECLARE
+    v_task_id NUMBER;
+    v_policy_count NUMBER;
+BEGIN
+    -- Get task ID for non-tiered test
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE source_table = 'TEST_SALES_3Y'
+    AND task_name = 'Test Non-Tiered'
+    AND ROWNUM = 1;
+
+    -- Clean up first
+    DELETE FROM cmr.dwh_ilm_policies WHERE table_name = 'TEST_SALES_3Y';
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('Task ID: ' || v_task_id);
+    DBMS_OUTPUT.PUT_LINE('Template: FACT_TABLE_STANDARD (non-tiered)');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Apply ILM policies
+    cmr.pck_dwh_table_migration_executor.apply_ilm_policies(v_task_id);
+
+    -- Count policies created
+    SELECT COUNT(*) INTO v_policy_count
+    FROM cmr.dwh_ilm_policies
+    WHERE table_name = 'TEST_SALES_3Y';
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('Policies created: ' || v_policy_count);
+
+    IF v_policy_count >= 2 THEN
+        DBMS_OUTPUT.PUT_LINE('✓ PASS: Non-tiered template still works (backward compatible)');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('✗ FAIL: Expected at least 2 policies, got ' || v_policy_count);
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('Note: Non-tiered test task not found (optional test).');
+END;
+/
+
+PROMPT
+PROMPT Non-tiered template policies:
+SELECT
+    policy_name,
+    policy_type,
+    action_type,
+    age_months,
+    compression_type
+FROM cmr.dwh_ilm_policies
+WHERE table_name = 'TEST_SALES_3Y'
+ORDER BY priority;
+
+PROMPT
+
+PROMPT
+PROMPT Test 4: ILM Policy Validation
+PROMPT ========================================
+
+DECLARE
+    v_task_id NUMBER;
+BEGIN
+    -- Use tiered task for validation test
+    SELECT task_id INTO v_task_id
+    FROM cmr.dwh_migration_tasks
+    WHERE source_table = 'TEST_SALES_3Y'
+    AND task_name = 'Test 3Y Tiered'
+    AND ROWNUM = 1;
+
+    -- Ensure policies exist
+    DELETE FROM cmr.dwh_ilm_policies WHERE table_name = 'TEST_SALES_3Y';
+    COMMIT;
+
+    cmr.pck_dwh_table_migration_executor.apply_ilm_policies(v_task_id);
+
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('Running ILM policy validation...');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- Validate policies
+    cmr.pck_dwh_table_migration_executor.validate_ilm_policies(v_task_id);
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('Note: Test task not found.');
+END;
+/
+
+PROMPT
+PROMPT Validation results (from execution log):
+SELECT
+    step_number,
+    step_name,
+    status,
+    error_message,
+    TO_CHAR(end_time, 'YYYY-MM-DD HH24:MI:SS') as validation_time
+FROM cmr.dwh_migration_execution_log
+WHERE task_id = (
+    SELECT task_id FROM cmr.dwh_migration_tasks
+    WHERE source_table = 'TEST_SALES_3Y'
+    AND task_name = 'Test 3Y Tiered'
+    AND ROWNUM = 1
+)
+AND step_name = 'Validate ILM Policies'
+ORDER BY step_number DESC
+FETCH FIRST 1 ROW ONLY;
+
+PROMPT
+PROMPT Expected: status = 'SUCCESS' (not 'FAILED')
+PROMPT If status is FAILED with "No ILM policies found", the JSON_TABLE fix did not work
+PROMPT
+
+PROMPT
+PROMPT ========================================
+PROMPT SECTION 12 Summary: ILM Policy Tests
+PROMPT ========================================
+PROMPT
+PROMPT Tests completed:
+PROMPT   1. Tiered template (FACT_TABLE_STANDARD_TIERED) - Should create 2 policies
+PROMPT   2. Events tiered template (EVENTS_SHORT_RETENTION_TIERED) - Should create policies
+PROMPT   3. Non-tiered template (FACT_TABLE_STANDARD) - Backward compatibility test
+PROMPT   4. Validation should pass with status = SUCCESS
+PROMPT
+PROMPT Key Fix Verified:
+PROMPT   - Tiered templates use JSON path: $.policies[*]
+PROMPT   - Non-tiered templates use JSON path: $[*]
+PROMPT   - Both paths work via UNION ALL query
+PROMPT
+PROMPT Common Issues:
+PROMPT   - If policies_created = 0 for tiered templates:
+PROMPT     JSON_TABLE is not using $.policies[*] path
+PROMPT   - If validation status = FAILED:
+PROMPT     apply_ilm_policies did not create policies
+PROMPT   - If policies created but validation shows "No ILM policies found":
+PROMPT     Validation query has wrong schema or table name
+PROMPT
+
 PROMPT ========================================
 PROMPT Test Suite Complete
 PROMPT ========================================
