@@ -157,7 +157,7 @@ END;
 COMMENT ON TABLE cmr.dwh_migration_tasks IS 'Individual table migration tasks';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.enable_row_movement IS 'Enable row movement for partitioned table - allows Oracle to move rows between partitions when partition key values change (recommended for partitioned tables)';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.automatic_list IS 'Enable AUTOMATIC LIST partitioning (Oracle 12.2+). Creates partitions automatically for new values.';
-COMMENT ON COLUMN cmr.dwh_migration_tasks.list_default_values IS 'Default values for P_XDEF partition (e.g., ''NAV'' for VARCHAR, -1 for NUMBER, DATE ''5999-12-31'' for DATE). If NULL, framework determines based on data type.';
+COMMENT ON COLUMN cmr.dwh_migration_tasks.list_default_values IS 'Default values for P_XDEF partition (e.g., ''NAV'' for VARCHAR, -1 for NUMBER, DATE ''5999-01-01'' for DATE). If NULL, framework determines based on data type. See pck_dwh_constants.c_maxvalue_date.';
 COMMENT ON COLUMN cmr.dwh_migration_tasks.rename_original_table IS 'Y (default): rename original table to _OLD and migrated table becomes original name; N: keep original table name unchanged, migrated table stays as _MIGR suffix';
 
 
@@ -1043,7 +1043,7 @@ USING (SELECT 'NULL_DEFAULT_DATE' AS config_key FROM DUAL) s
 ON (t.config_key = s.config_key)
 WHEN NOT MATCHED THEN
     INSERT (config_key, config_value, description)
-    VALUES ('NULL_DEFAULT_DATE', '5999-12-31', 'Default date value for NULL date columns (YYYY-MM-DD format). Used with UPDATE strategy.');
+    VALUES ('NULL_DEFAULT_DATE', '5999-01-01', 'Default date value for NULL date columns (YYYY-MM-DD format). Used with UPDATE strategy. Use pck_dwh_constants.c_maxvalue_date.');
 
 MERGE INTO cmr.dwh_ilm_config t
 USING (SELECT 'NULL_DEFAULT_NUMBER' AS config_key FROM DUAL) s

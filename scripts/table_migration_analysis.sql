@@ -2096,7 +2096,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                         v_strategy := 'RANGE(' || v_scd2_column || ') INTERVAL YEARLY';
                         p_reason := 'SCD2 table with effective_date pattern detected - yearly partitioning for historical tracking';
                     ELSIF v_scd2_type = 'VALID_FROM_TO' THEN
-                        v_strategy := 'RANGE(NVL(' || v_scd2_column || ', TO_DATE(''5999-12-31'', ''YYYY-MM-DD''))) INTERVAL YEARLY';
+                        v_strategy := 'RANGE(NVL(' || v_scd2_column || ', pck_dwh_constants.c_maxvalue_date)) INTERVAL YEARLY';
                         p_reason := 'SCD2 table with valid_to pattern detected - yearly partitioning by VALID_TO for ILM (NULL = current/active data in far-future partition, past dates = obsolete/historical data)';
                     END IF;
                     RETURN v_strategy;
@@ -3833,9 +3833,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
                                     TO_CHAR(v_boundary_max_date, 'YYYY-MM-DD');
                             END IF;
 
-                            -- Warn if date range is suspicious (might indicate bad defaults like 5999-12-31 in data)
+                            -- Warn if date range is suspicious (might indicate bad defaults like 5999-01-01 in data)
                             IF v_boundary_range_years > 100 THEN
-                                DBMS_OUTPUT.PUT_LINE('  WARNING: Date range > 100 years - check for placeholder dates like 5999-12-31 in data');
+                                DBMS_OUTPUT.PUT_LINE('  WARNING: Date range > 100 years - check for placeholder dates like 5999-01-01 in data');
                             END IF;
                         END IF;
                     EXCEPTION
@@ -4517,10 +4517,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_analyzer AS
         p_user_defaults VARCHAR2 DEFAULT NULL
     ) RETURN VARCHAR2
     AS
-        -- Constants for default partition values (length-aware for strings)
+        -- Constants for default partition values (see pck_dwh_constants for centralized values)
         C_DEFAULT_NUMBER    CONSTANT VARCHAR2(100) := '-1';
-        C_DEFAULT_DATE      CONSTANT VARCHAR2(100) := 'DATE ''5999-12-31''';
-        C_DEFAULT_TIMESTAMP CONSTANT VARCHAR2(100) := 'TO_TIMESTAMP(''5999-12-31 23:59:59'',''YYYY-MM-DD HH24:MI:SS'')';
+        C_DEFAULT_DATE      CONSTANT VARCHAR2(100) := 'pck_dwh_constants.c_maxvalue_date';
+        C_DEFAULT_TIMESTAMP CONSTANT VARCHAR2(100) := 'pck_dwh_constants.c_maxvalue_timestamp';
 
         v_columns SYS.ODCIVARCHAR2LIST;
         v_column_name VARCHAR2(128);
