@@ -3604,8 +3604,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_cold_days NUMBER;
                 v_tier_count NUMBER := 0;
                 v_merge_sql CLOB;
+                v_json_path VARCHAR2(50);
             BEGIN
                 v_profile_name := v_template.template_name || '_THRESHOLDS';
+                v_json_path := CASE WHEN v_is_tiered THEN '$.tier_config' ELSE '$[*]' END;
 
                 -- Extract age thresholds based on template type
                 IF v_is_tiered THEN
