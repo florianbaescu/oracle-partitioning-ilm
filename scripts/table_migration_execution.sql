@@ -3662,22 +3662,46 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 END IF;
 
                 -- Create threshold profile if we found age-based policies
+                -- NOTE: Need at least 2 distinct ages to satisfy constraint: HOT < WARM < COLD
                 IF v_policy_count > 0 THEN
-                    DBMS_OUTPUT.PUT_LINE('Creating/updating threshold profile: ' || v_profile_name);
-                    DBMS_OUTPUT.PUT_LINE('  Found ' || v_policy_count || ' age-based policies');
-                    DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_min_age_days || ' days');
-                    DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || NVL(v_mid_age_days, v_max_age_days) || ' days');
-                    DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_max_age_days || ' days');
+                    DECLARE
+                        v_warm_threshold NUMBER;
+                        v_can_create_profile BOOLEAN := FALSE;
+                    BEGIN
+                        -- Calculate WARM threshold based on number of policies
+                        IF v_policy_count = 1 THEN
+                            -- Only 1 policy: Can't create valid profile (need HOT < WARM < COLD)
+                            DBMS_OUTPUT.PUT_LINE('Only 1 age-based policy found - need at least 2 for valid threshold profile');
+                            DBMS_OUTPUT.PUT_LINE('Temperature will use DEFAULT profile');
+                            v_can_create_profile := FALSE;
+                        ELSIF v_policy_count = 2 THEN
+                            -- 2 policies: Use midpoint between MIN and MAX for WARM
+                            v_warm_threshold := (v_min_age_days + v_max_age_days) / 2;
+                            v_can_create_profile := TRUE;
+                            DBMS_OUTPUT.PUT_LINE('2 age-based policies found - using midpoint for WARM threshold');
+                        ELSE
+                            -- 3+ policies: Use 2nd value for WARM (or midpoint if no 2nd value)
+                            v_warm_threshold := NVL(v_mid_age_days, (v_min_age_days + v_max_age_days) / 2);
+                            v_can_create_profile := TRUE;
+                            DBMS_OUTPUT.PUT_LINE('3+ age-based policies found - using 2nd value for WARM threshold');
+                        END IF;
 
-                    -- Build MERGE SQL for logging
-                    v_merge_sql :=
+                        IF v_can_create_profile THEN
+                            DBMS_OUTPUT.PUT_LINE('Creating/updating threshold profile: ' || v_profile_name);
+                            DBMS_OUTPUT.PUT_LINE('  Found ' || v_policy_count || ' age-based policies');
+                            DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_min_age_days || ' days');
+                            DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || v_warm_threshold || ' days');
+                            DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_max_age_days || ' days');
+
+                            -- Build MERGE SQL for logging
+                            v_merge_sql :=
 'MERGE INTO cmr.dwh_ilm_threshold_profiles t
 USING (
     SELECT
         ''' || v_profile_name || ''' AS profile_name,
         ''Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)'' AS description,
         ' || v_min_age_days || ' AS hot_threshold_days,
-        ' || NVL(v_mid_age_days, v_max_age_days) || ' AS warm_threshold_days,
+        ' || v_warm_threshold || ' AS warm_threshold_days,
         ' || v_max_age_days || ' AS cold_threshold_days
     FROM dual
 ) s
@@ -3697,52 +3721,74 @@ WHEN NOT MATCHED THEN INSERT (
     s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days
 );';
 
-                    -- Execute the MERGE
-                    MERGE INTO cmr.dwh_ilm_threshold_profiles t
-                    USING (
-                        SELECT
-                            v_profile_name AS profile_name,
-                            'Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)' AS description,
-                            v_min_age_days AS hot_threshold_days,
-                            NVL(v_mid_age_days, v_max_age_days) AS warm_threshold_days,
-                            v_max_age_days AS cold_threshold_days
-                        FROM dual
-                    ) s
-                    ON (t.profile_name = s.profile_name)
-                    WHEN MATCHED THEN UPDATE SET
-                        t.description = s.description,
-                        t.hot_threshold_days = s.hot_threshold_days,
-                        t.warm_threshold_days = s.warm_threshold_days,
-                        t.cold_threshold_days = s.cold_threshold_days,
-                        t.modified_by = USER,
-                        t.modified_date = SYSTIMESTAMP
-                    WHEN NOT MATCHED THEN INSERT (
-                        profile_name, description,
-                        hot_threshold_days, warm_threshold_days, cold_threshold_days
-                    ) VALUES (
-                        s.profile_name, s.description,
-                        s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days
-                    );
+                            -- Execute the MERGE
+                            MERGE INTO cmr.dwh_ilm_threshold_profiles t
+                            USING (
+                                SELECT
+                                    v_profile_name AS profile_name,
+                                    'Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)' AS description,
+                                    v_min_age_days AS hot_threshold_days,
+                                    v_warm_threshold AS warm_threshold_days,
+                                    v_max_age_days AS cold_threshold_days
+                                FROM dual
+                            ) s
+                            ON (t.profile_name = s.profile_name)
+                            WHEN MATCHED THEN UPDATE SET
+                                t.description = s.description,
+                                t.hot_threshold_days = s.hot_threshold_days,
+                                t.warm_threshold_days = s.warm_threshold_days,
+                                t.cold_threshold_days = s.cold_threshold_days,
+                                t.modified_by = USER,
+                                t.modified_date = SYSTIMESTAMP
+                            WHEN NOT MATCHED THEN INSERT (
+                                profile_name, description,
+                                hot_threshold_days, warm_threshold_days, cold_threshold_days
+                            ) VALUES (
+                                s.profile_name, s.description,
+                                s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days
+                            );
 
-                    -- Get profile_id
-                    SELECT profile_id INTO v_threshold_profile_id
-                    FROM cmr.dwh_ilm_threshold_profiles
-                    WHERE profile_name = v_profile_name;
+                            -- Get profile_id
+                            SELECT profile_id INTO v_threshold_profile_id
+                            FROM cmr.dwh_ilm_threshold_profiles
+                            WHERE profile_name = v_profile_name;
 
-                    DBMS_OUTPUT.PUT_LINE('  Threshold profile ID: ' || v_threshold_profile_id);
+                            DBMS_OUTPUT.PUT_LINE('  Threshold profile ID: ' || v_threshold_profile_id);
 
-                    -- Log success with actual SQL
-                    log_step(
-                        p_task_id => p_task_id,
-                        p_step_number => v_step_number,
-                        p_step_name => 'Create Threshold Profile',
-                        p_step_type => 'ILM_SETUP',
-                        p_sql => v_merge_sql,
-                        p_status => 'SUCCESS',
-                        p_start_time => v_step_start,
-                        p_end_time => SYSTIMESTAMP
-                    );
-                    v_step_number := v_step_number + 1;
+                            -- Log success with actual SQL
+                            log_step(
+                                p_task_id => p_task_id,
+                                p_step_number => v_step_number,
+                                p_step_name => 'Create Threshold Profile',
+                                p_step_type => 'ILM_SETUP',
+                                p_sql => v_merge_sql,
+                                p_status => 'SUCCESS',
+                                p_start_time => v_step_start,
+                                p_end_time => SYSTIMESTAMP
+                            );
+                            v_step_number := v_step_number + 1;
+                        ELSE
+                            -- Only 1 policy found - skip profile creation
+                            v_threshold_profile_id := NULL;
+                            v_merge_sql :=
+'-- Only 1 age-based policy found in template
+-- Cannot create valid threshold profile (constraint requires: HOT < WARM < COLD)
+-- Policy found: age=' || v_min_age_days || ' days
+-- Temperature will use DEFAULT profile';
+
+                            log_step(
+                                p_task_id => p_task_id,
+                                p_step_number => v_step_number,
+                                p_step_name => 'Create Threshold Profile',
+                                p_step_type => 'ILM_SETUP',
+                                p_sql => v_merge_sql,
+                                p_status => 'SKIPPED',
+                                p_start_time => v_step_start,
+                                p_end_time => SYSTIMESTAMP
+                            );
+                            v_step_number := v_step_number + 1;
+                        END IF;
+                    END;
                 ELSE
                     DBMS_OUTPUT.PUT_LINE('No age-based policies found - temperature will use DEFAULT profile');
                     v_threshold_profile_id := NULL;
