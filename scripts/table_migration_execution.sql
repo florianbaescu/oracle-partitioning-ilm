@@ -3601,8 +3601,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_mid_age_days NUMBER;
                 v_max_age_days NUMBER;
                 v_policy_count NUMBER;
+                v_merge_sql CLOB;
+                v_json_path VARCHAR2(50);
             BEGIN
                 v_profile_name := v_template.template_name || '_THRESHOLDS';
+                v_json_path := CASE WHEN v_is_tiered THEN '$.policies[*]' ELSE '$[*]' END;
 
                 -- Extract age thresholds from policies array
                 -- Supports both tiered ($.policies[*]) and non-tiered ($[*]) templates
@@ -3666,7 +3669,35 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || NVL(v_mid_age_days, v_max_age_days) || ' days');
                     DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_max_age_days || ' days');
 
-                    -- Create or update threshold profile
+                    -- Build MERGE SQL for logging
+                    v_merge_sql :=
+'MERGE INTO cmr.dwh_ilm_threshold_profiles t
+USING (
+    SELECT
+        ''' || v_profile_name || ''' AS profile_name,
+        ''Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)'' AS description,
+        ' || v_min_age_days || ' AS hot_threshold_days,
+        ' || NVL(v_mid_age_days, v_max_age_days) || ' AS warm_threshold_days,
+        ' || v_max_age_days || ' AS cold_threshold_days
+    FROM dual
+) s
+ON (t.profile_name = s.profile_name)
+WHEN MATCHED THEN UPDATE SET
+    t.description = s.description,
+    t.hot_threshold_days = s.hot_threshold_days,
+    t.warm_threshold_days = s.warm_threshold_days,
+    t.cold_threshold_days = s.cold_threshold_days,
+    t.modified_by = USER,
+    t.modified_date = SYSTIMESTAMP
+WHEN NOT MATCHED THEN INSERT (
+    profile_name, description,
+    hot_threshold_days, warm_threshold_days, cold_threshold_days
+) VALUES (
+    s.profile_name, s.description,
+    s.hot_threshold_days, s.warm_threshold_days, s.cold_threshold_days
+);';
+
+                    -- Execute the MERGE
                     MERGE INTO cmr.dwh_ilm_threshold_profiles t
                     USING (
                         SELECT
@@ -3700,15 +3731,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
                     DBMS_OUTPUT.PUT_LINE('  Threshold profile ID: ' || v_threshold_profile_id);
 
-                    -- Log success
+                    -- Log success with actual SQL
                     log_step(
                         p_task_id => p_task_id,
                         p_step_number => v_step_number,
                         p_step_name => 'Create Threshold Profile',
                         p_step_type => 'ILM_SETUP',
-                        p_sql => TO_CLOB('Created threshold profile: ' || v_profile_name ||
-                                        ' (HOT=' || v_min_age_days || 'd, WARM=' || NVL(v_mid_age_days, v_max_age_days) ||
-                                        'd, COLD=' || v_max_age_days || 'd) from ' || v_policy_count || ' policies'),
+                        p_sql => v_merge_sql,
                         p_status => 'SUCCESS',
                         p_start_time => v_step_start,
                         p_end_time => SYSTIMESTAMP
@@ -3718,13 +3747,40 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('No age-based policies found - temperature will use DEFAULT profile');
                     v_threshold_profile_id := NULL;
 
+                    -- Build diagnostic SQL for logging
+                    v_merge_sql :=
+'-- No age-based policies found in template
+-- Attempted query with JSON path: ' || v_json_path || '
+SELECT
+    MIN(COALESCE(age_days, age_months * 30.44)) AS min_age,
+    MAX(CASE WHEN rn = 2 THEN COALESCE(age_days, age_months * 30.44) END) AS mid_age,
+    MAX(COALESCE(age_days, age_months * 30.44)) AS max_age,
+    COUNT(*) AS policy_count
+FROM (
+    SELECT
+        jt.age_days,
+        jt.age_months,
+        ROW_NUMBER() OVER (ORDER BY COALESCE(jt.age_days, jt.age_months * 30.44)) AS rn
+    FROM cmr.dwh_migration_ilm_templates t,
+        JSON_TABLE(t.policies_json, ''' || v_json_path || '''
+            COLUMNS (
+                age_days NUMBER PATH ''$.age_days'',
+                age_months NUMBER PATH ''$.age_months''
+            )
+        ) jt
+    WHERE t.template_name = ''' || v_template.template_name || '''
+    AND (jt.age_days IS NOT NULL OR jt.age_months IS NOT NULL)
+);
+-- Result: policy_count = 0
+-- Temperature will use DEFAULT profile';
+
                     -- Log that no profile was created
                     log_step(
                         p_task_id => p_task_id,
                         p_step_number => v_step_number,
                         p_step_name => 'Create Threshold Profile',
                         p_step_type => 'ILM_SETUP',
-                        p_sql => TO_CLOB('No age-based policies found in template - using DEFAULT profile for temperature calculation'),
+                        p_sql => v_merge_sql,
                         p_status => 'SKIPPED',
                         p_start_time => v_step_start,
                         p_end_time => SYSTIMESTAMP
@@ -3739,13 +3795,42 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                     DBMS_OUTPUT.PUT_LINE('         Temperature calculation will use DEFAULT profile');
                     v_threshold_profile_id := NULL;
 
-                    -- Log error
+                    -- Build diagnostic SQL showing what was attempted
+                    v_merge_sql :=
+'-- Failed to extract age thresholds from template: ' || v_template.template_name || '
+-- JSON path used: ' || v_json_path || '
+-- Attempted query:
+SELECT
+    MIN(COALESCE(age_days, age_months * 30.44)) AS min_age,
+    MAX(CASE WHEN rn = 2 THEN COALESCE(age_days, age_months * 30.44) END) AS mid_age,
+    MAX(COALESCE(age_days, age_months * 30.44)) AS max_age,
+    COUNT(*) AS policy_count
+FROM (
+    SELECT
+        jt.age_days,
+        jt.age_months,
+        ROW_NUMBER() OVER (ORDER BY COALESCE(jt.age_days, jt.age_months * 30.44)) AS rn
+    FROM cmr.dwh_migration_ilm_templates t,
+        JSON_TABLE(t.policies_json, ''' || v_json_path || '''
+            COLUMNS (
+                age_days NUMBER PATH ''$.age_days'',
+                age_months NUMBER PATH ''$.age_months''
+            )
+        ) jt
+    WHERE t.template_name = ''' || v_template.template_name || '''
+    AND (jt.age_days IS NOT NULL OR jt.age_months IS NOT NULL)
+);
+
+-- Error: ' || v_error_msg || '
+-- Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE;
+
+                    -- Log error with detailed SQL
                     log_step(
                         p_task_id => p_task_id,
                         p_step_number => v_step_number,
                         p_step_name => 'Create Threshold Profile',
                         p_step_type => 'ILM_SETUP',
-                        p_sql => TO_CLOB('Attempted to create threshold profile from template policies'),
+                        p_sql => v_merge_sql,
                         p_status => 'FAILED',
                         p_start_time => v_step_start,
                         p_end_time => SYSTIMESTAMP,
