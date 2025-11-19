@@ -3698,23 +3698,29 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                         v_can_create_profile BOOLEAN := FALSE;
                     BEGIN
                         -- Handle COLD=null case (infinite retention, older than WARM)
+                        -- NULL means no upper limit - data stays in COLD tier forever
                         IF v_cold_days IS NULL THEN
-                            -- COLD tier has no age limit - use WARM + reasonable buffer
-                            -- For 5 years WARM (1800 days), use 10 years for COLD (3650 days)
-                            v_cold_days := v_warm_days * 2;
-                            DBMS_OUTPUT.PUT_LINE('COLD tier is null (infinite) - using WARM * 2 = ' || v_cold_days || ' days');
+                            DBMS_OUTPUT.PUT_LINE('COLD tier age is NULL - infinite retention (no upper limit)');
                         END IF;
 
-                        -- Validate constraint: HOT < WARM < COLD
-                        IF v_hot_days IS NOT NULL AND v_warm_days IS NOT NULL AND v_cold_days IS NOT NULL THEN
-                            IF v_hot_days < v_warm_days AND v_warm_days < v_cold_days THEN
-                                v_final_hot := v_hot_days;
-                                v_final_warm := v_warm_days;
-                                v_final_cold := v_cold_days;
-                                v_can_create_profile := TRUE;
+                        -- Validate constraint: HOT < WARM < NVL(COLD, 36500)
+                        -- When COLD is NULL, constraint allows anything > WARM
+                        IF v_hot_days IS NOT NULL AND v_warm_days IS NOT NULL THEN
+                            IF v_hot_days < v_warm_days THEN
+                                -- Check COLD if provided
+                                IF v_cold_days IS NOT NULL AND v_cold_days <= v_warm_days THEN
+                                    DBMS_OUTPUT.PUT_LINE('ERROR: COLD threshold must be > WARM threshold');
+                                    DBMS_OUTPUT.PUT_LINE('  HOT=' || v_hot_days || ', WARM=' || v_warm_days || ', COLD=' || v_cold_days);
+                                    v_can_create_profile := FALSE;
+                                ELSE
+                                    v_final_hot := v_hot_days;
+                                    v_final_warm := v_warm_days;
+                                    v_final_cold := v_cold_days;  -- Can be NULL
+                                    v_can_create_profile := TRUE;
+                                END IF;
                             ELSE
-                                DBMS_OUTPUT.PUT_LINE('ERROR: Thresholds do not satisfy HOT < WARM < COLD');
-                                DBMS_OUTPUT.PUT_LINE('  HOT=' || v_hot_days || ', WARM=' || v_warm_days || ', COLD=' || v_cold_days);
+                                DBMS_OUTPUT.PUT_LINE('ERROR: HOT threshold must be < WARM threshold');
+                                DBMS_OUTPUT.PUT_LINE('  HOT=' || v_hot_days || ', WARM=' || v_warm_days);
                                 v_can_create_profile := FALSE;
                             END IF;
                         ELSIF v_tier_count = 2 THEN
@@ -3739,7 +3745,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                             DBMS_OUTPUT.PUT_LINE('Creating/updating threshold profile: ' || v_profile_name);
                             DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_final_hot || ' days (' || ROUND(v_final_hot/365, 1) || ' years)');
                             DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || v_final_warm || ' days (' || ROUND(v_final_warm/365, 1) || ' years)');
-                            DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_final_cold || ' days (' || ROUND(v_final_cold/365, 1) || ' years)');
+                            DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' ||
+                                CASE
+                                    WHEN v_final_cold IS NULL THEN 'NULL (infinite retention)'
+                                    ELSE v_final_cold || ' days (' || ROUND(v_final_cold/365, 1) || ' years)'
+                                END);
 
                             -- Build MERGE SQL for logging
                             v_merge_sql :=
@@ -3750,7 +3760,7 @@ USING (
         ''Auto-generated from template: ' || v_template.template_name || ' (' || v_tier_count || ' tiers)'' AS description,
         ' || v_final_hot || ' AS hot_threshold_days,
         ' || v_final_warm || ' AS warm_threshold_days,
-        ' || v_final_cold || ' AS cold_threshold_days
+        ' || CASE WHEN v_final_cold IS NULL THEN 'NULL' ELSE TO_CHAR(v_final_cold) END || ' AS cold_threshold_days
     FROM dual
 ) s
 ON (t.profile_name = s.profile_name)

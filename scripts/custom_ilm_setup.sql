@@ -442,7 +442,7 @@ BEGIN
             -- Temperature thresholds in days
             hot_threshold_days  NUMBER NOT NULL,
             warm_threshold_days NUMBER NOT NULL,
-            cold_threshold_days NUMBER NOT NULL,
+            cold_threshold_days NUMBER,  -- NULL = infinite retention (no upper limit)
 
             -- Audit fields
             created_by          VARCHAR2(50) DEFAULT USER,
@@ -451,9 +451,10 @@ BEGIN
             modified_date       TIMESTAMP,
 
             -- Validation: ensure thresholds are in ascending order
+            -- COLD can be NULL (infinite retention), treated as 100 years for constraint
             CONSTRAINT chk_profile_thresholds CHECK (
                 hot_threshold_days < warm_threshold_days
-                AND warm_threshold_days < cold_threshold_days
+                AND warm_threshold_days < NVL(cold_threshold_days, 36500)
             )
         )';
     DBMS_OUTPUT.PUT_LINE('Created table: dwh_ilm_threshold_profiles');
