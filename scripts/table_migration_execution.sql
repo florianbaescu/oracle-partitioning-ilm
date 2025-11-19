@@ -3594,104 +3594,152 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         BEGIN
             v_is_tiered := JSON_EXISTS(v_template.policies_json, '$.tier_config');
 
-            -- Create threshold profile from policies (works for both tiered and non-tiered)
+            -- Create threshold profile from template
+            -- Tiered: Extract from tier_config (HOT/WARM/COLD age definitions)
+            -- Non-tiered: Extract from policies array
             DECLARE
                 v_profile_name VARCHAR2(100);
-                v_min_age_days NUMBER;
-                v_mid_age_days NUMBER;
-                v_max_age_days NUMBER;
-                v_policy_count NUMBER;
+                v_hot_days NUMBER;
+                v_warm_days NUMBER;
+                v_cold_days NUMBER;
+                v_tier_count NUMBER := 0;
                 v_merge_sql CLOB;
-                v_json_path VARCHAR2(50);
             BEGIN
                 v_profile_name := v_template.template_name || '_THRESHOLDS';
-                v_json_path := CASE WHEN v_is_tiered THEN '$.policies[*]' ELSE '$[*]' END;
 
-                -- Extract age thresholds from policies array
-                -- Supports both tiered ($.policies[*]) and non-tiered ($[*]) templates
+                -- Extract age thresholds based on template type
                 IF v_is_tiered THEN
-                    DBMS_OUTPUT.PUT_LINE('Tiered template detected - extracting thresholds from $.policies[*]');
+                    DBMS_OUTPUT.PUT_LINE('Tiered template detected - extracting thresholds from $.tier_config');
 
-                    -- Get sorted age values from policies (convert months to days)
+                    -- Extract tier ages from tier_config
+                    -- Convert months to days: months * 30 (whole days, not 30.44)
+                    -- Convert years to days: years * 365 (whole days, not 365.25)
                     SELECT
-                        MIN(COALESCE(age_days, age_months * 30.44)) AS min_age,
-                        MAX(CASE WHEN rn = 2 THEN COALESCE(age_days, age_months * 30.44) END) AS mid_age,
-                        MAX(COALESCE(age_days, age_months * 30.44)) AS max_age,
-                        COUNT(*) AS policy_count
-                    INTO v_min_age_days, v_mid_age_days, v_max_age_days, v_policy_count
-                    FROM (
-                        SELECT
-                            jt.age_days,
-                            jt.age_months,
-                            ROW_NUMBER() OVER (ORDER BY COALESCE(jt.age_days, jt.age_months * 30.44)) AS rn
-                        FROM cmr.dwh_migration_ilm_templates t,
-                            JSON_TABLE(t.policies_json, '$.policies[*]'
-                                COLUMNS (
-                                    age_days NUMBER PATH '$.age_days',
-                                    age_months NUMBER PATH '$.age_months'
-                                )
-                            ) jt
-                        WHERE t.template_name = v_template.template_name
-                        AND (jt.age_days IS NOT NULL OR jt.age_months IS NOT NULL)
-                    );
+                        COALESCE(hot_age_days, hot_age_months * 30, hot_age_years * 365) AS hot_days,
+                        COALESCE(warm_age_days, warm_age_months * 30, warm_age_years * 365) AS warm_days,
+                        COALESCE(cold_age_days, cold_age_months * 30, cold_age_years * 365) AS cold_days,
+                        CASE
+                            WHEN COALESCE(hot_age_days, hot_age_months, hot_age_years) IS NOT NULL THEN 1
+                            ELSE 0
+                        END +
+                        CASE
+                            WHEN COALESCE(warm_age_days, warm_age_months, warm_age_years) IS NOT NULL THEN 1
+                            ELSE 0
+                        END +
+                        CASE
+                            WHEN COALESCE(cold_age_days, cold_age_months, cold_age_years) IS NOT NULL THEN 1
+                            ELSE 0
+                        END AS tier_count
+                    INTO v_hot_days, v_warm_days, v_cold_days, v_tier_count
+                    FROM cmr.dwh_migration_ilm_templates t,
+                        JSON_TABLE(t.policies_json, '$.tier_config'
+                            COLUMNS (
+                                hot_age_days NUMBER PATH '$.hot.age_days',
+                                hot_age_months NUMBER PATH '$.hot.age_months',
+                                hot_age_years NUMBER PATH '$.hot.age_years',
+                                warm_age_days NUMBER PATH '$.warm.age_days',
+                                warm_age_months NUMBER PATH '$.warm.age_months',
+                                warm_age_years NUMBER PATH '$.warm.age_years',
+                                cold_age_days NUMBER PATH '$.cold.age_days',
+                                cold_age_months NUMBER PATH '$.cold.age_months',
+                                cold_age_years NUMBER PATH '$.cold.age_years'
+                            )
+                        ) jt
+                    WHERE t.template_name = v_template.template_name;
+
+                    DBMS_OUTPUT.PUT_LINE('Extracted from tier_config:');
+                    DBMS_OUTPUT.PUT_LINE('  HOT tier age: ' || v_hot_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  WARM tier age: ' || v_warm_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  COLD tier age: ' || v_cold_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  Non-null tiers: ' || v_tier_count);
                 ELSE
-                    DBMS_OUTPUT.PUT_LINE('Non-tiered template detected - extracting thresholds from $[*]');
+                    DBMS_OUTPUT.PUT_LINE('Non-tiered template detected - extracting thresholds from policies');
 
-                    -- Get sorted age values from policies (convert months to days)
+                    -- Get sorted age values from policies (convert to whole days)
                     SELECT
-                        MIN(COALESCE(age_days, age_months * 30.44)) AS min_age,
-                        MAX(CASE WHEN rn = 2 THEN COALESCE(age_days, age_months * 30.44) END) AS mid_age,
-                        MAX(COALESCE(age_days, age_months * 30.44)) AS max_age,
+                        MIN(COALESCE(age_days, age_months * 30, age_years * 365)) AS min_age,
+                        MAX(CASE WHEN rn = 2 THEN COALESCE(age_days, age_months * 30, age_years * 365) END) AS mid_age,
+                        MAX(COALESCE(age_days, age_months * 30, age_years * 365)) AS max_age,
                         COUNT(*) AS policy_count
-                    INTO v_min_age_days, v_mid_age_days, v_max_age_days, v_policy_count
+                    INTO v_hot_days, v_warm_days, v_cold_days, v_tier_count
                     FROM (
                         SELECT
                             jt.age_days,
                             jt.age_months,
-                            ROW_NUMBER() OVER (ORDER BY COALESCE(jt.age_days, jt.age_months * 30.44)) AS rn
+                            jt.age_years,
+                            ROW_NUMBER() OVER (ORDER BY COALESCE(jt.age_days, jt.age_months * 30, jt.age_years * 365)) AS rn
                         FROM cmr.dwh_migration_ilm_templates t,
                             JSON_TABLE(t.policies_json, '$[*]'
                                 COLUMNS (
                                     age_days NUMBER PATH '$.age_days',
-                                    age_months NUMBER PATH '$.age_months'
+                                    age_months NUMBER PATH '$.age_months',
+                                    age_years NUMBER PATH '$.age_years'
                                 )
                             ) jt
                         WHERE t.template_name = v_template.template_name
-                        AND (jt.age_days IS NOT NULL OR jt.age_months IS NOT NULL)
+                        AND (jt.age_days IS NOT NULL OR jt.age_months IS NOT NULL OR jt.age_years IS NOT NULL)
                     );
+
+                    DBMS_OUTPUT.PUT_LINE('Extracted from policies:');
+                    DBMS_OUTPUT.PUT_LINE('  MIN age: ' || v_hot_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  MID age: ' || v_warm_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  MAX age: ' || v_cold_days || ' days');
+                    DBMS_OUTPUT.PUT_LINE('  Policy count: ' || v_tier_count);
                 END IF;
 
-                -- Create threshold profile if we found age-based policies
-                -- NOTE: Need at least 2 distinct ages to satisfy constraint: HOT < WARM < COLD
-                IF v_policy_count > 0 THEN
+                -- Validate and adjust thresholds to satisfy constraint: HOT < WARM < COLD
+                -- For tiered templates: tier_config may have COLD=null (meaning infinite)
+                -- For non-tiered: need at least 2 distinct values
+                IF v_tier_count >= 2 THEN
                     DECLARE
-                        v_warm_threshold NUMBER;
+                        v_final_hot NUMBER;
+                        v_final_warm NUMBER;
+                        v_final_cold NUMBER;
                         v_can_create_profile BOOLEAN := FALSE;
                     BEGIN
-                        -- Calculate WARM threshold based on number of policies
-                        IF v_policy_count = 1 THEN
-                            -- Only 1 policy: Can't create valid profile (need HOT < WARM < COLD)
-                            DBMS_OUTPUT.PUT_LINE('Only 1 age-based policy found - need at least 2 for valid threshold profile');
-                            DBMS_OUTPUT.PUT_LINE('Temperature will use DEFAULT profile');
-                            v_can_create_profile := FALSE;
-                        ELSIF v_policy_count = 2 THEN
-                            -- 2 policies: Use midpoint between MIN and MAX for WARM
-                            v_warm_threshold := (v_min_age_days + v_max_age_days) / 2;
-                            v_can_create_profile := TRUE;
-                            DBMS_OUTPUT.PUT_LINE('2 age-based policies found - using midpoint for WARM threshold');
+                        -- Handle COLD=null case (infinite retention, older than WARM)
+                        IF v_cold_days IS NULL THEN
+                            -- COLD tier has no age limit - use WARM + reasonable buffer
+                            -- For 5 years WARM (1800 days), use 10 years for COLD (3650 days)
+                            v_cold_days := v_warm_days * 2;
+                            DBMS_OUTPUT.PUT_LINE('COLD tier is null (infinite) - using WARM * 2 = ' || v_cold_days || ' days');
+                        END IF;
+
+                        -- Validate constraint: HOT < WARM < COLD
+                        IF v_hot_days IS NOT NULL AND v_warm_days IS NOT NULL AND v_cold_days IS NOT NULL THEN
+                            IF v_hot_days < v_warm_days AND v_warm_days < v_cold_days THEN
+                                v_final_hot := v_hot_days;
+                                v_final_warm := v_warm_days;
+                                v_final_cold := v_cold_days;
+                                v_can_create_profile := TRUE;
+                            ELSE
+                                DBMS_OUTPUT.PUT_LINE('ERROR: Thresholds do not satisfy HOT < WARM < COLD');
+                                DBMS_OUTPUT.PUT_LINE('  HOT=' || v_hot_days || ', WARM=' || v_warm_days || ', COLD=' || v_cold_days);
+                                v_can_create_profile := FALSE;
+                            END IF;
+                        ELSIF v_tier_count = 2 THEN
+                            -- Only 2 values: calculate middle value for WARM
+                            v_final_hot := LEAST(v_hot_days, v_warm_days, NVL(v_cold_days, 999999));
+                            v_final_cold := GREATEST(v_hot_days, v_warm_days, NVL(v_cold_days, 0));
+                            v_final_warm := ROUND((v_final_hot + v_final_cold) / 2);
+
+                            IF v_final_hot < v_final_warm AND v_final_warm < v_final_cold THEN
+                                v_can_create_profile := TRUE;
+                                DBMS_OUTPUT.PUT_LINE('Only 2 tier values - calculated WARM as midpoint');
+                            ELSE
+                                v_can_create_profile := FALSE;
+                                DBMS_OUTPUT.PUT_LINE('ERROR: Cannot calculate valid midpoint for WARM');
+                            END IF;
                         ELSE
-                            -- 3+ policies: Use 2nd value for WARM (or midpoint if no 2nd value)
-                            v_warm_threshold := NVL(v_mid_age_days, (v_min_age_days + v_max_age_days) / 2);
-                            v_can_create_profile := TRUE;
-                            DBMS_OUTPUT.PUT_LINE('3+ age-based policies found - using 2nd value for WARM threshold');
+                            DBMS_OUTPUT.PUT_LINE('Insufficient tier values for threshold profile');
+                            v_can_create_profile := FALSE;
                         END IF;
 
                         IF v_can_create_profile THEN
                             DBMS_OUTPUT.PUT_LINE('Creating/updating threshold profile: ' || v_profile_name);
-                            DBMS_OUTPUT.PUT_LINE('  Found ' || v_policy_count || ' age-based policies');
-                            DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_min_age_days || ' days');
-                            DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || v_warm_threshold || ' days');
-                            DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_max_age_days || ' days');
+                            DBMS_OUTPUT.PUT_LINE('  HOT threshold: ' || v_final_hot || ' days (' || ROUND(v_final_hot/365, 1) || ' years)');
+                            DBMS_OUTPUT.PUT_LINE('  WARM threshold: ' || v_final_warm || ' days (' || ROUND(v_final_warm/365, 1) || ' years)');
+                            DBMS_OUTPUT.PUT_LINE('  COLD threshold: ' || v_final_cold || ' days (' || ROUND(v_final_cold/365, 1) || ' years)');
 
                             -- Build MERGE SQL for logging
                             v_merge_sql :=
@@ -3699,10 +3747,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 USING (
     SELECT
         ''' || v_profile_name || ''' AS profile_name,
-        ''Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)'' AS description,
-        ' || v_min_age_days || ' AS hot_threshold_days,
-        ' || v_warm_threshold || ' AS warm_threshold_days,
-        ' || v_max_age_days || ' AS cold_threshold_days
+        ''Auto-generated from template: ' || v_template.template_name || ' (' || v_tier_count || ' tiers)'' AS description,
+        ' || v_final_hot || ' AS hot_threshold_days,
+        ' || v_final_warm || ' AS warm_threshold_days,
+        ' || v_final_cold || ' AS cold_threshold_days
     FROM dual
 ) s
 ON (t.profile_name = s.profile_name)
@@ -3726,10 +3774,10 @@ WHEN NOT MATCHED THEN INSERT (
                             USING (
                                 SELECT
                                     v_profile_name AS profile_name,
-                                    'Auto-generated from template: ' || v_template.template_name || ' (' || v_policy_count || ' policies)' AS description,
-                                    v_min_age_days AS hot_threshold_days,
-                                    v_warm_threshold AS warm_threshold_days,
-                                    v_max_age_days AS cold_threshold_days
+                                    'Auto-generated from template: ' || v_template.template_name || ' (' || v_tier_count || ' tiers)' AS description,
+                                    v_final_hot AS hot_threshold_days,
+                                    v_final_warm AS warm_threshold_days,
+                                    v_final_cold AS cold_threshold_days
                                 FROM dual
                             ) s
                             ON (t.profile_name = s.profile_name)
@@ -3768,12 +3816,15 @@ WHEN NOT MATCHED THEN INSERT (
                             );
                             v_step_number := v_step_number + 1;
                         ELSE
-                            -- Only 1 policy found - skip profile creation
+                            -- Cannot create valid profile
                             v_threshold_profile_id := NULL;
                             v_merge_sql :=
-'-- Only 1 age-based policy found in template
--- Cannot create valid threshold profile (constraint requires: HOT < WARM < COLD)
--- Policy found: age=' || v_min_age_days || ' days
+'-- Insufficient tier data or constraint violation
+-- Tier count: ' || v_tier_count || '
+-- HOT: ' || v_hot_days || ' days
+-- WARM: ' || v_warm_days || ' days
+-- COLD: ' || v_cold_days || ' days
+-- Constraint requires: HOT < WARM < COLD (all distinct)
 -- Temperature will use DEFAULT profile';
 
                             log_step(
