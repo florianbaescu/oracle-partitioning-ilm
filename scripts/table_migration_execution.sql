@@ -862,6 +862,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 -- This ensures non-overlapping tiers: COLD → WARM → HOT
                 WHILE v_partition_date < v_warm_cutoff LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 1);
+
+                    -- Cap the partition HIGH_VALUE to not exceed warm_cutoff
+                    -- This prevents the last COLD partition from overlapping with WARM
+                    IF v_next_date > v_warm_cutoff THEN
+                        v_next_date := v_warm_cutoff;
+                    END IF;
+
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
 
                     DBMS_LOB.APPEND(v_partition_list,
