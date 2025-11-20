@@ -295,6 +295,52 @@ ENABLE ROW MOVEMENT
 
 ---
 
+## Tier Boundary Handling
+
+When COLD and WARM tiers both use YEARLY intervals, special handling prevents duplicate partition names at the boundary year.
+
+### Boundary Year Logic (Option 1: Boundary to WARM)
+
+**Problem:**
+- warm_cutoff = 2020-01-01 (5 years ago)
+- COLD uses YEARLY → creates P_2013, P_2014, ..., P_2019
+- WARM uses YEARLY → could also try to create P_2020
+- Result: **Duplicate partition name P_2020** ❌
+
+**Solution:**
+- **COLD tier**: Stops BEFORE boundary year (`< warm_cutoff`)
+  - Creates: P_2013, P_2014, ..., P_2019 (ends at 2020-01-01)
+- **WARM tier**: Starts AT boundary year (`TRUNC(cutoff, 'YYYY')`)
+  - Creates: P_2020, P_2021, P_2022 (starts at 2020-01-01)
+- **Boundary year (2020)** becomes first partition of WARM tier ✓
+
+**Age Semantics:**
+```
+P_2020 partition:
+  HIGH_VALUE: 2021-01-01
+  Age (today 2025-01): 4 years
+  Tier assignment: WARM (2-5 years) ✓
+```
+
+**Benefits:**
+1. No duplicate partition names
+2. Boundary year age matches tier assignment (4 years → WARM)
+3. Partition names are tier-agnostic (P_2020 can later move to COLD)
+4. Follows Oracle best practices (partition names = temporal, not tier-specific)
+
+**Example:**
+```
+Data span: 2013-2024
+warm_cutoff: 2020-01-01
+hot_cutoff: 2023-01-01
+
+COLD tier (YEARLY): P_2013, ..., P_2019 (ends 2020-01-01)
+WARM tier (YEARLY): P_2020, P_2021, P_2022 (2020-01-01 to 2023-01-01)
+HOT tier (MONTHLY): P_2023_01, ..., P_2024_12 (starts 2023-01-01)
+```
+
+---
+
 ## Runtime Validation
 
 The `build_tiered_partitions()` procedure automatically validates tier configuration during execution:
