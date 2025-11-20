@@ -924,21 +924,32 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         -- ====================================================================
         DBMS_OUTPUT.PUT_LINE('Generating WARM tier partitions...');
 
-        -- Determine WARM start date (boundary year handling)
-        -- Option 1: Boundary year goes to WARM (prevents duplicate partition names)
-        IF v_cold_cutoff IS NOT NULL THEN
-            -- Start WARM at the boundary year (year of cold_cutoff)
-            -- This ensures no overlap with COLD's last year
-            v_partition_date := TRUNC(v_cold_cutoff, 'YYYY');
-        ELSE
-            -- Permanent retention case: COLD goes up to warm_cutoff
-            -- Start WARM at the boundary year (year of warm_cutoff)
-            v_partition_date := TRUNC(v_warm_cutoff, 'YYYY');
-        END IF;
+        -- Determine WARM start date
+        -- For YEARLY intervals: Use boundary year handling to prevent duplicates
+        -- For MONTHLY/WEEKLY/DAILY: Start at the actual tier boundary (cold_cutoff or warm_cutoff)
+        IF UPPER(v_warm_interval) = 'YEARLY' THEN
+            -- Boundary year handling for YEARLY intervals (prevents duplicate partition names)
+            IF v_cold_cutoff IS NOT NULL THEN
+                -- Start WARM at the boundary year (year of cold_cutoff)
+                -- This ensures no overlap with COLD's last year
+                v_partition_date := TRUNC(v_cold_cutoff, 'YYYY');
+            ELSE
+                -- Permanent retention case: COLD goes up to warm_cutoff
+                -- Start WARM at the boundary year (year of warm_cutoff)
+                v_partition_date := TRUNC(v_warm_cutoff, 'YYYY');
+            END IF;
 
-        -- Ensure we don't start before min_date
-        IF v_partition_date < TRUNC(v_min_date, 'YYYY') THEN
-            v_partition_date := TRUNC(v_min_date, 'YYYY');
+            -- Ensure we don't start before min_date
+            IF v_partition_date < TRUNC(v_min_date, 'YYYY') THEN
+                v_partition_date := TRUNC(v_min_date, 'YYYY');
+            END IF;
+        ELSE
+            -- For MONTHLY/WEEKLY/DAILY: Start at the actual tier boundary
+            IF v_cold_cutoff IS NOT NULL THEN
+                v_partition_date := GREATEST(v_min_date, v_cold_cutoff);
+            ELSE
+                v_partition_date := GREATEST(v_min_date, v_warm_cutoff);
+            END IF;
         END IF;
 
         IF UPPER(v_warm_interval) = 'YEARLY' THEN
