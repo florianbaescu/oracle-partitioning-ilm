@@ -998,6 +998,27 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 v_warm_count := v_warm_count + 1;
                 v_partition_date := v_next_date;
             END LOOP;
+        ELSIF UPPER(v_warm_interval) = 'WEEKLY' THEN
+            -- Weekly partitions using ISO week number (P_YYYY_WW format)
+            v_partition_date := TRUNC(v_partition_date, 'IW'); -- Start of ISO week
+            WHILE v_partition_date < v_hot_cutoff LOOP
+                v_next_date := v_partition_date + 7; -- Add one week
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
+
+                DBMS_LOB.APPEND(v_partition_list,
+                    '    PARTITION ' || v_partition_name ||
+                    ' VALUES LESS THAN (TO_DATE(''' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                    ' TABLESPACE ' || v_warm_tablespace);
+
+                IF v_warm_compression != 'NONE' THEN
+                    DBMS_LOB.APPEND(v_partition_list, get_compression_clause(v_warm_compression));
+                END IF;
+
+                DBMS_LOB.APPEND(v_partition_list, ' PCTFREE ' || v_warm_pctfree);
+                DBMS_LOB.APPEND(v_partition_list, ',' || CHR(10));
+                v_warm_count := v_warm_count + 1;
+                v_partition_date := v_next_date;
+            END LOOP;
         END IF;
 
         DBMS_OUTPUT.PUT_LINE('  Generated ' || v_warm_count || ' WARM partitions');
@@ -1009,6 +1030,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         IF UPPER(v_hot_interval) = 'MONTHLY' THEN
             v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff), 'MM');
+            -- Create partitions up to and including current month
             WHILE v_partition_date <= TRUNC(v_current_date, 'MM') LOOP
                 v_next_date := ADD_MONTHS(v_partition_date, 1);
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
@@ -1029,7 +1051,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END LOOP;
         ELSIF UPPER(v_hot_interval) = 'DAILY' THEN
             v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff));
-            WHILE v_partition_date <= TRUNC(v_current_date) LOOP
+            -- Create partitions up to yesterday (not including today)
+            -- This ensures we get exactly the number of days specified in age_days
+            WHILE v_partition_date < TRUNC(v_current_date) LOOP
                 v_next_date := v_partition_date + 1;
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
 
