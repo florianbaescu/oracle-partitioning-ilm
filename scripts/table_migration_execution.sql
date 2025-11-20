@@ -781,16 +781,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         DBMS_OUTPUT.PUT_LINE('Tier boundaries:');
         IF v_cold_cutoff IS NOT NULL THEN
-            DBMS_OUTPUT.PUT_LINE('  COLD: < ' || TO_CHAR(v_cold_cutoff, 'YYYY-MM-DD') ||
-                                 ' (' || v_cold_interval || ' partitions)');
+            DBMS_OUTPUT.PUT_LINE('  COLD: < ' || TO_CHAR(v_warm_cutoff, 'YYYY-MM-DD') ||
+                                 ' (' || v_cold_interval || ' partitions, data older than ' ||
+                                 ROUND((v_current_date - v_warm_cutoff)) || ' days)');
         ELSE
             DBMS_OUTPUT.PUT_LINE('  COLD: all data before WARM cutoff (' || v_cold_interval || ' partitions, permanent retention)');
         END IF;
         DBMS_OUTPUT.PUT_LINE('  WARM: ' || TO_CHAR(v_warm_cutoff, 'YYYY-MM-DD') ||
                              ' to ' || TO_CHAR(v_hot_cutoff, 'YYYY-MM-DD') ||
-                             ' (' || v_warm_interval || ' partitions)');
+                             ' (' || v_warm_interval || ' partitions, ' ||
+                             ROUND((v_warm_cutoff - v_hot_cutoff)) || ' days)');
         DBMS_OUTPUT.PUT_LINE('  HOT:  > ' || TO_CHAR(v_hot_cutoff, 'YYYY-MM-DD') ||
-                             ' (' || v_hot_interval || ' partitions)');
+                             ' (' || v_hot_interval || ' partitions, last ' ||
+                             ROUND((v_current_date - v_hot_cutoff)) || ' days)');
 
         -- Get source data date range from analysis
         BEGIN
@@ -855,7 +858,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
                 END LOOP;
             ELSIF UPPER(v_cold_interval) = 'MONTHLY' THEN
                 v_partition_date := TRUNC(v_min_date, 'MM');
-                WHILE v_partition_date < v_cold_cutoff LOOP
+                -- COLD tier ends at warm_cutoff (not cold_cutoff)
+                -- This ensures non-overlapping tiers: COLD → WARM → HOT
+                WHILE v_partition_date < v_warm_cutoff LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 1);
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
 
@@ -945,11 +950,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END IF;
         ELSE
             -- For MONTHLY/WEEKLY/DAILY: Start at the actual tier boundary
-            IF v_cold_cutoff IS NOT NULL THEN
-                v_partition_date := GREATEST(v_min_date, v_cold_cutoff);
-            ELSE
-                v_partition_date := GREATEST(v_min_date, v_warm_cutoff);
-            END IF;
+            -- WARM tier always starts at warm_cutoff (not cold_cutoff)
+            v_partition_date := GREATEST(v_min_date, v_warm_cutoff);
         END IF;
 
         IF UPPER(v_warm_interval) = 'YEARLY' THEN
