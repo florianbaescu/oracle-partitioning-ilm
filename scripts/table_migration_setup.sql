@@ -676,11 +676,46 @@ WHEN NOT MATCHED THEN
 MERGE INTO cmr.dwh_migration_ilm_templates t
 USING (SELECT 'EVENTS_SHORT_RETENTION_TIERED' AS template_name FROM DUAL) s
 ON (t.template_name = s.template_name)
+WHEN MATCHED THEN
+    UPDATE SET
+        description = 'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT/PCTFREE 10, WARM=30d daily/TBS_WARM/QUERY HIGH/PCTFREE 5, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH/PCTFREE 0',
+        table_type = 'EVENTS',
+        policies_json = '{
+            "tier_config": {
+                "enabled": true,
+                "hot": {
+                    "age_days": 7,
+                    "interval": "DAILY",
+                    "tablespace": "TBS_HOT",
+                    "compression": "NONE",
+                    "pctfree": 10
+                },
+                "warm": {
+                    "age_days": 30,
+                    "interval": "DAILY",
+                    "tablespace": "TBS_WARM",
+                    "compression": "QUERY HIGH",
+                    "pctfree": 5
+                },
+                "cold": {
+                    "age_days": 90,
+                    "interval": "MONTHLY",
+                    "tablespace": "TBS_COLD",
+                    "compression": "ARCHIVE HIGH",
+                    "pctfree": 0
+                }
+            },
+            "policies": [
+                {"policy_name": "{TABLE}_TIER_WARM", "age_days": 7, "action": "MOVE", "tablespace": "TBS_WARM", "compression": "QUERY HIGH", "pctfree": 5, "priority": 200},
+                {"policy_name": "{TABLE}_TIER_COLD", "age_days": 30, "action": "MOVE", "tablespace": "TBS_COLD", "compression": "ARCHIVE HIGH", "pctfree": 0, "priority": 300},
+                {"policy_name": "{TABLE}_PURGE", "age_days": 90, "action": "DROP", "priority": 900}
+            ]
+        }'
 WHEN NOT MATCHED THEN
     INSERT (template_name, description, table_type, policies_json)
     VALUES (
         'EVENTS_SHORT_RETENTION_TIERED',
-        'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT/PCTFREE 10, WARM=30d weekly/TBS_WARM/QUERY HIGH/PCTFREE 5, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH/PCTFREE 0',
+        'ILM-aware partitioning for events: HOT=7d daily/TBS_HOT/PCTFREE 10, WARM=30d daily/TBS_WARM/QUERY HIGH/PCTFREE 5, COLD=90d monthly/TBS_COLD/ARCHIVE HIGH/PCTFREE 0',
         'EVENTS',
         '{
             "tier_config": {
@@ -694,7 +729,7 @@ WHEN NOT MATCHED THEN
                 },
                 "warm": {
                     "age_days": 30,
-                    "interval": "WEEKLY",
+                    "interval": "DAILY",
                     "tablespace": "TBS_WARM",
                     "compression": "QUERY HIGH",
                     "pctfree": 5

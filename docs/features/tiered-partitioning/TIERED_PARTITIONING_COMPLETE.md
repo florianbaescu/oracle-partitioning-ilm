@@ -22,7 +22,7 @@ ILM-aware tiered partitioning has been successfully implemented! This feature cr
 
 **Added 3 New Templates:**
 1. **FACT_TABLE_STANDARD_TIERED** - 7-year retention (HOT=1y monthly, WARM=3y yearly, COLD=7y yearly)
-2. **EVENTS_SHORT_RETENTION_TIERED** - 90-day retention (HOT=7d daily, WARM=30d weekly, COLD=90d monthly)
+2. **EVENTS_SHORT_RETENTION_TIERED** - 90-day retention (HOT=7d daily, WARM=30d daily, COLD=90d monthly)
 3. **SCD2_VALID_FROM_TO_TIERED** - Permanent retention (HOT=1y monthly, WARM=5y yearly, COLD=permanent yearly)
 
 **Features:**
