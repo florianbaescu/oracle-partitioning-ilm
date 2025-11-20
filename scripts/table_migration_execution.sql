@@ -1000,7 +1000,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END LOOP;
         ELSIF UPPER(v_warm_interval) = 'MONTHLY' THEN
             v_partition_date := TRUNC(v_partition_date, 'MM');
-            WHILE v_partition_date < v_hot_cutoff LOOP
+            -- Compare against TRUNC to avoid time component issues
+            WHILE v_partition_date < TRUNC(v_hot_cutoff) LOOP
                 v_next_date := ADD_MONTHS(v_partition_date, 1);
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
 
@@ -1021,7 +1022,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         ELSIF UPPER(v_warm_interval) = 'WEEKLY' THEN
             -- Weekly partitions using ISO week number (P_YYYY_WW format)
             v_partition_date := TRUNC(v_partition_date, 'IW'); -- Start of ISO week
-            WHILE v_partition_date < v_hot_cutoff LOOP
+            -- Compare against TRUNC to avoid time component issues
+            WHILE v_partition_date < TRUNC(v_hot_cutoff) LOOP
                 v_next_date := v_partition_date + 7; -- Add one week
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
 
@@ -1042,7 +1044,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         ELSIF UPPER(v_warm_interval) = 'DAILY' THEN
             -- Daily partitions (P_YYYY_MM_DD format)
             v_partition_date := TRUNC(v_partition_date); -- Start of day
-            WHILE v_partition_date < v_hot_cutoff LOOP
+            -- Compare against TRUNC to avoid time component issues
+            -- This prevents creating a partition at hot_cutoff boundary
+            WHILE v_partition_date < TRUNC(v_hot_cutoff) LOOP
                 v_next_date := v_partition_date + 1; -- Add one day
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
 
