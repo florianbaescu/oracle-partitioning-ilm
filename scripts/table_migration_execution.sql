@@ -616,6 +616,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         v_hot_cutoff DATE;
         v_warm_cutoff DATE;
         v_cold_cutoff DATE;
+        v_cold_end DATE;   -- Boundary year end for COLD tier
+        v_warm_end DATE;   -- Boundary year end for WARM tier
 
         -- Partition generation
         v_partition_list CLOB;
@@ -819,12 +821,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             IF UPPER(v_cold_interval) = 'YEARLY' THEN
                 v_partition_date := TRUNC(v_min_date, 'YYYY');
-                WHILE v_partition_date < v_cold_cutoff LOOP
+
+                -- CRITICAL: Stop COLD at the START of the boundary year, not at cold_cutoff
+                -- This prevents duplicate partition names when WARM also uses YEARLY
+                -- Example: cold_cutoff = 2020-06-15 → v_cold_end = 2020-01-01
+                --   COLD creates: P_2013, ..., P_2019 (ends at 2020-01-01)
+                --   WARM will create: P_2020 (starts at 2020-01-01)
+                v_cold_end := TRUNC(v_cold_cutoff, 'YYYY');
+
+                WHILE v_partition_date < v_cold_end LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 12);
 
-                    -- If next_date would exceed cold_cutoff, create partial year partition ending at cold_cutoff
-                    IF v_next_date > v_cold_cutoff THEN
-                        v_next_date := v_cold_cutoff;
+                    -- Ensure we don't exceed the boundary year start
+                    IF v_next_date > v_cold_end THEN
+                        v_next_date := v_cold_end;
                     END IF;
 
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
@@ -872,12 +882,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
             IF UPPER(v_cold_interval) = 'YEARLY' THEN
                 v_partition_date := TRUNC(v_min_date, 'YYYY');
-                WHILE v_partition_date < v_warm_cutoff LOOP
+
+                -- CRITICAL: Stop COLD at the START of the boundary year, not at warm_cutoff
+                -- This prevents duplicate partition names when WARM also uses YEARLY
+                -- Example: warm_cutoff = 2023-06-15 → v_cold_end = 2023-01-01
+                --   COLD creates: P_2013, ..., P_2022 (ends at 2023-01-01)
+                --   WARM will create: P_2023 (starts at 2023-01-01)
+                v_cold_end := TRUNC(v_warm_cutoff, 'YYYY');
+
+                WHILE v_partition_date < v_cold_end LOOP
                     v_next_date := ADD_MONTHS(v_partition_date, 12);
 
-                    -- If next_date would exceed warm_cutoff, create partial year partition ending at warm_cutoff
-                    IF v_next_date > v_warm_cutoff THEN
-                        v_next_date := v_warm_cutoff;
+                    -- Ensure we don't exceed the boundary year start
+                    IF v_next_date > v_cold_end THEN
+                        v_next_date := v_cold_end;
                     END IF;
 
                     v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
@@ -924,12 +942,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
         END IF;
 
         IF UPPER(v_warm_interval) = 'YEARLY' THEN
-            WHILE v_partition_date < v_hot_cutoff LOOP
+            -- CRITICAL: Stop WARM at the START of the boundary year when HOT also uses YEARLY
+            -- This prevents duplicate partition names
+            -- Example: hot_cutoff = 2024-06-15 and HOT uses YEARLY → v_warm_end = 2024-01-01
+            --   WARM creates: P_2020, ..., P_2023 (ends at 2024-01-01)
+            --   HOT will create: P_2024 (starts at 2024-01-01)
+            IF UPPER(v_hot_interval) = 'YEARLY' THEN
+                v_warm_end := TRUNC(v_hot_cutoff, 'YYYY');
+            ELSE
+                -- HOT uses MONTHLY/WEEKLY/DAILY, no conflict - can go up to hot_cutoff
+                v_warm_end := v_hot_cutoff;
+            END IF;
+
+            WHILE v_partition_date < v_warm_end LOOP
                 v_next_date := ADD_MONTHS(v_partition_date, 12);
 
-                -- If next_date would exceed hot_cutoff, create partial year partition ending at hot_cutoff
-                IF v_next_date > v_hot_cutoff THEN
-                    v_next_date := v_hot_cutoff;
+                -- Ensure we don't exceed the boundary year start
+                IF v_next_date > v_warm_end THEN
+                    v_next_date := v_warm_end;
                 END IF;
 
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
