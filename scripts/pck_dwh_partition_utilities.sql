@@ -1,0 +1,1316 @@
+-- =============================================================================
+-- Package: pck_dwh_partition_utilities (Version 2 with Validation & Logging)
+-- Description: Enhanced partition utilities with validation and logging
+-- Dependencies:
+--   - pck_dwh_partition_utils_helper
+--   - cmr.dwh_partition_utilities_log
+-- =============================================================================
+
+-- NOTE: This file shows the refactored precreate_hot_partitions procedure
+-- with validation and logging. The full package will need similar updates
+-- for all procedures.
+
+CREATE OR REPLACE PACKAGE pck_dwh_partition_utilities AUTHID CURRENT_USER AS
+
+    -- ==========================================================================
+    -- SECTION 1: ILM-AWARE PARTITION PRE-CREATION
+    -- ==========================================================================
+
+    -- Pre-create HOT tier partitions for next period
+    -- Now with validation, auto-detection, and logging
+    PROCEDURE precreate_hot_partitions(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2
+    );
+
+    -- Pre-create HOT tier partitions for all tables with active ILM policies
+    PROCEDURE precreate_all_hot_partitions;
+
+    -- Preview what HOT tier partitions would be created (no execution)
+    PROCEDURE preview_hot_partitions(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2
+    );
+
+    -- ==========================================================================
+    -- SECTION 2: PARTITION CREATION AND MAINTENANCE
+    -- ==========================================================================
+
+    -- Create future partitions (generic, for non-ILM tables)
+    PROCEDURE create_future_partitions(
+        p_table_name VARCHAR2,
+        p_months_ahead NUMBER DEFAULT 12,
+        p_partition_interval VARCHAR2 DEFAULT 'MONTH'
+    );
+
+    -- Split partition at specified date
+    PROCEDURE split_partition(
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_split_date DATE
+    );
+
+    -- Merge adjacent partitions
+    PROCEDURE merge_partitions(
+        p_table_name VARCHAR2,
+        p_partition1 VARCHAR2,
+        p_partition2 VARCHAR2,
+        p_merged_partition VARCHAR2 DEFAULT NULL
+    );
+
+    -- ==========================================================================
+    -- SECTION 3: PARTITION DATA LOADING
+    -- ==========================================================================
+
+    -- Exchange partition for fast bulk loading
+    PROCEDURE exchange_partition_load(
+        p_target_table VARCHAR2,
+        p_staging_table VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_validate BOOLEAN DEFAULT TRUE,
+        p_update_indexes BOOLEAN DEFAULT TRUE
+    );
+
+    -- Parallel partition loading with direct path insert
+    PROCEDURE parallel_partition_load(
+        p_target_table VARCHAR2,
+        p_source_query VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_degree NUMBER DEFAULT 4
+    );
+
+    -- ==========================================================================
+    -- SECTION 4: PARTITION MAINTENANCE OPERATIONS
+    -- ==========================================================================
+
+    -- Truncate partitions older than retention period
+    PROCEDURE truncate_old_partitions(
+        p_table_name VARCHAR2,
+        p_retention_days NUMBER
+    );
+
+    -- Compress partitions older than specified age
+    PROCEDURE compress_partitions(
+        p_table_name VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_age_days NUMBER DEFAULT 90
+    );
+
+    -- Move partitions to different tablespace
+    PROCEDURE move_partitions_to_tablespace(
+        p_table_name VARCHAR2,
+        p_target_tablespace VARCHAR2,
+        p_age_days NUMBER DEFAULT NULL,
+        p_compression VARCHAR2 DEFAULT NULL
+    );
+
+    -- ==========================================================================
+    -- SECTION 5: PARTITION STATISTICS MANAGEMENT
+    -- ==========================================================================
+
+    -- Gather statistics on partitions (with incremental option)
+    PROCEDURE gather_partition_statistics(
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2 DEFAULT NULL,
+        p_degree NUMBER DEFAULT 4,
+        p_incremental BOOLEAN DEFAULT TRUE
+    );
+
+    -- Identify and gather statistics on stale partitions
+    PROCEDURE gather_stale_partition_stats(
+        p_table_name VARCHAR2,
+        p_stale_percent NUMBER DEFAULT 10,
+        p_degree NUMBER DEFAULT 4
+    );
+
+    -- ==========================================================================
+    -- SECTION 6: PARTITION HEALTH CHECK AND VALIDATION
+    -- ==========================================================================
+
+    -- Check partition health and identify issues
+    PROCEDURE check_partition_health(
+        p_table_name VARCHAR2
+    );
+
+    -- Validate partition constraints
+    PROCEDURE validate_partition_constraints(
+        p_table_name VARCHAR2
+    );
+
+    -- ==========================================================================
+    -- SECTION 7: PARTITION REPORTING
+    -- ==========================================================================
+
+    -- Generate partition size and configuration report
+    PROCEDURE partition_size_report(
+        p_table_name VARCHAR2
+    );
+
+END pck_dwh_partition_utilities;
+/
+
+CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
+
+    -- ==========================================================================
+    -- SECTION 1: ILM-AWARE PARTITION PRE-CREATION (REFACTORED)
+    -- ==========================================================================
+
+    PROCEDURE precreate_hot_partitions(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2
+    ) AS
+        v_log_id NUMBER;
+        v_interval VARCHAR2(20);
+        v_tablespace VARCHAR2(30);
+        v_compression VARCHAR2(50);
+        v_config_source VARCHAR2(50);
+        v_pctfree NUMBER := 10;
+
+        v_naming_compliance VARCHAR2(20);
+        v_current_date DATE := SYSDATE;
+        v_start_date DATE;
+        v_end_date DATE;
+        v_partition_date DATE;
+        v_next_date DATE;
+        v_partition_name VARCHAR2(30);
+        v_sql VARCHAR2(4000);
+        v_count NUMBER;
+        v_created_count NUMBER := 0;
+        v_skipped_count NUMBER := 0;
+        v_warning_msg VARCHAR2(4000);
+
+    BEGIN
+        -- Start logging
+        v_log_id := pck_dwh_partition_utils_helper.log_operation_start(
+            p_operation_name => 'precreate_hot_partitions',
+            p_operation_type => 'PRECREATION',
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_message => 'Starting HOT tier partition pre-creation'
+        );
+
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('Pre-creating HOT tier partitions');
+        DBMS_OUTPUT.PUT_LINE('Table: ' || p_table_owner || '.' || p_table_name);
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+
+        -- STEP 1: Validate partition naming compliance
+        v_naming_compliance := pck_dwh_partition_utils_helper.validate_partition_naming(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_sample_size => 10
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Partition naming compliance: ' || v_naming_compliance);
+
+        IF v_naming_compliance = 'NON_COMPLIANT' THEN
+            v_warning_msg := 'WARNING: Table partitions do NOT follow framework naming patterns. ' ||
+                           'Pre-creation may fail or create inconsistent partition names. ' ||
+                           'Framework patterns: P_YYYY, P_YYYY_MM, P_YYYY_MM_DD, P_IYYY_IW';
+
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('⚠️  ' || v_warning_msg);
+            DBMS_OUTPUT.PUT_LINE('');
+
+            -- Log warning and skip
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'SKIPPED',
+                p_partitions_skipped => 1,
+                p_message => v_warning_msg
+            );
+
+            DBMS_OUTPUT.PUT_LINE('Operation SKIPPED due to non-compliant partition naming.');
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+
+        ELSIF v_naming_compliance = 'MIXED' THEN
+            v_warning_msg := 'WARNING: Table has MIXED partition naming (some framework, some custom). ' ||
+                           'Pre-creation will continue but may create inconsistent names.';
+
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('⚠️  ' || v_warning_msg);
+            DBMS_OUTPUT.PUT_LINE('');
+        END IF;
+
+        -- STEP 2: Detect/get partition configuration
+        pck_dwh_partition_utils_helper.detect_partition_config(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_interval => v_interval,
+            p_tablespace => v_tablespace,
+            p_compression => v_compression,
+            p_config_source => v_config_source
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Configuration source: ' || v_config_source);
+        DBMS_OUTPUT.PUT_LINE('Detected interval: ' || NVL(v_interval, 'UNKNOWN'));
+        DBMS_OUTPUT.PUT_LINE('Tablespace: ' || NVL(v_tablespace, 'N/A'));
+        DBMS_OUTPUT.PUT_LINE('Compression: ' || NVL(v_compression, 'NONE'));
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- STEP 3: Validate we can proceed
+        IF v_interval IS NULL OR v_interval = 'UNKNOWN' THEN
+            v_warning_msg := 'Cannot detect partition interval type. Please add configuration to ' ||
+                           'cmr.dwh_partition_precreation_config table.';
+
+            DBMS_OUTPUT.PUT_LINE('ERROR: ' || v_warning_msg);
+
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'ERROR',
+                p_config_source => v_config_source,
+                p_error_message => v_warning_msg
+            );
+
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+        END IF;
+
+        IF v_tablespace IS NULL THEN
+            v_warning_msg := 'No tablespace detected. Please specify in cmr.dwh_partition_precreation_config.';
+
+            DBMS_OUTPUT.PUT_LINE('ERROR: ' || v_warning_msg);
+
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'ERROR',
+                p_config_source => v_config_source,
+                p_interval_type => v_interval,
+                p_error_message => v_warning_msg
+            );
+
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+        END IF;
+
+        -- STEP 4: Determine date range for pre-creation
+        IF UPPER(v_interval) = 'MONTHLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'MM');
+            v_end_date := TRUNC(ADD_MONTHS(v_current_date, 12), 'YYYY');
+            DBMS_OUTPUT.PUT_LINE('Creating MONTHLY partitions from ' ||
+                TO_CHAR(v_start_date, 'YYYY-MM-DD') || ' to ' ||
+                TO_CHAR(v_end_date, 'YYYY-MM-DD'));
+
+        ELSIF UPPER(v_interval) = 'DAILY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'MM');
+            v_end_date := LAST_DAY(v_start_date);
+            DBMS_OUTPUT.PUT_LINE('Creating DAILY partitions from ' ||
+                TO_CHAR(v_start_date, 'YYYY-MM-DD') || ' to ' ||
+                TO_CHAR(v_end_date, 'YYYY-MM-DD'));
+
+        ELSIF UPPER(v_interval) = 'WEEKLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'IW');
+            v_end_date := LAST_DAY(ADD_MONTHS(v_current_date, 1));
+            DBMS_OUTPUT.PUT_LINE('Creating WEEKLY partitions from ' ||
+                TO_CHAR(v_start_date, 'YYYY-MM-DD') || ' to ' ||
+                TO_CHAR(v_end_date, 'YYYY-MM-DD'));
+
+        ELSIF UPPER(v_interval) = 'YEARLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 12), 'YYYY');
+            v_end_date := ADD_MONTHS(v_start_date, 12);
+            DBMS_OUTPUT.PUT_LINE('Creating YEARLY partition for ' ||
+                TO_CHAR(v_start_date, 'YYYY'));
+
+        ELSE
+            v_warning_msg := 'Unsupported interval type: ' || v_interval;
+
+            DBMS_OUTPUT.PUT_LINE('ERROR: ' || v_warning_msg);
+
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'ERROR',
+                p_config_source => v_config_source,
+                p_interval_type => v_interval,
+                p_error_message => v_warning_msg
+            );
+
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- STEP 5: Generate partitions
+        v_partition_date := v_start_date;
+
+        WHILE v_partition_date <= v_end_date LOOP
+            -- Calculate next partition boundary
+            IF UPPER(v_interval) = 'MONTHLY' THEN
+                v_next_date := ADD_MONTHS(v_partition_date, 1);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
+
+            ELSIF UPPER(v_interval) = 'DAILY' THEN
+                v_next_date := v_partition_date + 1;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
+
+            ELSIF UPPER(v_interval) = 'WEEKLY' THEN
+                v_next_date := v_partition_date + 7;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
+
+            ELSIF UPPER(v_interval) = 'YEARLY' THEN
+                v_next_date := ADD_MONTHS(v_partition_date, 12);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+            END IF;
+
+            -- Check if partition already exists
+            SELECT COUNT(*)
+            INTO v_count
+            FROM all_tab_partitions
+            WHERE table_owner = UPPER(p_table_owner)
+            AND table_name = UPPER(p_table_name)
+            AND partition_name = v_partition_name;
+
+            IF v_count = 0 THEN
+                -- Build ADD PARTITION DDL
+                v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                        ' ADD PARTITION ' || v_partition_name ||
+                        ' VALUES LESS THAN (TO_DATE(''' ||
+                        TO_CHAR(v_next_date, 'YYYY-MM-DD') || ''', ''YYYY-MM-DD''))' ||
+                        ' TABLESPACE ' || v_tablespace ||
+                        ' PCTFREE ' || v_pctfree;
+
+                -- Add compression if specified
+                IF v_compression IS NOT NULL AND v_compression != 'NONE' THEN
+                    v_sql := v_sql || ' COMPRESS FOR ' || v_compression;
+                END IF;
+
+                DBMS_OUTPUT.PUT_LINE('Creating: ' || v_partition_name);
+
+                BEGIN
+                    EXECUTE IMMEDIATE v_sql;
+                    v_created_count := v_created_count + 1;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        DBMS_OUTPUT.PUT_LINE('  ERROR: ' || SQLERRM);
+                        v_warning_msg := v_warning_msg || CHR(10) ||
+                                       'Failed to create ' || v_partition_name || ': ' || SQLERRM;
+                END;
+
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('Skipping (exists): ' || v_partition_name);
+                v_skipped_count := v_skipped_count + 1;
+            END IF;
+
+            v_partition_date := v_next_date;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('Pre-creation complete');
+        DBMS_OUTPUT.PUT_LINE('Created: ' || v_created_count || ' partition(s)');
+        DBMS_OUTPUT.PUT_LINE('Skipped: ' || v_skipped_count || ' partition(s)');
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+
+        -- Log success
+        pck_dwh_partition_utils_helper.log_operation_end(
+            p_log_id => v_log_id,
+            p_status => CASE WHEN v_warning_msg IS NOT NULL THEN 'WARNING' ELSE 'SUCCESS' END,
+            p_partitions_created => v_created_count,
+            p_partitions_skipped => v_skipped_count,
+            p_config_source => v_config_source,
+            p_interval_type => v_interval,
+            p_message => 'Created ' || v_created_count || ' partitions, skipped ' || v_skipped_count,
+            p_error_message => v_warning_msg
+        );
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+
+            -- Log error
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'ERROR',
+                p_partitions_created => v_created_count,
+                p_partitions_skipped => v_skipped_count,
+                p_config_source => v_config_source,
+                p_interval_type => v_interval,
+                p_error_message => SQLERRM
+            );
+
+            RAISE;
+    END precreate_hot_partitions;
+
+    PROCEDURE precreate_all_hot_partitions AS
+        v_log_id NUMBER;
+        v_count NUMBER := 0;
+        v_success_count NUMBER := 0;
+        v_error_count NUMBER := 0;
+    BEGIN
+        -- Start batch logging
+        v_log_id := pck_dwh_partition_utils_helper.log_operation_start(
+            p_operation_name => 'precreate_all_hot_partitions',
+            p_operation_type => 'BATCH_PRECREATION',
+            p_message => 'Starting batch pre-creation for all ILM-managed tables'
+        );
+
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('Batch: Pre-creating HOT tier partitions for all ILM-managed tables');
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- Process all tables with active ILM policies
+        FOR rec IN (
+            SELECT DISTINCT
+                p.table_owner,
+                p.table_name
+            FROM cmr.dwh_ilm_policies p
+            WHERE p.status = 'ACTIVE'
+            ORDER BY p.table_owner, p.table_name
+        ) LOOP
+            BEGIN
+                v_count := v_count + 1;
+                DBMS_OUTPUT.PUT_LINE('Processing: ' || rec.table_owner || '.' || rec.table_name);
+                DBMS_OUTPUT.PUT_LINE('');
+
+                precreate_hot_partitions(rec.table_owner, rec.table_name);
+                v_success_count := v_success_count + 1;
+                DBMS_OUTPUT.PUT_LINE('');
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_error_count := v_error_count + 1;
+                    DBMS_OUTPUT.PUT_LINE('ERROR processing ' || rec.table_owner || '.' ||
+                        rec.table_name || ': ' || SQLERRM);
+                    DBMS_OUTPUT.PUT_LINE('');
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('Batch pre-creation complete');
+        DBMS_OUTPUT.PUT_LINE('Tables processed: ' || v_count);
+        DBMS_OUTPUT.PUT_LINE('Success: ' || v_success_count);
+        DBMS_OUTPUT.PUT_LINE('Errors: ' || v_error_count);
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+
+        -- Log batch completion
+        pck_dwh_partition_utils_helper.log_operation_end(
+            p_log_id => v_log_id,
+            p_status => CASE WHEN v_error_count > 0 THEN 'WARNING' ELSE 'SUCCESS' END,
+            p_message => 'Processed ' || v_count || ' tables: ' || v_success_count ||
+                        ' success, ' || v_error_count || ' errors'
+        );
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('FATAL ERROR in batch operation: ' || SQLERRM);
+
+            pck_dwh_partition_utils_helper.log_operation_end(
+                p_log_id => v_log_id,
+                p_status => 'ERROR',
+                p_error_message => SQLERRM
+            );
+
+            RAISE;
+    END precreate_all_hot_partitions;
+
+    PROCEDURE preview_hot_partitions(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2
+    ) AS
+        v_interval VARCHAR2(20);
+        v_tablespace VARCHAR2(30);
+        v_compression VARCHAR2(50);
+        v_config_source VARCHAR2(50);
+        v_naming_compliance VARCHAR2(20);
+
+        v_current_date DATE := SYSDATE;
+        v_start_date DATE;
+        v_end_date DATE;
+        v_partition_date DATE;
+        v_next_date DATE;
+        v_partition_name VARCHAR2(30);
+        v_count NUMBER;
+        v_preview_count NUMBER := 0;
+
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('PREVIEW: HOT tier partition pre-creation');
+        DBMS_OUTPUT.PUT_LINE('Table: ' || p_table_owner || '.' || p_table_name);
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+
+        -- Check naming compliance
+        v_naming_compliance := pck_dwh_partition_utils_helper.validate_partition_naming(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_sample_size => 10
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Partition naming: ' || v_naming_compliance);
+
+        IF v_naming_compliance = 'NON_COMPLIANT' THEN
+            DBMS_OUTPUT.PUT_LINE('');
+            DBMS_OUTPUT.PUT_LINE('⚠️  WARNING: Partitions do NOT follow framework patterns.');
+            DBMS_OUTPUT.PUT_LINE('Pre-creation would be SKIPPED in actual execution.');
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+        END IF;
+
+        -- Detect configuration
+        pck_dwh_partition_utils_helper.detect_partition_config(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_interval => v_interval,
+            p_tablespace => v_tablespace,
+            p_compression => v_compression,
+            p_config_source => v_config_source
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Configuration source: ' || v_config_source);
+        DBMS_OUTPUT.PUT_LINE('Interval: ' || NVL(v_interval, 'UNKNOWN'));
+        DBMS_OUTPUT.PUT_LINE('Tablespace: ' || NVL(v_tablespace, 'N/A'));
+        DBMS_OUTPUT.PUT_LINE('Compression: ' || NVL(v_compression, 'NONE'));
+        DBMS_OUTPUT.PUT_LINE('');
+
+        IF v_interval IS NULL OR v_interval = 'UNKNOWN' THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR: Cannot detect partition interval.');
+            DBMS_OUTPUT.PUT_LINE('=========================================');
+            RETURN;
+        END IF;
+
+        -- Determine date range
+        IF UPPER(v_interval) = 'MONTHLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'MM');
+            v_end_date := TRUNC(ADD_MONTHS(v_current_date, 12), 'YYYY');
+        ELSIF UPPER(v_interval) = 'DAILY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'MM');
+            v_end_date := LAST_DAY(v_start_date);
+        ELSIF UPPER(v_interval) = 'WEEKLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 1), 'IW');
+            v_end_date := LAST_DAY(ADD_MONTHS(v_current_date, 1));
+        ELSIF UPPER(v_interval) = 'YEARLY' THEN
+            v_start_date := TRUNC(ADD_MONTHS(v_current_date, 12), 'YYYY');
+            v_end_date := ADD_MONTHS(v_start_date, 12);
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Partitions that would be created:');
+        DBMS_OUTPUT.PUT_LINE('');
+
+        -- Preview partitions
+        v_partition_date := v_start_date;
+
+        WHILE v_partition_date <= v_end_date LOOP
+            IF UPPER(v_interval) = 'MONTHLY' THEN
+                v_next_date := ADD_MONTHS(v_partition_date, 1);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
+            ELSIF UPPER(v_interval) = 'DAILY' THEN
+                v_next_date := v_partition_date + 1;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
+            ELSIF UPPER(v_interval) = 'WEEKLY' THEN
+                v_next_date := v_partition_date + 7;
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
+            ELSIF UPPER(v_interval) = 'YEARLY' THEN
+                v_next_date := ADD_MONTHS(v_partition_date, 12);
+                v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY');
+            END IF;
+
+            SELECT COUNT(*)
+            INTO v_count
+            FROM all_tab_partitions
+            WHERE table_owner = UPPER(p_table_owner)
+            AND table_name = UPPER(p_table_name)
+            AND partition_name = v_partition_name;
+
+            IF v_count = 0 THEN
+                DBMS_OUTPUT.PUT_LINE('  [NEW] ' || v_partition_name ||
+                    ' (< ' || TO_CHAR(v_next_date, 'YYYY-MM-DD') || ')');
+                v_preview_count := v_preview_count + 1;
+            ELSE
+                DBMS_OUTPUT.PUT_LINE('  [EXISTS] ' || v_partition_name);
+            END IF;
+
+            v_partition_date := v_next_date;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('');
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+        DBMS_OUTPUT.PUT_LINE('Preview complete');
+        DBMS_OUTPUT.PUT_LINE('Would create: ' || v_preview_count || ' new partition(s)');
+        DBMS_OUTPUT.PUT_LINE('=========================================');
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);
+            RAISE;
+    END preview_hot_partitions;
+
+
+    PROCEDURE create_future_partitions(
+        p_table_name VARCHAR2,
+        p_months_ahead NUMBER DEFAULT 12,
+        p_partition_interval VARCHAR2 DEFAULT 'MONTH'
+    ) AS
+        v_max_partition_date DATE;
+        v_next_partition_date DATE;
+        v_partition_name VARCHAR2(30);
+        v_high_value_str VARCHAR2(100);
+        v_sql VARCHAR2(4000);
+        v_count NUMBER := 0;
+    BEGIN
+        -- Get the highest partition date
+        SELECT MAX(TO_DATE(
+            SUBSTR(high_value, INSTR(high_value, '''') + 1,
+                   INSTR(high_value, '''', 1, 2) - INSTR(high_value, '''') - 1),
+            'YYYY-MM-DD'))
+        INTO v_max_partition_date
+        FROM user_tab_partitions
+        WHERE table_name = UPPER(p_table_name)
+        AND partition_position > 1;
+
+        IF v_max_partition_date IS NULL THEN
+            v_max_partition_date := TRUNC(SYSDATE, 'MM');
+        END IF;
+
+        -- Create partitions for future months
+        FOR i IN 1..p_months_ahead LOOP
+            IF p_partition_interval = 'MONTH' THEN
+                v_next_partition_date := ADD_MONTHS(v_max_partition_date, 1);
+                v_partition_name := 'P_' || TO_CHAR(v_next_partition_date, 'YYYY_MM');
+            ELSIF p_partition_interval = 'QUARTER' THEN
+                v_next_partition_date := ADD_MONTHS(v_max_partition_date, 3);
+                v_partition_name := 'P_' || TO_CHAR(v_next_partition_date, 'YYYY') || '_Q' ||
+                                  TO_CHAR(TO_NUMBER(TO_CHAR(v_next_partition_date, 'Q')));
+            ELSIF p_partition_interval = 'YEAR' THEN
+                v_next_partition_date := ADD_MONTHS(v_max_partition_date, 12);
+                v_partition_name := 'P_' || TO_CHAR(v_next_partition_date, 'YYYY');
+            END IF;
+
+            v_high_value_str := 'DATE ''' || TO_CHAR(v_next_partition_date, 'YYYY-MM-DD') || '''';
+
+            -- Check if partition already exists
+            SELECT COUNT(*) INTO v_count
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            AND partition_name = v_partition_name;
+
+            IF v_count = 0 THEN
+                v_sql := 'ALTER TABLE ' || p_table_name ||
+                        ' ADD PARTITION ' || v_partition_name ||
+                        ' VALUES LESS THAN (' || v_high_value_str || ')';
+
+                DBMS_OUTPUT.PUT_LINE('Creating partition: ' || v_partition_name);
+                EXECUTE IMMEDIATE v_sql;
+            END IF;
+
+            v_max_partition_date := v_next_partition_date;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Created ' || p_months_ahead || ' future partitions for ' || p_table_name);
+    END;
+
+
+    PROCEDURE split_partition(
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_split_date DATE
+    ) AS
+        v_new_partition1 VARCHAR2(30);
+        v_new_partition2 VARCHAR2(30);
+        v_sql VARCHAR2(4000);
+    BEGIN
+        v_new_partition1 := p_partition_name || '_1';
+        v_new_partition2 := p_partition_name || '_2';
+
+        v_sql := 'ALTER TABLE ' || p_table_name ||
+                ' SPLIT PARTITION ' || p_partition_name ||
+                ' AT (DATE ''' || TO_CHAR(p_split_date, 'YYYY-MM-DD') || ''')' ||
+                ' INTO (PARTITION ' || v_new_partition1 ||
+                ', PARTITION ' || v_new_partition2 || ')';
+
+        DBMS_OUTPUT.PUT_LINE('Splitting partition: ' || p_partition_name);
+        EXECUTE IMMEDIATE v_sql;
+
+        -- Rebuild local indexes
+        FOR idx IN (
+            SELECT index_name, partition_name
+            FROM user_ind_partitions
+            WHERE index_name IN (
+                SELECT index_name FROM user_indexes
+                WHERE table_name = UPPER(p_table_name)
+                AND locality = 'LOCAL'
+            )
+            AND partition_name IN (v_new_partition1, v_new_partition2)
+        ) LOOP
+            EXECUTE IMMEDIATE
+                'ALTER INDEX ' || idx.index_name ||
+                ' REBUILD PARTITION ' || idx.partition_name;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Partition split completed');
+    END;
+
+
+    PROCEDURE merge_partitions(
+        p_table_name VARCHAR2,
+        p_partition1 VARCHAR2,
+        p_partition2 VARCHAR2,
+        p_merged_partition VARCHAR2 DEFAULT NULL
+    ) AS
+        v_merged_name VARCHAR2(30);
+        v_sql VARCHAR2(4000);
+    BEGIN
+        v_merged_name := NVL(p_merged_partition, p_partition1);
+
+        v_sql := 'ALTER TABLE ' || p_table_name ||
+                ' MERGE PARTITIONS ' || p_partition1 || ', ' || p_partition2 ||
+                ' INTO PARTITION ' || v_merged_name;
+
+        DBMS_OUTPUT.PUT_LINE('Merging partitions: ' || p_partition1 || ' and ' || p_partition2);
+        EXECUTE IMMEDIATE v_sql;
+
+        -- Rebuild local indexes on merged partition
+        FOR idx IN (
+            SELECT index_name, partition_name
+            FROM user_ind_partitions
+            WHERE index_name IN (
+                SELECT index_name FROM user_indexes
+                WHERE table_name = UPPER(p_table_name)
+                AND locality = 'LOCAL'
+            )
+            AND partition_name = v_merged_name
+        ) LOOP
+            EXECUTE IMMEDIATE
+                'ALTER INDEX ' || idx.index_name ||
+                ' REBUILD PARTITION ' || idx.partition_name;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Partition merge completed');
+    END;
+
+
+    PROCEDURE exchange_partition_load(
+        p_target_table VARCHAR2,
+        p_staging_table VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_validate BOOLEAN DEFAULT TRUE,
+        p_update_indexes BOOLEAN DEFAULT TRUE
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_validation VARCHAR2(20) := 'WITH VALIDATION';
+        v_update_idx VARCHAR2(30) := 'UPDATE INDEXES';
+    BEGIN
+        IF NOT p_validate THEN
+            v_validation := 'WITHOUT VALIDATION';
+        END IF;
+
+        IF NOT p_update_indexes THEN
+            v_update_idx := '';
+        END IF;
+
+        -- Disable constraints on staging table (optional but recommended)
+        FOR cons IN (
+            SELECT constraint_name
+            FROM user_constraints
+            WHERE table_name = UPPER(p_staging_table)
+            AND constraint_type IN ('P', 'U', 'R')
+        ) LOOP
+            EXECUTE IMMEDIATE 'ALTER TABLE ' || p_staging_table ||
+                            ' DISABLE CONSTRAINT ' || cons.constraint_name;
+        END LOOP;
+
+        -- Exchange partition
+        v_sql := 'ALTER TABLE ' || p_target_table ||
+                ' EXCHANGE PARTITION ' || p_partition_name ||
+                ' WITH TABLE ' || p_staging_table ||
+                ' ' || v_validation ||
+                ' ' || v_update_idx;
+
+        DBMS_OUTPUT.PUT_LINE('Exchanging partition: ' || p_partition_name);
+        DBMS_OUTPUT.PUT_LINE('SQL: ' || v_sql);
+
+        EXECUTE IMMEDIATE v_sql;
+
+        -- Re-enable constraints
+        FOR cons IN (
+            SELECT constraint_name
+            FROM user_constraints
+            WHERE table_name = UPPER(p_staging_table)
+            AND constraint_type IN ('P', 'U', 'R')
+            AND status = 'DISABLED'
+        ) LOOP
+            EXECUTE IMMEDIATE 'ALTER TABLE ' || p_staging_table ||
+                            ' ENABLE CONSTRAINT ' || cons.constraint_name;
+        END LOOP;
+
+        -- Gather statistics on exchanged partition
+        DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => USER,
+            tabname => p_target_table,
+            partname => p_partition_name,
+            cascade => TRUE,
+            degree => 4
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Exchange partition completed successfully');
+    END;
+
+
+    PROCEDURE parallel_partition_load(
+        p_target_table VARCHAR2,
+        p_source_query VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_degree NUMBER DEFAULT 4
+    ) AS
+        v_sql VARCHAR2(4000);
+    BEGIN
+        -- Enable parallel DML
+        EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
+
+        -- Direct path insert into specific partition
+        v_sql := 'INSERT /*+ APPEND PARALLEL(' || p_degree || ') */ INTO ' ||
+                p_target_table || ' PARTITION (' || p_partition_name || ') ' ||
+                p_source_query;
+
+        DBMS_OUTPUT.PUT_LINE('Loading partition: ' || p_partition_name);
+        EXECUTE IMMEDIATE v_sql;
+        COMMIT;
+
+        -- Gather statistics
+        DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => USER,
+            tabname => p_target_table,
+            partname => p_partition_name,
+            cascade => TRUE,
+            degree => p_degree
+        );
+
+        DBMS_OUTPUT.PUT_LINE('Parallel load completed');
+    END;
+
+
+    PROCEDURE truncate_old_partitions(
+        p_table_name VARCHAR2,
+        p_retention_days NUMBER
+    ) AS
+        v_cutoff_date DATE := TRUNC(SYSDATE) - p_retention_days;
+        v_partition_date DATE;
+        v_sql VARCHAR2(4000);
+        v_count NUMBER := 0;
+    BEGIN
+        FOR rec IN (
+            SELECT partition_name, high_value, partition_position
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            ORDER BY partition_position
+        ) LOOP
+            BEGIN
+                -- Extract partition date
+                EXECUTE IMMEDIATE 'SELECT ' || rec.high_value || ' FROM DUAL'
+                    INTO v_partition_date;
+
+                IF v_partition_date < v_cutoff_date THEN
+                    DBMS_OUTPUT.PUT_LINE('Truncating partition: ' || rec.partition_name ||
+                                       ' (Date: ' || TO_CHAR(v_partition_date, 'YYYY-MM-DD') || ')');
+
+                    EXECUTE IMMEDIATE
+                        'ALTER TABLE ' || p_table_name ||
+                        ' TRUNCATE PARTITION ' || rec.partition_name ||
+                        ' UPDATE INDEXES';
+
+                    v_count := v_count + 1;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('Error truncating partition ' || rec.partition_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Truncated ' || v_count || ' partition(s)');
+    END;
+
+
+    PROCEDURE compress_partitions(
+        p_table_name VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_age_days NUMBER DEFAULT 90
+    ) AS
+        v_cutoff_date DATE := TRUNC(SYSDATE) - p_age_days;
+        v_partition_date DATE;
+        v_sql VARCHAR2(4000);
+        v_count NUMBER := 0;
+    BEGIN
+        FOR rec IN (
+            SELECT tp.partition_name, tp.high_value, tp.compression
+            FROM user_tab_partitions tp
+            WHERE tp.table_name = UPPER(p_table_name)
+            AND tp.compression = 'DISABLED'
+            ORDER BY tp.partition_position
+        ) LOOP
+            BEGIN
+                -- Extract partition date
+                EXECUTE IMMEDIATE 'SELECT ' || rec.high_value || ' FROM DUAL'
+                    INTO v_partition_date;
+
+                IF v_partition_date < v_cutoff_date THEN
+                    DBMS_OUTPUT.PUT_LINE('Compressing partition: ' || rec.partition_name ||
+                                       ' (Type: ' || p_compression_type || ')');
+
+                    EXECUTE IMMEDIATE
+                        'ALTER TABLE ' || p_table_name ||
+                        ' MOVE PARTITION ' || rec.partition_name ||
+                        ' COMPRESS FOR ' || p_compression_type;
+
+                    -- Rebuild local indexes
+                    FOR idx IN (
+                        SELECT index_name, partition_name
+                        FROM user_ind_partitions
+                        WHERE index_name IN (
+                            SELECT index_name FROM user_indexes
+                            WHERE table_name = UPPER(p_table_name)
+                            AND locality = 'LOCAL'
+                        )
+                        AND partition_name = rec.partition_name
+                    ) LOOP
+                        EXECUTE IMMEDIATE
+                            'ALTER INDEX ' || idx.index_name ||
+                            ' REBUILD PARTITION ' || idx.partition_name;
+                    END LOOP;
+
+                    v_count := v_count + 1;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('Error compressing partition ' || rec.partition_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Compressed ' || v_count || ' partition(s)');
+    END;
+
+
+    PROCEDURE move_partitions_to_tablespace(
+        p_table_name VARCHAR2,
+        p_target_tablespace VARCHAR2,
+        p_age_days NUMBER DEFAULT NULL,
+        p_compression VARCHAR2 DEFAULT NULL
+    ) AS
+        v_cutoff_date DATE := TRUNC(SYSDATE) - NVL(p_age_days, 0);
+        v_partition_date DATE;
+        v_sql VARCHAR2(4000);
+        v_compress_clause VARCHAR2(100) := '';
+        v_count NUMBER := 0;
+    BEGIN
+        IF p_compression IS NOT NULL THEN
+            v_compress_clause := ' COMPRESS FOR ' || p_compression;
+        END IF;
+
+        FOR rec IN (
+            SELECT tp.partition_name, tp.high_value, tp.tablespace_name
+            FROM user_tab_partitions tp
+            WHERE tp.table_name = UPPER(p_table_name)
+            AND tp.tablespace_name != UPPER(p_target_tablespace)
+            ORDER BY tp.partition_position
+        ) LOOP
+            BEGIN
+                -- Extract partition date
+                IF p_age_days IS NOT NULL THEN
+                    EXECUTE IMMEDIATE 'SELECT ' || rec.high_value || ' FROM DUAL'
+                        INTO v_partition_date;
+
+                    IF v_partition_date >= v_cutoff_date THEN
+                        CONTINUE;
+                    END IF;
+                END IF;
+
+                DBMS_OUTPUT.PUT_LINE('Moving partition: ' || rec.partition_name ||
+                                   ' from ' || rec.tablespace_name || ' to ' || p_target_tablespace);
+
+                EXECUTE IMMEDIATE
+                    'ALTER TABLE ' || p_table_name ||
+                    ' MOVE PARTITION ' || rec.partition_name ||
+                    ' TABLESPACE ' || p_target_tablespace ||
+                    v_compress_clause;
+
+                -- Rebuild local indexes in target tablespace
+                FOR idx IN (
+                    SELECT index_name, partition_name
+                    FROM user_ind_partitions
+                    WHERE index_name IN (
+                        SELECT index_name FROM user_indexes
+                        WHERE table_name = UPPER(p_table_name)
+                        AND locality = 'LOCAL'
+                    )
+                    AND partition_name = rec.partition_name
+                ) LOOP
+                    EXECUTE IMMEDIATE
+                        'ALTER INDEX ' || idx.index_name ||
+                        ' REBUILD PARTITION ' || idx.partition_name ||
+                        ' TABLESPACE ' || p_target_tablespace;
+                END LOOP;
+
+                v_count := v_count + 1;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('Error moving partition ' || rec.partition_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Moved ' || v_count || ' partition(s) to ' || p_target_tablespace);
+    END;
+
+
+    PROCEDURE gather_partition_statistics(
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2 DEFAULT NULL,
+        p_degree NUMBER DEFAULT 4,
+        p_incremental BOOLEAN DEFAULT TRUE
+    ) AS
+        v_granularity VARCHAR2(30) := 'AUTO';
+    BEGIN
+        IF p_incremental THEN
+            -- Enable incremental statistics
+            EXECUTE IMMEDIATE
+                'ALTER TABLE ' || p_table_name || ' MODIFY PARTITION BY RANGE (...) (' ||
+                'PARTITION INTERVAL (NUMTOYMINTERVAL(1,''MONTH''))' ||
+                ')';
+
+            DBMS_STATS.SET_TABLE_PREFS(
+                ownname => USER,
+                tabname => p_table_name,
+                pname => 'INCREMENTAL',
+                pvalue => 'TRUE'
+            );
+
+            DBMS_STATS.SET_TABLE_PREFS(
+                ownname => USER,
+                tabname => p_table_name,
+                pname => 'INCREMENTAL_STALENESS',
+                pvalue => 'USE_STALE_PERCENT'
+            );
+        END IF;
+
+        IF p_partition_name IS NOT NULL THEN
+            -- Gather stats for specific partition
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname => USER,
+                tabname => p_table_name,
+                partname => p_partition_name,
+                granularity => 'PARTITION',
+                cascade => TRUE,
+                degree => p_degree,
+                estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE
+            );
+        ELSE
+            -- Gather stats for all partitions
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname => USER,
+                tabname => p_table_name,
+                granularity => v_granularity,
+                cascade => TRUE,
+                degree => p_degree,
+                estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE
+            );
+        END IF;
+
+        DBMS_OUTPUT.PUT_LINE('Statistics gathered successfully');
+    END;
+
+
+    PROCEDURE gather_stale_partition_stats(
+        p_table_name VARCHAR2,
+        p_stale_percent NUMBER DEFAULT 10,
+        p_degree NUMBER DEFAULT 4
+    ) AS
+        v_count NUMBER := 0;
+    BEGIN
+        -- Set stale percentage threshold
+        DBMS_STATS.SET_TABLE_PREFS(
+            ownname => USER,
+            tabname => p_table_name,
+            pname => 'STALE_PERCENT',
+            pvalue => TO_CHAR(p_stale_percent)
+        );
+
+        -- Gather stats on stale partitions
+        FOR rec IN (
+            SELECT partition_name, stale_stats
+            FROM user_tab_statistics
+            WHERE table_name = UPPER(p_table_name)
+            AND object_type = 'PARTITION'
+            AND stale_stats = 'YES'
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE('Gathering stats on stale partition: ' || rec.partition_name);
+
+            DBMS_STATS.GATHER_TABLE_STATS(
+                ownname => USER,
+                tabname => p_table_name,
+                partname => rec.partition_name,
+                granularity => 'PARTITION',
+                cascade => TRUE,
+                degree => p_degree
+            );
+
+            v_count := v_count + 1;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('Gathered statistics on ' || v_count || ' stale partition(s)');
+    END;
+
+
+    PROCEDURE check_partition_health(
+        p_table_name VARCHAR2
+    ) AS
+        v_issue_count NUMBER := 0;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('===========================================');
+        DBMS_OUTPUT.PUT_LINE('Partition Health Check: ' || p_table_name);
+        DBMS_OUTPUT.PUT_LINE('===========================================');
+
+        -- Check for unusable indexes
+        FOR rec IN (
+            SELECT ip.index_name, ip.partition_name, ip.status
+            FROM user_ind_partitions ip
+            JOIN user_indexes i ON i.index_name = ip.index_name
+            WHERE i.table_name = UPPER(p_table_name)
+            AND ip.status = 'UNUSABLE'
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE('ISSUE: Unusable index partition - ' ||
+                               rec.index_name || '.' || rec.partition_name);
+            v_issue_count := v_issue_count + 1;
+        END LOOP;
+
+        -- Check for missing statistics
+        FOR rec IN (
+            SELECT partition_name, num_rows, last_analyzed
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            AND (last_analyzed IS NULL OR last_analyzed < SYSDATE - 30)
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE('ISSUE: Missing or old statistics - Partition: ' ||
+                               rec.partition_name || ', Last Analyzed: ' ||
+                               NVL(TO_CHAR(rec.last_analyzed, 'YYYY-MM-DD'), 'NEVER'));
+            v_issue_count := v_issue_count + 1;
+        END LOOP;
+
+        -- Check for empty partitions (may need cleanup)
+        FOR rec IN (
+            SELECT partition_name, num_rows
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            AND (num_rows = 0 OR num_rows IS NULL)
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE('INFO: Empty partition - ' || rec.partition_name);
+        END LOOP;
+
+        -- Check for uncompressed old partitions
+        FOR rec IN (
+            SELECT tp.partition_name, tp.high_value, tp.compression
+            FROM user_tab_partitions tp
+            WHERE tp.table_name = UPPER(p_table_name)
+            AND tp.compression = 'DISABLED'
+            AND tp.partition_position < (
+                SELECT MAX(partition_position) - 3
+                FROM user_tab_partitions
+                WHERE table_name = UPPER(p_table_name)
+            )
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE('ISSUE: Old partition not compressed - ' || rec.partition_name);
+            v_issue_count := v_issue_count + 1;
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE('===========================================');
+        IF v_issue_count = 0 THEN
+            DBMS_OUTPUT.PUT_LINE('Health Check PASSED: No issues found');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Health Check FAILED: ' || v_issue_count || ' issue(s) found');
+        END IF;
+        DBMS_OUTPUT.PUT_LINE('===========================================');
+    END;
+
+
+    PROCEDURE validate_partition_constraints(
+        p_table_name VARCHAR2
+    ) AS
+        v_error_count NUMBER := 0;
+        v_sql VARCHAR2(4000);
+        v_count NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('Validating partition constraints for: ' || p_table_name);
+
+        FOR rec IN (
+            SELECT partition_name
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            ORDER BY partition_position
+        ) LOOP
+            BEGIN
+                -- Check for constraint violations
+                FOR cons IN (
+                    SELECT constraint_name, search_condition
+                    FROM user_constraints
+                    WHERE table_name = UPPER(p_table_name)
+                    AND constraint_type = 'C'
+                    AND status = 'ENABLED'
+                ) LOOP
+                    v_sql := 'SELECT COUNT(*) FROM ' || p_table_name ||
+                            ' PARTITION (' || rec.partition_name || ')' ||
+                            ' WHERE NOT (' || cons.search_condition || ')';
+
+                    EXECUTE IMMEDIATE v_sql INTO v_count;
+
+                    IF v_count > 0 THEN
+                        DBMS_OUTPUT.PUT_LINE('ERROR: Constraint violation in partition ' ||
+                                           rec.partition_name || ' - ' || cons.constraint_name ||
+                                           ' (' || v_count || ' rows)');
+                        v_error_count := v_error_count + 1;
+                    END IF;
+                END LOOP;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    DBMS_OUTPUT.PUT_LINE('Error validating partition ' || rec.partition_name || ': ' || SQLERRM);
+            END;
+        END LOOP;
+
+        IF v_error_count = 0 THEN
+            DBMS_OUTPUT.PUT_LINE('Validation PASSED: No constraint violations found');
+        ELSE
+            DBMS_OUTPUT.PUT_LINE('Validation FAILED: ' || v_error_count || ' violation(s) found');
+        END IF;
+    END;
+
+
+    PROCEDURE partition_size_report(
+        p_table_name VARCHAR2
+    ) AS
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('Partition Size Report: ' || p_table_name);
+        DBMS_OUTPUT.PUT_LINE(RPAD('=', 120, '='));
+        DBMS_OUTPUT.PUT_LINE(RPAD('Partition', 30) || RPAD('Rows', 15) ||
+                            RPAD('Size (MB)', 15) || RPAD('Compression', 20) ||
+                            RPAD('Tablespace', 25) || 'Read Only');
+        DBMS_OUTPUT.PUT_LINE(RPAD('=', 120, '='));
+
+        FOR rec IN (
+            SELECT
+                tp.partition_name,
+                tp.num_rows,
+                ROUND(s.bytes/1024/1024, 2) AS size_mb,
+                tp.compression || ' ' || NVL(tp.compress_for, '') AS compression_info,
+                s.tablespace_name,
+                tp.read_only
+            FROM user_tab_partitions tp
+            LEFT JOIN user_segments s
+                ON s.segment_name = tp.table_name
+                AND s.partition_name = tp.partition_name
+            WHERE tp.table_name = UPPER(p_table_name)
+            ORDER BY tp.partition_position DESC
+        ) LOOP
+            DBMS_OUTPUT.PUT_LINE(
+                RPAD(NVL(rec.partition_name, 'N/A'), 30) ||
+                RPAD(NVL(TO_CHAR(rec.num_rows, '999,999,999'), 'N/A'), 15) ||
+                RPAD(NVL(TO_CHAR(rec.size_mb, '999,999.99'), 'N/A'), 15) ||
+                RPAD(NVL(rec.compression_info, 'NONE'), 20) ||
+                RPAD(NVL(rec.tablespace_name, 'N/A'), 25) ||
+                NVL(rec.read_only, 'NO')
+            );
+        END LOOP;
+
+        DBMS_OUTPUT.PUT_LINE(RPAD('=', 120, '='));
+    END;
+
+END pck_dwh_partition_utilities;
+/
