@@ -1075,8 +1075,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
 
         IF UPPER(v_hot_interval) = 'MONTHLY' THEN
             v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff), 'MM');
-            -- Create partitions up to and including current month
-            WHILE v_partition_date <= TRUNC(v_current_date, 'MM') LOOP
+            -- Pre-create partitions up to end of current year for immediate data insertion
+            -- This avoids INTERVAL auto-creation overhead during peak load
+            WHILE v_partition_date <= TRUNC(v_current_date, 'YYYY') LOOP
                 v_next_date := ADD_MONTHS(v_partition_date, 1);
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM');
 
@@ -1096,9 +1097,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END LOOP;
         ELSIF UPPER(v_hot_interval) = 'DAILY' THEN
             v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff));
-            -- Create partitions up to yesterday (not including today)
-            -- This ensures we get exactly the number of days specified in age_days
-            WHILE v_partition_date < TRUNC(v_current_date) LOOP
+            -- Pre-create partitions up to end of current month for immediate data insertion
+            -- This avoids INTERVAL auto-creation overhead during peak load
+            WHILE v_partition_date <= LAST_DAY(v_current_date) LOOP
                 v_next_date := v_partition_date + 1;
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'YYYY_MM_DD');
 
@@ -1118,7 +1119,9 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_table_migration_executor AS
             END LOOP;
         ELSIF UPPER(v_hot_interval) = 'WEEKLY' THEN
             v_partition_date := TRUNC(GREATEST(v_min_date, v_hot_cutoff), 'IW');
-            WHILE v_partition_date <= TRUNC(v_current_date, 'IW') LOOP
+            -- Pre-create partitions up to end of current month for immediate data insertion
+            -- This avoids INTERVAL auto-creation overhead during peak load
+            WHILE v_partition_date <= LAST_DAY(v_current_date) LOOP
                 v_next_date := v_partition_date + 7;
                 v_partition_name := 'P_' || TO_CHAR(v_partition_date, 'IYYY_IW');
 
