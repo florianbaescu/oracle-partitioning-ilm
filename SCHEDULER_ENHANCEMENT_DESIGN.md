@@ -76,7 +76,7 @@ The new design **replaces** the basic time-window config with rich scheduling ca
 
 ## 🏗️ Enhanced Architecture
 
-### New Configuration Table (SIMPLIFIED)
+### New Configuration Table (ULTRA-SIMPLIFIED)
 
 ```sql
 CREATE TABLE cmr.dwh_ilm_execution_schedules (
@@ -84,20 +84,15 @@ CREATE TABLE cmr.dwh_ilm_execution_schedules (
     schedule_name       VARCHAR2(100) NOT NULL UNIQUE,
     enabled             CHAR(1) DEFAULT 'Y' CHECK (enabled IN ('Y','N')),
 
-    -- Day-of-Week Scheduling
-    run_on_monday       CHAR(1) DEFAULT 'Y' CHECK (run_on_monday IN ('Y','N')),
-    run_on_tuesday      CHAR(1) DEFAULT 'Y' CHECK (run_on_tuesday IN ('Y','N')),
-    run_on_wednesday    CHAR(1) DEFAULT 'Y' CHECK (run_on_wednesday IN ('Y','N')),
-    run_on_thursday     CHAR(1) DEFAULT 'Y' CHECK (run_on_thursday IN ('Y','N')),
-    run_on_friday       CHAR(1) DEFAULT 'Y' CHECK (run_on_friday IN ('Y','N')),
-    run_on_saturday     CHAR(1) DEFAULT 'N' CHECK (run_on_saturday IN ('Y','N')),
-    run_on_sunday       CHAR(1) DEFAULT 'N' CHECK (run_on_sunday IN ('Y','N')),
-
-    -- Execution Windows (when ILM can run)
-    weekday_start_hour  NUMBER(2) DEFAULT 22 CHECK (weekday_start_hour BETWEEN 0 AND 23),
-    weekday_end_hour    NUMBER(2) DEFAULT 6 CHECK (weekday_end_hour BETWEEN 0 AND 23),
-    weekend_start_hour  NUMBER(2) DEFAULT 20 CHECK (weekend_start_hour BETWEEN 0 AND 23),
-    weekend_end_hour    NUMBER(2) DEFAULT 8 CHECK (weekend_end_hour BETWEEN 0 AND 23),
+    -- Execution Windows: One column per day (NULL = don't run that day)
+    -- Format: 'HH24:MI-HH24:MI' (e.g., '22:00-06:00' for 10 PM to 6 AM)
+    monday_hours        VARCHAR2(11),   -- e.g., '22:00-06:00' or NULL (no run)
+    tuesday_hours       VARCHAR2(11),
+    wednesday_hours     VARCHAR2(11),
+    thursday_hours      VARCHAR2(11),
+    friday_hours        VARCHAR2(11),
+    saturday_hours      VARCHAR2(11),
+    sunday_hours        VARCHAR2(11),
 
     -- Execution Control
     batch_cooldown_minutes  NUMBER DEFAULT 5 CHECK (batch_cooldown_minutes >= 0),
@@ -109,8 +104,26 @@ CREATE TABLE cmr.dwh_ilm_execution_schedules (
     checkpoint_frequency    NUMBER DEFAULT 5 CHECK (checkpoint_frequency > 0),
 
     created_date        DATE DEFAULT SYSDATE,
-    modified_date       DATE DEFAULT SYSDATE
+    modified_date       DATE DEFAULT SYSDATE,
+
+    CONSTRAINT chk_monday_hours CHECK (monday_hours IS NULL OR REGEXP_LIKE(monday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_tuesday_hours CHECK (tuesday_hours IS NULL OR REGEXP_LIKE(tuesday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_wednesday_hours CHECK (wednesday_hours IS NULL OR REGEXP_LIKE(wednesday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_thursday_hours CHECK (thursday_hours IS NULL OR REGEXP_LIKE(thursday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_friday_hours CHECK (friday_hours IS NULL OR REGEXP_LIKE(friday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_saturday_hours CHECK (saturday_hours IS NULL OR REGEXP_LIKE(saturday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$')),
+    CONSTRAINT chk_sunday_hours CHECK (sunday_hours IS NULL OR REGEXP_LIKE(sunday_hours, '^\d{2}:\d{2}-\d{2}:\d{2}$'))
 );
+
+COMMENT ON TABLE cmr.dwh_ilm_execution_schedules IS
+'ILM execution schedules with per-day time windows.
+Each day column contains time range in HH24:MI-HH24:MI format (e.g., ''22:00-06:00'').
+NULL value = no execution on that day.';
+
+COMMENT ON COLUMN dwh_ilm_execution_schedules.monday_hours IS
+'Execution window for Monday in format HH24:MI-HH24:MI (e.g., ''22:00-06:00'').
+NULL = no execution on Monday.
+Window can span midnight (e.g., ''22:00-06:00'' runs from 10 PM Monday to 6 AM Tuesday).';
 
 COMMENT ON COLUMN dwh_ilm_execution_schedules.batch_cooldown_minutes IS
 'Pause between batches in minutes.
@@ -119,32 +132,29 @@ COMMENT ON COLUMN dwh_ilm_execution_schedules.batch_cooldown_minutes IS
 Batch size controlled globally by MAX_CONCURRENT_OPERATIONS in dwh_ilm_config.
 Window close time provides natural duration limit.';
 
--- Default schedule
+-- Default schedule: Mon-Fri 22:00-06:00, no weekends
 INSERT INTO cmr.dwh_ilm_execution_schedules (
     schedule_name,
-    run_on_monday, run_on_tuesday, run_on_wednesday, run_on_thursday, run_on_friday,
-    run_on_saturday, run_on_sunday,
-    weekday_start_hour, weekday_end_hour,
-    weekend_start_hour, weekend_end_hour,
+    monday_hours, tuesday_hours, wednesday_hours, thursday_hours, friday_hours,
+    saturday_hours, sunday_hours,
     batch_cooldown_minutes,
     enable_checkpointing, checkpoint_frequency
 ) VALUES (
     'DEFAULT_SCHEDULE',
-    'Y', 'Y', 'Y', 'Y', 'Y',  -- Mon-Fri
-    'N', 'N',                   -- No weekends
-    22, 6,                      -- Weekdays: 10 PM - 6 AM
-    20, 8,                      -- Weekends: 8 PM - 8 AM (if enabled)
-    5,                          -- 5-minute cooldown between batches
-    'Y', 5                      -- Checkpoint every 5 operations
+    '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00',  -- Mon-Fri
+    NULL, NULL,                                                                   -- No weekends
+    5,                                                                            -- 5-minute cooldown
+    'Y', 5                                                                        -- Checkpoint every 5 ops
 );
 ```
 
-**Key Simplifications**:
-- ✅ Removed `weekday_interval_hours` / `weekend_interval_hours` - replaced by `batch_cooldown_minutes`
-- ✅ Removed `max_operations_per_run` - use global `MAX_CONCURRENT_OPERATIONS` from `dwh_ilm_config`
-- ✅ Removed `max_duration_minutes` - window close time is natural limit
-- ✅ Removed `max_policies_per_run` - not needed
-- ✅ Removed `priority_threshold` - not needed (policies execute by priority already)
+**Key Benefits**:
+- ✅ **7 columns instead of 11** (7 day flags + 4 hour columns eliminated)
+- ✅ **Different hours per day** (Monday 22:00-06:00, Saturday 20:00-08:00, etc.)
+- ✅ **Clear intent**: NULL = don't run, otherwise run during specified hours
+- ✅ **No weekday/weekend grouping** - each day is independent
+- ✅ **Human-readable format** ('22:00-06:00' instead of separate start/end integers)
+- ✅ **Regex validation** ensures correct HH24:MI-HH24:MI format
 
 ### New Execution State Table (for Resumability)
 
@@ -476,23 +486,23 @@ END;
 ### Should Run Today?
 
 ```sql
-FUNCTION should_run_today(
+FUNCTION get_today_hours(
     p_schedule SCHEDULE_REC
-) RETURN BOOLEAN
+) RETURN VARCHAR2
 AS
     v_day_of_week VARCHAR2(10);
 BEGIN
     v_day_of_week := TRIM(TO_CHAR(SYSDATE, 'DAY'));
 
     RETURN CASE v_day_of_week
-        WHEN 'MONDAY'    THEN p_schedule.run_on_monday = 'Y'
-        WHEN 'TUESDAY'   THEN p_schedule.run_on_tuesday = 'Y'
-        WHEN 'WEDNESDAY' THEN p_schedule.run_on_wednesday = 'Y'
-        WHEN 'THURSDAY'  THEN p_schedule.run_on_thursday = 'Y'
-        WHEN 'FRIDAY'    THEN p_schedule.run_on_friday = 'Y'
-        WHEN 'SATURDAY'  THEN p_schedule.run_on_saturday = 'Y'
-        WHEN 'SUNDAY'    THEN p_schedule.run_on_sunday = 'Y'
-        ELSE FALSE
+        WHEN 'MONDAY'    THEN p_schedule.monday_hours
+        WHEN 'TUESDAY'   THEN p_schedule.tuesday_hours
+        WHEN 'WEDNESDAY' THEN p_schedule.wednesday_hours
+        WHEN 'THURSDAY'  THEN p_schedule.thursday_hours
+        WHEN 'FRIDAY'    THEN p_schedule.friday_hours
+        WHEN 'SATURDAY'  THEN p_schedule.saturday_hours
+        WHEN 'SUNDAY'    THEN p_schedule.sunday_hours
+        ELSE NULL
     END;
 END;
 ```
@@ -504,26 +514,44 @@ FUNCTION is_in_execution_window(
     p_schedule SCHEDULE_REC
 ) RETURN BOOLEAN
 AS
-    v_current_hour NUMBER := TO_NUMBER(TO_CHAR(SYSDATE, 'HH24'));
-    v_is_weekend BOOLEAN;
+    v_today_hours VARCHAR2(11);
+    v_start_time VARCHAR2(5);
+    v_end_time VARCHAR2(5);
     v_start_hour NUMBER;
+    v_start_min NUMBER;
     v_end_hour NUMBER;
+    v_end_min NUMBER;
+    v_current_time NUMBER;  -- Minutes since midnight
+    v_start_minutes NUMBER; -- Window start in minutes since midnight
+    v_end_minutes NUMBER;   -- Window end in minutes since midnight
 BEGIN
-    v_is_weekend := TO_CHAR(SYSDATE, 'DY') IN ('SAT', 'SUN');
+    -- Get today's hours (e.g., '22:00-06:00' or NULL)
+    v_today_hours := get_today_hours(p_schedule);
 
-    IF v_is_weekend THEN
-        v_start_hour := p_schedule.weekend_start_hour;
-        v_end_hour := p_schedule.weekend_end_hour;
-    ELSE
-        v_start_hour := p_schedule.weekday_start_hour;
-        v_end_hour := p_schedule.weekday_end_hour;
+    -- If NULL, no execution today
+    IF v_today_hours IS NULL THEN
+        RETURN FALSE;
     END IF;
 
-    -- Handle windows that cross midnight
-    IF v_start_hour > v_end_hour THEN
-        RETURN v_current_hour >= v_start_hour OR v_current_hour < v_end_hour;
+    -- Parse 'HH24:MI-HH24:MI' format
+    v_start_time := SUBSTR(v_today_hours, 1, 5);   -- '22:00'
+    v_end_time := SUBSTR(v_today_hours, 7, 5);     -- '06:00'
+
+    v_start_hour := TO_NUMBER(SUBSTR(v_start_time, 1, 2));
+    v_start_min := TO_NUMBER(SUBSTR(v_start_time, 4, 2));
+    v_end_hour := TO_NUMBER(SUBSTR(v_end_time, 1, 2));
+    v_end_min := TO_NUMBER(SUBSTR(v_end_time, 4, 2));
+
+    -- Convert to minutes since midnight
+    v_current_time := TO_NUMBER(TO_CHAR(SYSDATE, 'HH24')) * 60 + TO_NUMBER(TO_CHAR(SYSDATE, 'MI'));
+    v_start_minutes := v_start_hour * 60 + v_start_min;
+    v_end_minutes := v_end_hour * 60 + v_end_min;
+
+    -- Handle windows that cross midnight (e.g., '22:00-06:00')
+    IF v_start_minutes > v_end_minutes THEN
+        RETURN v_current_time >= v_start_minutes OR v_current_time < v_end_minutes;
     ELSE
-        RETURN v_current_hour >= v_start_hour AND v_current_hour < v_end_hour;
+        RETURN v_current_time >= v_start_minutes AND v_current_time < v_end_minutes;
     END IF;
 END;
 ```
@@ -561,14 +589,9 @@ BEGIN
         RETURN FALSE;  -- No work to do
     END IF;
 
-    -- Priority 3: Check if should run today
-    IF NOT should_run_today(v_schedule) THEN
-        RETURN FALSE;
-    END IF;
-
-    -- Priority 4: Check execution window
+    -- Priority 3: Check execution window (also checks if should run today)
     IF NOT is_in_execution_window(v_schedule) THEN
-        RETURN FALSE;
+        RETURN FALSE;  -- Either not scheduled today (NULL) or outside time window
     END IF;
 
     -- All checks passed
@@ -636,10 +659,13 @@ ORDER BY last_execution DESC NULLS LAST;
 ```sql
 -- Configure for weekdays only, continuous execution during window
 UPDATE cmr.dwh_ilm_execution_schedules
-SET run_on_saturday = 'N',
-    run_on_sunday = 'N',
-    weekday_start_hour = 20,
-    weekday_end_hour = 8,
+SET monday_hours = '20:00-08:00',
+    tuesday_hours = '20:00-08:00',
+    wednesday_hours = '20:00-08:00',
+    thursday_hours = '20:00-08:00',
+    friday_hours = '20:00-08:00',
+    saturday_hours = NULL,  -- No execution on Saturday
+    sunday_hours = NULL,    -- No execution on Sunday
     batch_cooldown_minutes = 0  -- Continuous (no pause between batches)
 WHERE schedule_name = 'DEFAULT_SCHEDULE';
 
@@ -649,22 +675,21 @@ SET config_value = '20'
 WHERE config_key = 'MAX_CONCURRENT_OPERATIONS';
 ```
 
-### Example 2: Weekend Batch Processing with Cooldown
+### Example 2: Weekend Only, Extended Hours with Cooldown
 
 ```sql
--- Create weekend-only schedule with cooldown between batches
+-- Create weekend-only schedule with longer windows and cooldown
 INSERT INTO cmr.dwh_ilm_execution_schedules (
     schedule_name,
-    run_on_monday, run_on_tuesday, run_on_wednesday, run_on_thursday, run_on_friday,
-    run_on_saturday, run_on_sunday,
-    weekend_start_hour, weekend_end_hour,
+    monday_hours, tuesday_hours, wednesday_hours, thursday_hours, friday_hours,
+    saturday_hours, sunday_hours,
     batch_cooldown_minutes
 ) VALUES (
     'WEEKEND_BATCH',
-    'N', 'N', 'N', 'N', 'N',  -- No weekdays
-    'Y', 'Y',                   -- Weekends only
-    0, 23,                      -- All day (00:00 to 23:00)
-    10                          -- 10-minute pause between batches (breathing room)
+    NULL, NULL, NULL, NULL, NULL,  -- No weekdays
+    '00:00-23:59',                  -- Saturday: all day
+    '00:00-23:59',                  -- Sunday: all day
+    10                              -- 10-minute pause between batches (breathing room)
 );
 
 -- Configure larger batch size for weekend processing
@@ -673,7 +698,23 @@ SET config_value = '100'
 WHERE config_key = 'MAX_CONCURRENT_OPERATIONS';
 ```
 
-### Example 3: Resume Interrupted Batch
+### Example 3: Different Hours Per Day
+
+```sql
+-- Different execution windows for each day
+UPDATE cmr.dwh_ilm_execution_schedules
+SET monday_hours = '22:00-06:00',    -- Mon night to Tue morning
+    tuesday_hours = '22:00-06:00',   -- Tue night to Wed morning
+    wednesday_hours = '22:00-06:00', -- Wed night to Thu morning
+    thursday_hours = '22:00-06:00',  -- Thu night to Fri morning
+    friday_hours = '20:00-10:00',    -- Fri night to Sat morning (longer window)
+    saturday_hours = '18:00-12:00',  -- Sat afternoon to Sun noon (extended weekend)
+    sunday_hours = NULL,             -- No execution on Sunday
+    batch_cooldown_minutes = 5
+WHERE schedule_name = 'VARIABLE_SCHEDULE';
+```
+
+### Example 4: Resume Interrupted Batch
 
 ```sql
 -- Find interrupted batch
@@ -687,7 +728,7 @@ EXEC pck_dwh_ilm_execution_engine.execute_pending_actions(
 );
 ```
 
-### Example 4: Force Run Outside Schedule
+### Example 5: Force Run Outside Schedule
 
 ```sql
 -- Run immediately regardless of day/time
@@ -1577,7 +1618,7 @@ Per-schedule configurations (in `dwh_ilm_execution_schedules`):
 ## 📊 Summary: What Changes?
 
 ### New Tables (2)
-1. **`dwh_ilm_execution_schedules`** - Schedule configurations (simplified: 8 fields instead of 15)
+1. **`dwh_ilm_execution_schedules`** - Schedule configurations (ultra-simplified: 7 day columns instead of 11)
 2. **`dwh_ilm_execution_state`** - Batch execution state tracking
 
 ### Modified Tables (1)
@@ -1596,7 +1637,7 @@ Per-schedule configurations (in `dwh_ilm_execution_schedules`):
 3. **`is_execution_window_open()`** function - Replaced by `should_execute_now()`
 
 ### Key Features Enabled
-✅ Day-of-week scheduling
+✅ Per-day scheduling with custom hours (different windows for each day)
 ✅ Continuous execution during window (LOOP-based, not periodic)
 ✅ Configurable cooldown between batches (0=continuous, >0=pause N minutes)
 ✅ Work-based execution (checks queue before running)
@@ -1604,23 +1645,31 @@ Per-schedule configurations (in `dwh_ilm_execution_schedules`):
 ✅ Window close time as natural duration limit (no artificial max)
 ✅ Resumable execution with checkpointing
 ✅ Better monitoring and visibility
-✅ Clean, simplified architecture (47% reduction in config fields)
+✅ Ultra-simplified architecture (7 day columns vs 11 separate day/hour fields = 36% reduction)
 
 ### Configuration Simplifications
-**Removed Fields** (no longer needed):
+
+**Old Design** (11 fields for scheduling):
+- ❌ 7 day flags: `run_on_monday`, `run_on_tuesday`, ..., `run_on_sunday`
+- ❌ 4 hour fields: `weekday_start_hour`, `weekday_end_hour`, `weekend_start_hour`, `weekend_end_hour`
+- ❌ Problem: Can't have different hours per day (Monday vs Friday)
+
+**New Design** (7 fields for scheduling):
+- ✅ 7 day columns: `monday_hours`, `tuesday_hours`, ..., `sunday_hours`
+- ✅ Format: `'HH24:MI-HH24:MI'` (e.g., `'22:00-06:00'`)
+- ✅ NULL = don't run that day
+- ✅ Each day can have different hours (Monday `'22:00-06:00'`, Friday `'20:00-10:00'`, etc.)
+
+**Also Removed** (from previous iterations):
 - ❌ `weekday_interval_hours` / `weekend_interval_hours` → Replaced by `batch_cooldown_minutes`
 - ❌ `max_operations_per_run` → Use global `MAX_CONCURRENT_OPERATIONS` from `dwh_ilm_config`
 - ❌ `max_duration_minutes` → Window close time is natural limit
-- ❌ `max_policies_per_run` → Not needed
-- ❌ `priority_threshold` → Not needed (policies execute by priority already)
-- ❌ `execution_mode` → Determined by cooldown (0=continuous, >0=with pause)
-- ❌ `periodic_interval_hours` → Not needed with continuous execution
+- ❌ `max_policies_per_run`, `priority_threshold`, `execution_mode` → Not needed
 
-**Key Fields Kept** (8 total):
-- ✅ Day-of-week flags (7 fields: run_on_monday through run_on_sunday)
-- ✅ Window hours (4 fields: weekday_start_hour, weekday_end_hour, weekend_start_hour, weekend_end_hour)
-- ✅ Cooldown control (1 field: batch_cooldown_minutes)
-- ✅ Checkpointing settings (2 fields: enable_checkpointing, checkpoint_frequency)
+**Final Configuration Fields** (10 total):
+- ✅ Per-day scheduling (7 fields: `monday_hours` through `sunday_hours`)
+- ✅ Cooldown control (1 field: `batch_cooldown_minutes`)
+- ✅ Checkpointing settings (2 fields: `enable_checkpointing`, `checkpoint_frequency`)
 
 ## 🎯 Naming Convention - NO SUFFIXES
 
@@ -2188,22 +2237,24 @@ CREATE TABLE dwh_ilm_execution_schedules (
 
 ---
 
-### ✅ Final Design (Simplified)
+### ✅ Final Design (Ultra-Simplified)
 
-**Configuration Table**: 8 core fields (47% reduction)
+**Configuration Table**: 10 core fields (36% reduction from 11 day/hour fields)
 ```sql
 CREATE TABLE dwh_ilm_execution_schedules (
     -- Core fields (3)
     schedule_id, schedule_name, enabled,
 
-    -- Day-of-week (7)
-    run_on_monday, run_on_tuesday, ..., run_on_sunday,
+    -- ✅ Per-Day Scheduling (7) - ONE column per day with time window
+    monday_hours VARCHAR2(11),      -- 'HH24:MI-HH24:MI' or NULL
+    tuesday_hours VARCHAR2(11),
+    wednesday_hours VARCHAR2(11),
+    thursday_hours VARCHAR2(11),
+    friday_hours VARCHAR2(11),
+    saturday_hours VARCHAR2(11),
+    sunday_hours VARCHAR2(11),
 
-    -- Window hours (4)
-    weekday_start_hour, weekday_end_hour,
-    weekend_start_hour, weekend_end_hour,
-
-    -- ✅ Cooldown control (1) - NEW
+    -- ✅ Cooldown control (1)
     batch_cooldown_minutes,  -- 0=continuous, >0=pause N minutes
 
     -- Checkpointing (2)
@@ -2219,15 +2270,20 @@ CREATE TABLE dwh_ilm_execution_schedules (
 3. ✅ Clear naming (cooldown conveys breathing room)
 4. ✅ Continuous model with optional pauses
 5. ✅ Work-based execution (checks queue, not time)
-6. ✅ Simpler configuration (fewer fields to manage)
+6. ✅ **Different hours per day** (Monday 22:00-06:00, Friday 20:00-10:00, etc.)
+7. ✅ **Simpler schema** (7 columns instead of 11 separate day/hour fields)
+8. ✅ **Human-readable format** ('22:00-06:00' vs separate integers)
 
 ---
 
 ### Comparison Table
 
-| Aspect | Before (Complex) | After (Simplified) |
-|--------|------------------|-------------------|
-| **Config Fields** | 15 fields | 8 fields (-47%) |
+| Aspect | Before (Complex) | After (Ultra-Simplified) |
+|--------|------------------|--------------------------|
+| **Day/Hour Fields** | 11 fields (7 day flags + 4 hour fields) | 7 fields (one per day) |
+| **Per-Day Flexibility** | No (weekday vs weekend only) | Yes (each day independent) |
+| **Hour Format** | Integer hours (separate start/end) | String 'HH24:MI-HH24:MI' |
+| **Config Fields Total** | 15 fields | 10 fields (-33%) |
 | **Execution Model** | Periodic (every N hours) | Continuous (LOOP until done) |
 | **Batch Size Control** | Per-schedule (redundant) | Global config (centralized) |
 | **Duration Limit** | Artificial max_duration | Natural window close |
@@ -2237,6 +2293,7 @@ CREATE TABLE dwh_ilm_execution_schedules (
 | **Breathing Room** | Fixed interval only | Flexible cooldown (0-N min) |
 | **Priority Execution** | Filter by threshold | Always by priority (natural) |
 | **Configuration Complexity** | High (many overlapping fields) | Low (minimal, focused fields) |
+| **Readability** | Low (need to cross-reference fields) | High (all info in one column) |
 
 ---
 
@@ -2252,3 +2309,4 @@ CREATE TABLE dwh_ilm_execution_schedules (
 - Optional cooldown for breathing room (not mandatory interval)
 - Work-based (skip if queue empty)
 - Batch size from global config (centralized control)
+- **Per-day scheduling** - each day can have different hours (user's additional request)
