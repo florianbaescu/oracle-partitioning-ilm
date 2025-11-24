@@ -83,7 +83,10 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
         p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
-        p_gather_stats BOOLEAN DEFAULT TRUE
+        p_gather_stats BOOLEAN DEFAULT TRUE,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
     PROCEDURE move_partition(
@@ -94,25 +97,37 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_compression_type VARCHAR2 DEFAULT NULL,
         p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
-        p_gather_stats BOOLEAN DEFAULT TRUE
+        p_gather_stats BOOLEAN DEFAULT TRUE,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
     PROCEDURE make_partition_readonly(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
     PROCEDURE drop_partition(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
     PROCEDURE truncate_partition(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
     -- Merge monthly into yearly partitions
@@ -592,10 +607,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_queue_rec cmr.dwh_ilm_evaluation_queue%ROWTYPE;
         v_policy_rec cmr.dwh_ilm_policies%ROWTYPE;
         v_action_sql CLOB;
+        v_status VARCHAR2(50);
+        v_error_msg VARCHAR2(4000);
         v_execution_id NUMBER;
         v_start_time TIMESTAMP;
         v_end_time TIMESTAMP;
-        v_error_msg VARCHAR2(4000);
     BEGIN
         -- Get queue item
         SELECT * INTO v_queue_rec
@@ -610,43 +626,59 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_start_time := SYSTIMESTAMP;
 
         -- Route to appropriate action handler based on policy action_type
+        -- All procedures now return OUT parameters for SQL executed, status, and error message
         CASE v_policy_rec.action_type
             WHEN 'COMPRESS' THEN
                 compress_partition(
-                    v_queue_rec.table_owner,
-                    v_queue_rec.table_name,
-                    v_queue_rec.partition_name,
-                    v_policy_rec.compression_type
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_partition_name => v_queue_rec.partition_name,
+                    p_compression_type => v_policy_rec.compression_type,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
                 );
 
             WHEN 'MOVE' THEN
                 move_partition(
-                    v_queue_rec.table_owner,
-                    v_queue_rec.table_name,
-                    v_queue_rec.partition_name,
-                    v_policy_rec.target_tablespace,
-                    v_policy_rec.compression_type
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_partition_name => v_queue_rec.partition_name,
+                    p_target_tablespace => v_policy_rec.target_tablespace,
+                    p_compression_type => v_policy_rec.compression_type,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
                 );
 
             WHEN 'READ_ONLY' THEN
                 make_partition_readonly(
-                    v_queue_rec.table_owner,
-                    v_queue_rec.table_name,
-                    v_queue_rec.partition_name
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_partition_name => v_queue_rec.partition_name,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
                 );
 
             WHEN 'DROP' THEN
                 drop_partition(
-                    v_queue_rec.table_owner,
-                    v_queue_rec.table_name,
-                    v_queue_rec.partition_name
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_partition_name => v_queue_rec.partition_name,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
                 );
 
             WHEN 'TRUNCATE' THEN
                 truncate_partition(
-                    v_queue_rec.table_owner,
-                    v_queue_rec.table_name,
-                    v_queue_rec.partition_name
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_partition_name => v_queue_rec.partition_name,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
                 );
 
             ELSE
@@ -655,20 +687,54 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
         v_end_time := SYSTIMESTAMP;
 
-        -- Update queue status
+        -- Log execution with OUT parameters captured from utility
+        log_execution(
+            p_policy_id => v_policy_rec.policy_id,
+            p_policy_name => v_policy_rec.policy_name,
+            p_table_owner => v_queue_rec.table_owner,
+            p_table_name => v_queue_rec.table_name,
+            p_partition_name => v_queue_rec.partition_name,
+            p_action_type => v_policy_rec.action_type,
+            p_action_sql => v_action_sql,  -- SQL executed by utility
+            p_execution_start => v_start_time,
+            p_execution_end => v_end_time,
+            p_status => v_status,  -- Status from utility (SUCCESS, WARNING, ERROR, SKIPPED)
+            p_error_message => v_error_msg  -- Error message from utility
+        );
+
+        -- Update queue status based on utility status
         UPDATE cmr.dwh_ilm_evaluation_queue
-        SET execution_status = 'COMPLETED'
+        SET execution_status = CASE
+                WHEN v_status IN ('SUCCESS', 'WARNING', 'SKIPPED') THEN 'COMPLETED'
+                ELSE 'FAILED'
+            END
         WHERE queue_id = p_queue_id;
 
         COMMIT;
 
         log_info('Action completed: ' || v_policy_rec.action_type ||
-                 ' on ' || v_queue_rec.table_name || '.' || v_queue_rec.partition_name);
+                 ' on ' || v_queue_rec.table_name || '.' || v_queue_rec.partition_name ||
+                 ' (Status: ' || v_status || ')');
 
     EXCEPTION
         WHEN OTHERS THEN
             v_end_time := SYSTIMESTAMP;
             v_error_msg := SUBSTR(SQLERRM, 1, 4000);
+
+            -- Log failed execution
+            log_execution(
+                p_policy_id => v_policy_rec.policy_id,
+                p_policy_name => v_policy_rec.policy_name,
+                p_table_owner => v_queue_rec.table_owner,
+                p_table_name => v_queue_rec.table_name,
+                p_partition_name => v_queue_rec.partition_name,
+                p_action_type => v_policy_rec.action_type,
+                p_action_sql => v_action_sql,
+                p_execution_start => v_start_time,
+                p_execution_end => v_end_time,
+                p_status => 'ERROR',
+                p_error_message => v_error_msg
+            );
 
             UPDATE cmr.dwh_ilm_evaluation_queue
             SET execution_status = 'FAILED'
@@ -691,47 +757,24 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
         p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
-        p_gather_stats BOOLEAN DEFAULT TRUE
+        p_gather_stats BOOLEAN DEFAULT TRUE,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
-        v_sql VARCHAR2(4000);
     BEGIN
-        -- Build MOVE PARTITION statement with compression
-        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
-                 ' MOVE PARTITION ' || p_partition_name ||
-                 ' COMPRESS FOR ' || p_compression_type;
+        -- Call partition utilities package
+        pck_dwh_partition_utilities.compress_single_partition(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_partition_name => p_partition_name,
+            p_compression_type => p_compression_type,
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
 
-        IF p_pctfree IS NOT NULL THEN
-            v_sql := v_sql || ' PCTFREE ' || p_pctfree;
-        END IF;
-
-        EXECUTE IMMEDIATE v_sql;
-        log_info('Compressed partition: ' || p_table_name || '.' || p_partition_name);
-
-        -- Rebuild indexes
-        IF p_rebuild_indexes THEN
-            FOR idx IN (
-                SELECT ip.index_owner, ip.index_name
-                FROM all_ind_partitions ip
-                JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
-                WHERE i.table_owner = p_table_owner
-                AND i.table_name = p_table_name
-                AND ip.partition_name = p_partition_name
-                AND ip.status = 'UNUSABLE'
-            ) LOOP
-                EXECUTE IMMEDIATE 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
-                                  ' REBUILD PARTITION ' || p_partition_name;
-            END LOOP;
-        END IF;
-
-        -- Gather stats
-        IF p_gather_stats THEN
-            DBMS_STATS.GATHER_TABLE_STATS(
-                ownname => p_table_owner,
-                tabname => p_table_name,
-                partname => p_partition_name,
-                granularity => 'PARTITION'
-            );
-        END IF;
+        log_info('Compressed partition: ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
     END compress_partition;
 
     PROCEDURE move_partition(
@@ -742,82 +785,91 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         p_compression_type VARCHAR2 DEFAULT NULL,
         p_pctfree NUMBER DEFAULT NULL,
         p_rebuild_indexes BOOLEAN DEFAULT TRUE,
-        p_gather_stats BOOLEAN DEFAULT TRUE
+        p_gather_stats BOOLEAN DEFAULT TRUE,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
-        v_sql VARCHAR2(4000);
     BEGIN
-        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
-                 ' MOVE PARTITION ' || p_partition_name ||
-                 ' TABLESPACE ' || p_target_tablespace;
+        -- Call partition utilities package
+        pck_dwh_partition_utilities.move_single_partition(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_partition_name => p_partition_name,
+            p_target_tablespace => p_target_tablespace,
+            p_compression_type => p_compression_type,
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
 
-        IF p_compression_type IS NOT NULL THEN
-            v_sql := v_sql || ' COMPRESS FOR ' || p_compression_type;
-        END IF;
-
-        IF p_pctfree IS NOT NULL THEN
-            v_sql := v_sql || ' PCTFREE ' || p_pctfree;
-        END IF;
-
-        EXECUTE IMMEDIATE v_sql;
-        log_info('Moved partition to ' || p_target_tablespace || ': ' || p_table_name || '.' || p_partition_name);
-
-        -- Rebuild indexes in target tablespace
-        IF p_rebuild_indexes THEN
-            FOR idx IN (
-                SELECT ip.index_owner, ip.index_name
-                FROM all_ind_partitions ip
-                JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
-                WHERE i.table_owner = p_table_owner
-                AND i.table_name = p_table_name
-                AND ip.partition_name = p_partition_name
-            ) LOOP
-                EXECUTE IMMEDIATE 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
-                                  ' REBUILD PARTITION ' || p_partition_name ||
-                                  ' TABLESPACE ' || p_target_tablespace;
-            END LOOP;
-        END IF;
-
-        IF p_gather_stats THEN
-            DBMS_STATS.GATHER_TABLE_STATS(
-                ownname => p_table_owner,
-                tabname => p_table_name,
-                partname => p_partition_name,
-                granularity => 'PARTITION'
-            );
-        END IF;
+        log_info('Moved partition to ' || p_target_tablespace || ': ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
     END move_partition;
 
     PROCEDURE make_partition_readonly(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
     BEGIN
-        EXECUTE IMMEDIATE 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
-                          ' MODIFY PARTITION ' || p_partition_name || ' READ ONLY';
-        log_info('Made partition read-only: ' || p_table_name || '.' || p_partition_name);
+        -- Call partition utilities package
+        pck_dwh_partition_utilities.make_partition_readonly(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_partition_name => p_partition_name,
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
+
+        log_info('Made partition read-only: ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
     END make_partition_readonly;
 
     PROCEDURE drop_partition(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
     BEGIN
-        EXECUTE IMMEDIATE 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
-                          ' DROP PARTITION ' || p_partition_name;
-        log_info('Dropped partition: ' || p_table_name || '.' || p_partition_name);
+        -- Call partition utilities package
+        pck_dwh_partition_utilities.drop_single_partition(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_partition_name => p_partition_name,
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
+
+        log_info('Dropped partition: ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
     END drop_partition;
 
     PROCEDURE truncate_partition(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_partition_name VARCHAR2
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
     BEGIN
-        EXECUTE IMMEDIATE 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
-                          ' TRUNCATE PARTITION ' || p_partition_name;
-        log_info('Truncated partition: ' || p_table_name || '.' || p_partition_name);
+        -- Call partition utilities package
+        pck_dwh_partition_utilities.truncate_single_partition(
+            p_table_owner => p_table_owner,
+            p_table_name => p_table_name,
+            p_partition_name => p_partition_name,
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
+
+        log_info('Truncated partition: ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
     END truncate_partition;
 
     PROCEDURE merge_monthly_into_yearly(
