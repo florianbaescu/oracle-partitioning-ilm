@@ -162,9 +162,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_space_saved NUMBER;
         v_compression_ratio NUMBER;
     BEGIN
-        v_duration := EXTRACT(SECOND FROM (p_execution_end - p_execution_start)) +
+        v_duration := EXTRACT(DAY FROM (p_execution_end - p_execution_start)) * 86400 +
+                     EXTRACT(HOUR FROM (p_execution_end - p_execution_start)) * 3600 +
                      EXTRACT(MINUTE FROM (p_execution_end - p_execution_start)) * 60 +
-                     EXTRACT(HOUR FROM (p_execution_end - p_execution_start)) * 3600;
+                     EXTRACT(SECOND FROM (p_execution_end - p_execution_start));
 
         IF p_size_before_mb IS NOT NULL AND p_size_after_mb IS NOT NULL THEN
             v_space_saved := p_size_before_mb - p_size_after_mb;
@@ -337,9 +338,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         SET last_checkpoint = SYSTIMESTAMP,
             last_queue_id = p_last_queue_id,
             operations_completed = p_ops_completed,
-            elapsed_seconds = EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time)) +
+            elapsed_seconds = EXTRACT(DAY FROM (SYSTIMESTAMP - start_time)) * 86400 +
+                            EXTRACT(HOUR FROM (SYSTIMESTAMP - start_time)) * 3600 +
                             EXTRACT(MINUTE FROM (SYSTIMESTAMP - start_time)) * 60 +
-                            EXTRACT(HOUR FROM (SYSTIMESTAMP - start_time)) * 3600
+                            EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time))
         WHERE execution_batch_id = p_batch_id;
         COMMIT;
     END checkpoint_batch;
@@ -491,9 +493,10 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 UPDATE cmr.dwh_ilm_execution_state
                 SET status = 'COMPLETED',
                     end_time = SYSTIMESTAMP,
-                    elapsed_seconds = EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time)) +
+                    elapsed_seconds = EXTRACT(DAY FROM (SYSTIMESTAMP - start_time)) * 86400 +
+                                    EXTRACT(HOUR FROM (SYSTIMESTAMP - start_time)) * 3600 +
                                     EXTRACT(MINUTE FROM (SYSTIMESTAMP - start_time)) * 60 +
-                                    EXTRACT(HOUR FROM (SYSTIMESTAMP - start_time)) * 3600
+                                    EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time))
                 WHERE execution_batch_id = v_batch_id;
                 COMMIT;
 

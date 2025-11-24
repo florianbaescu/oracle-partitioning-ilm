@@ -138,7 +138,9 @@ SELECT
     SUM(CASE WHEN execution_status = 'SKIPPED' THEN 1 ELSE 0 END) AS skipped,
     MIN(evaluation_date) AS oldest_evaluation,
     MAX(evaluation_date) AS newest_evaluation,
-    ROUND(SYSDATE - MIN(evaluation_date), 1) AS oldest_age_days
+    ROUND(EXTRACT(DAY FROM (SYSTIMESTAMP - MIN(evaluation_date))) +
+          EXTRACT(HOUR FROM (SYSTIMESTAMP - MIN(evaluation_date))) / 24 +
+          EXTRACT(MINUTE FROM (SYSTIMESTAMP - MIN(evaluation_date))) / 1440, 1) AS oldest_age_days
 FROM cmr.dwh_ilm_evaluation_queue;
 
 COMMENT ON TABLE cmr.v_dwh_ilm_queue_summary IS
@@ -218,7 +220,7 @@ SELECT
     END AS ops_per_minute
 FROM cmr.dwh_ilm_execution_state es
 JOIN cmr.dwh_ilm_execution_schedules sch ON sch.schedule_id = es.schedule_id
-WHERE es.start_time >= SYSDATE - 7  -- Last 7 days
+WHERE es.start_time >= SYSTIMESTAMP - INTERVAL '7' DAY  -- Last 7 days
 ORDER BY es.start_time DESC;
 
 COMMENT ON TABLE cmr.v_dwh_ilm_recent_batches IS
