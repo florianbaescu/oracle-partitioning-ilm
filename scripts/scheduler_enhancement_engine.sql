@@ -134,7 +134,10 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
     PROCEDURE merge_monthly_into_yearly(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_monthly_partition VARCHAR2
+        p_monthly_partition VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     );
 
 END pck_dwh_ilm_execution_engine;
@@ -875,12 +878,76 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
     PROCEDURE merge_monthly_into_yearly(
         p_table_owner VARCHAR2,
         p_table_name VARCHAR2,
-        p_monthly_partition VARCHAR2
+        p_monthly_partition VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
     ) AS
+        v_yearly_partition VARCHAR2(128);
+        v_year VARCHAR2(4);
+        v_partition_exists NUMBER;
     BEGIN
-        -- Stub - to be implemented based on partition naming patterns
-        log_info('Merge monthly into yearly: ' || p_table_name || '.' || p_monthly_partition);
-        RAISE_APPLICATION_ERROR(-20003, 'merge_monthly_into_yearly not yet implemented');
+        -- Extract year from monthly partition name
+        -- Assumes format: P_YYYY_MM or P_YYYYMM or similar
+        -- Try to extract 4-digit year from partition name
+        BEGIN
+            v_year := REGEXP_SUBSTR(p_monthly_partition, '\d{4}');
+
+            IF v_year IS NULL THEN
+                p_status := 'ERROR';
+                p_error_message := 'Could not extract year from partition name: ' || p_monthly_partition;
+                RAISE_APPLICATION_ERROR(-20003, p_error_message);
+            END IF;
+
+            -- Construct yearly partition name (common pattern: P_YYYY)
+            v_yearly_partition := 'P_' || v_year;
+
+            -- Check if yearly partition exists
+            SELECT COUNT(*) INTO v_partition_exists
+            FROM all_tab_partitions
+            WHERE table_owner = p_table_owner
+            AND table_name = p_table_name
+            AND partition_name = v_yearly_partition;
+
+            IF v_partition_exists = 0 THEN
+                p_status := 'ERROR';
+                p_error_message := 'Yearly partition does not exist: ' || v_yearly_partition;
+                RAISE_APPLICATION_ERROR(-20004, p_error_message);
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                p_status := 'ERROR';
+                p_error_message := SQLERRM;
+                RAISE;
+        END;
+
+        -- Call partition utilities package to merge monthly into yearly
+        log_info('Merging ' || p_monthly_partition || ' into ' || v_yearly_partition);
+
+        pck_dwh_partition_utilities.merge_partitions(
+            p_table_name => p_table_owner || '.' || p_table_name,
+            p_partition1 => p_monthly_partition,
+            p_partition2 => v_yearly_partition,
+            p_merged_partition => v_yearly_partition,  -- Keep yearly partition name
+            p_sql_executed => p_sql_executed,
+            p_status => p_status,
+            p_error_message => p_error_message
+        );
+
+        log_info('Merged monthly into yearly: ' || p_table_name || '.' || p_monthly_partition ||
+                 ' → ' || v_yearly_partition || ' (Status: ' || p_status || ')');
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF p_status IS NULL THEN
+                p_status := 'ERROR';
+            END IF;
+            IF p_error_message IS NULL THEN
+                p_error_message := SQLERRM;
+            END IF;
+            log_error('Merge failed: ' || p_error_message);
+            RAISE;
     END merge_monthly_into_yearly;
 
 END pck_dwh_ilm_execution_engine;
