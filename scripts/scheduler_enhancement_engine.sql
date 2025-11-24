@@ -140,6 +140,29 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
         p_error_message OUT VARCHAR2
     );
 
+    -- =========================================================================
+    -- HELPER FUNCTIONS AND PROCEDURES
+    -- =========================================================================
+
+    FUNCTION get_partition_size(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2
+    ) RETURN NUMBER;
+
+    PROCEDURE rebuild_local_indexes(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_tablespace VARCHAR2 DEFAULT NULL
+    );
+
+    PROCEDURE gather_partition_stats(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2
+    );
+
 END pck_dwh_ilm_execution_engine;
 /
 
@@ -158,6 +181,92 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
     BEGIN
         DBMS_OUTPUT.PUT_LINE('[ERROR] ' || TO_CHAR(SYSTIMESTAMP, 'HH24:MI:SS') || ' - ' || p_message);
     END;
+
+    FUNCTION get_partition_size(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2
+    ) RETURN NUMBER
+    AS
+        v_size_mb NUMBER;
+    BEGIN
+        SELECT ROUND(bytes/1024/1024, 2)
+        INTO v_size_mb
+        FROM dba_segments
+        WHERE owner = p_table_owner
+        AND segment_name = p_table_name
+        AND partition_name = p_partition_name;
+
+        RETURN v_size_mb;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN 0;
+        WHEN OTHERS THEN
+            log_error('Error getting partition size: ' || SQLERRM);
+            RETURN 0;
+    END get_partition_size;
+
+    PROCEDURE rebuild_local_indexes(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_tablespace VARCHAR2 DEFAULT NULL
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_tablespace_clause VARCHAR2(200) := '';
+    BEGIN
+        IF p_tablespace IS NOT NULL THEN
+            v_tablespace_clause := ' TABLESPACE ' || p_tablespace;
+        END IF;
+
+        FOR idx IN (
+            SELECT ip.index_owner, ip.index_name, ip.partition_name
+            FROM all_ind_partitions ip
+            JOIN all_indexes i
+                ON i.owner = ip.index_owner
+                AND i.index_name = ip.index_name
+            JOIN all_part_indexes pi
+                ON pi.owner = i.owner
+                AND pi.index_name = i.index_name
+            WHERE i.table_owner = p_table_owner
+            AND i.table_name = p_table_name
+            AND pi.locality = 'LOCAL'
+            AND ip.partition_name = p_partition_name
+            AND ip.status = 'UNUSABLE'  -- Only rebuild unusable indexes
+        ) LOOP
+            v_sql := 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
+                     ' REBUILD PARTITION ' || idx.partition_name || v_tablespace_clause;
+
+            log_info('Rebuilding index: ' || idx.index_name || '.' || idx.partition_name);
+            EXECUTE IMMEDIATE v_sql;
+        END LOOP;
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error('Error rebuilding local indexes: ' || SQLERRM);
+            RAISE;
+    END rebuild_local_indexes;
+
+    PROCEDURE gather_partition_stats(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2
+    ) AS
+    BEGIN
+        DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => p_table_owner,
+            tabname => p_table_name,
+            partname => p_partition_name,
+            granularity => 'PARTITION',
+            cascade => TRUE,        -- Gather index stats too
+            degree => 4,            -- Parallel degree
+            estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE
+        );
+
+        log_info('Statistics gathered for partition: ' || p_partition_name);
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error('Warning: Statistics gathering failed - ' || SQLERRM);
+    END gather_partition_stats;
 
     PROCEDURE log_execution(
         p_execution_id IN OUT NUMBER,
@@ -615,6 +724,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_execution_id NUMBER;
         v_start_time TIMESTAMP;
         v_end_time TIMESTAMP;
+        v_size_before NUMBER;
+        v_size_after NUMBER;
     BEGIN
         -- Get queue item
         SELECT * INTO v_queue_rec
@@ -627,6 +738,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         WHERE policy_id = v_queue_rec.policy_id;
 
         v_start_time := SYSTIMESTAMP;
+
+        -- Capture partition size BEFORE operation (for compression metrics)
+        v_size_before := get_partition_size(
+            v_queue_rec.table_owner,
+            v_queue_rec.table_name,
+            v_queue_rec.partition_name
+        );
 
         -- Route to appropriate action handler based on policy action_type
         -- All procedures now return OUT parameters for SQL executed, status, and error message
@@ -684,14 +802,57 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                     p_error_message => v_error_msg
                 );
 
+            WHEN 'MERGE' THEN
+                merge_monthly_into_yearly(
+                    p_table_owner => v_queue_rec.table_owner,
+                    p_table_name => v_queue_rec.table_name,
+                    p_monthly_partition => v_queue_rec.partition_name,
+                    p_sql_executed => v_action_sql,
+                    p_status => v_status,
+                    p_error_message => v_error_msg
+                );
+
+            WHEN 'CUSTOM' THEN
+                -- Execute custom SQL action from policy
+                BEGIN
+                    IF v_policy_rec.custom_action IS NOT NULL THEN
+                        DBMS_LOB.CREATETEMPORARY(v_action_sql, TRUE);
+                        DBMS_LOB.APPEND(v_action_sql, '-- Custom action:' || CHR(10));
+                        DBMS_LOB.APPEND(v_action_sql, v_policy_rec.custom_action || ';' || CHR(10));
+
+                        EXECUTE IMMEDIATE v_policy_rec.custom_action;
+
+                        v_status := 'SUCCESS';
+                        log_info('Custom action executed successfully');
+                    ELSE
+                        v_status := 'SKIPPED';
+                        v_error_msg := 'No custom action defined in policy';
+                        log_error('Custom action type but no custom_action defined');
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_status := 'ERROR';
+                        v_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                        log_error('Custom action failed: ' || v_error_msg);
+                        RAISE;
+                END;
+
             ELSE
                 RAISE_APPLICATION_ERROR(-20002, 'Unknown action type: ' || v_policy_rec.action_type);
         END CASE;
 
         v_end_time := SYSTIMESTAMP;
 
+        -- Capture partition size AFTER operation (for compression metrics)
+        v_size_after := get_partition_size(
+            v_queue_rec.table_owner,
+            v_queue_rec.table_name,
+            v_queue_rec.partition_name
+        );
+
         -- Log execution with OUT parameters captured from utility
         log_execution(
+            p_execution_id => v_execution_id,
             p_policy_id => v_policy_rec.policy_id,
             p_policy_name => v_policy_rec.policy_name,
             p_table_owner => v_queue_rec.table_owner,
@@ -701,6 +862,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             p_action_sql => v_action_sql,  -- SQL executed by utility
             p_execution_start => v_start_time,
             p_execution_end => v_end_time,
+            p_size_before_mb => v_size_before,
+            p_size_after_mb => v_size_after,
             p_status => v_status,  -- Status from utility (SUCCESS, WARNING, ERROR, SKIPPED)
             p_error_message => v_error_msg  -- Error message from utility
         );
@@ -724,8 +887,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             v_end_time := SYSTIMESTAMP;
             v_error_msg := SUBSTR(SQLERRM, 1, 4000);
 
+            -- Set size_after = size_before on failure (no change)
+            v_size_after := v_size_before;
+
             -- Log failed execution
             log_execution(
+                p_execution_id => v_execution_id,
                 p_policy_id => v_policy_rec.policy_id,
                 p_policy_name => v_policy_rec.policy_name,
                 p_table_owner => v_queue_rec.table_owner,
@@ -735,6 +902,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 p_action_sql => v_action_sql,
                 p_execution_start => v_start_time,
                 p_execution_end => v_end_time,
+                p_size_before_mb => v_size_before,
+                p_size_after_mb => v_size_after,
                 p_status => 'ERROR',
                 p_error_message => v_error_msg
             );
@@ -750,7 +919,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
     END execute_single_action;
 
     -- =========================================================================
-    -- DIRECT PARTITION OPERATIONS (Implementation stubs - to be completed)
+    -- DIRECT PARTITION OPERATIONS (Delegate to Partition Utilities Package)
     -- =========================================================================
 
     PROCEDURE compress_partition(
@@ -807,6 +976,59 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         );
 
         log_info('Moved partition to ' || p_target_tablespace || ': ' || p_table_name || '.' || p_partition_name || ' (Status: ' || p_status || ')');
+
+        -- Auto-merge monthly partitions into yearly if enabled
+        -- Only proceed if move was successful and partition is monthly format
+        IF p_status IN ('SUCCESS', 'WARNING') THEN
+            DECLARE
+                v_auto_merge VARCHAR2(10);
+                v_merge_sql CLOB;
+                v_merge_status VARCHAR2(50);
+                v_merge_error VARCHAR2(4000);
+            BEGIN
+                -- Check if auto-merge is enabled
+                SELECT config_value INTO v_auto_merge
+                FROM cmr.dwh_ilm_config
+                WHERE config_key = 'AUTO_MERGE_PARTITIONS';
+
+                IF v_auto_merge = 'Y' THEN
+                    -- Only attempt merge for monthly partitions (P_YYYY_MM format)
+                    IF REGEXP_LIKE(p_partition_name, '^P_\d{4}_\d{2}$') THEN
+                        BEGIN
+                            log_info('Auto-merge enabled, attempting merge for ' || p_partition_name);
+
+                            merge_monthly_into_yearly(
+                                p_table_owner => p_table_owner,
+                                p_table_name => p_table_name,
+                                p_monthly_partition => p_partition_name,
+                                p_sql_executed => v_merge_sql,
+                                p_status => v_merge_status,
+                                p_error_message => v_merge_error
+                            );
+
+                            -- Append merge SQL to main SQL output
+                            IF v_merge_sql IS NOT NULL THEN
+                                DBMS_LOB.APPEND(p_sql_executed, CHR(10) || '-- Auto-merge:' || CHR(10));
+                                DBMS_LOB.APPEND(p_sql_executed, v_merge_sql);
+                            END IF;
+
+                            log_info('Auto-merge completed: ' || v_merge_status);
+                        EXCEPTION
+                            WHEN OTHERS THEN
+                                -- Log warning but don't fail the move operation
+                                log_error('Warning: Auto-merge failed but move succeeded - ' || SQLERRM);
+                        END;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    -- Config not found, skip merge
+                    NULL;
+                WHEN OTHERS THEN
+                    -- Any other error, log warning but don't fail move
+                    log_error('Warning: Error checking auto-merge config - ' || SQLERRM);
+            END;
+        END IF;
     END move_partition;
 
     PROCEDURE make_partition_readonly(
