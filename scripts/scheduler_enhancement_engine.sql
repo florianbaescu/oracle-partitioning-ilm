@@ -707,12 +707,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         -- Rebuild indexes
         IF p_rebuild_indexes THEN
             FOR idx IN (
-                SELECT index_owner, index_name
-                FROM all_ind_partitions
-                WHERE table_owner = p_table_owner
-                AND table_name = p_table_name
-                AND partition_name = p_partition_name
-                AND status = 'UNUSABLE'
+                SELECT ip.index_owner, ip.index_name
+                FROM all_ind_partitions ip
+                JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
+                WHERE i.table_owner = p_table_owner
+                AND i.table_name = p_table_name
+                AND ip.partition_name = p_partition_name
+                AND ip.status = 'UNUSABLE'
             ) LOOP
                 EXECUTE IMMEDIATE 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
                                   ' REBUILD PARTITION ' || p_partition_name;
@@ -760,11 +761,12 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         -- Rebuild indexes in target tablespace
         IF p_rebuild_indexes THEN
             FOR idx IN (
-                SELECT index_owner, index_name
-                FROM all_ind_partitions
-                WHERE table_owner = p_table_owner
-                AND table_name = p_table_name
-                AND partition_name = p_partition_name
+                SELECT ip.index_owner, ip.index_name
+                FROM all_ind_partitions ip
+                JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
+                WHERE i.table_owner = p_table_owner
+                AND i.table_name = p_table_name
+                AND ip.partition_name = p_partition_name
             ) LOOP
                 EXECUTE IMMEDIATE 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
                                   ' REBUILD PARTITION ' || p_partition_name ||
