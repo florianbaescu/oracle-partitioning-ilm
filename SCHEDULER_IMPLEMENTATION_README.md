@@ -21,13 +21,16 @@ Run scripts in this order:
 -- 2. Phase 2: Execution Engine Package
 @scripts/scheduler_enhancement_engine.sql
 
--- 3. Phase 3: Scheduler Program and Job
+-- 3. Phase 3: Scheduler Program and Job (Main execution job)
 @scripts/scheduler_enhancement_scheduler.sql
 
--- 4. Phase 4: Monitoring Views
+-- 4. Phase 3b: Additional Utilities (Access tracking, cleanup, alerts)
+@scripts/scheduler_enhancement_utilities.sql
+
+-- 5. Phase 4: Monitoring Views
 @scripts/scheduler_enhancement_monitoring.sql
 
--- 5. Testing (optional)
+-- 6. Testing (optional)
 @scripts/scheduler_enhancement_test.sql
 ```
 
@@ -51,11 +54,23 @@ Run scripts in this order:
    - Helper functions: `get_today_hours()`, `is_in_execution_window()`, `should_execute_now()`
    - Checkpointing support
 
-4. **`DWH_ILM_JOB_EXECUTE`** - DBMS_SCHEDULER job
+4. **`DWH_ILM_JOB_EXECUTE`** - Main execution job
    - Runs every hour (FREQ=HOURLY; INTERVAL=1)
    - Calls `should_execute_now()` to check if should run
    - If YES: starts continuous execution
    - If NO: exits immediately (waits for next hour)
+
+5. **Additional Scheduler Jobs** - Supporting jobs
+   - `DWH_ILM_JOB_REFRESH_ACCESS` - Daily access tracking refresh (1 AM)
+   - `DWH_ILM_JOB_EVALUATE` - Daily policy evaluation (2 AM)
+   - `DWH_ILM_JOB_CLEANUP` - Weekly log cleanup (Sunday 3 AM)
+   - `DWH_ILM_JOB_MONITOR_FAILURES` - Failure alerting (every 4 hours)
+
+6. **Helper Procedures** - Manual control
+   - `dwh_run_ilm_cycle()` - Run complete cycle manually
+   - `dwh_stop_ilm_jobs()` - Disable all ILM jobs
+   - `dwh_start_ilm_jobs()` - Enable all ILM jobs
+   - `dwh_run_ilm_job_now(p_job_name)` - Run specific job immediately
 
 ### Execution Flow
 

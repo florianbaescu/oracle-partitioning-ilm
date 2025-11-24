@@ -1,6 +1,7 @@
 -- =============================================================================
 -- Package: pck_dwh_partition_utils_helper
--- Description: Helper functions for partition utilities (validation, logging)
+-- Description: Helper functions for partition utilities (validation only)
+-- Note: Logging is handled by ILM execution engine, not by utilities
 -- =============================================================================
 
 CREATE OR REPLACE PACKAGE pck_dwh_partition_utils_helper AUTHID CURRENT_USER AS
@@ -20,31 +21,6 @@ CREATE OR REPLACE PACKAGE pck_dwh_partition_utils_helper AUTHID CURRENT_USER AS
         p_tablespace OUT VARCHAR2,
         p_compression OUT VARCHAR2,
         p_config_source OUT VARCHAR2       -- AUTO_DETECTED, ILM_POLICY, CONFIG_OVERRIDE
-    );
-
-    -- Log operation start
-    FUNCTION log_operation_start(
-        p_operation_name VARCHAR2,
-        p_operation_type VARCHAR2,
-        p_table_owner VARCHAR2 DEFAULT NULL,
-        p_table_name VARCHAR2 DEFAULT NULL,
-        p_partition_name VARCHAR2 DEFAULT NULL,
-        p_message VARCHAR2 DEFAULT NULL
-    ) RETURN NUMBER;  -- Returns log_id
-
-    -- Log operation end
-    PROCEDURE log_operation_end(
-        p_log_id NUMBER,
-        p_status VARCHAR2,                 -- SUCCESS, WARNING, ERROR, SKIPPED
-        p_partitions_created NUMBER DEFAULT 0,
-        p_partitions_modified NUMBER DEFAULT 0,
-        p_partitions_skipped NUMBER DEFAULT 0,
-        p_rows_affected NUMBER DEFAULT NULL,
-        p_config_source VARCHAR2 DEFAULT NULL,
-        p_interval_type VARCHAR2 DEFAULT NULL,
-        p_message VARCHAR2 DEFAULT NULL,
-        p_error_message VARCHAR2 DEFAULT NULL,
-        p_sql_statement CLOB DEFAULT NULL
     );
 
     -- Check if partition name follows framework pattern
@@ -199,31 +175,15 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utils_helper AS
         p_config_source OUT VARCHAR2
     ) IS
         v_count NUMBER;
-        v_interval_detected VARCHAR2(20);
     BEGIN
-        -- Priority 1: Check manual configuration override
-        BEGIN
-            SELECT partition_interval, tablespace, compression, 'CONFIG_OVERRIDE'
-            INTO p_interval, p_tablespace, p_compression, p_config_source
-            FROM cmr.dwh_partition_precreation_config
-            WHERE table_owner = UPPER(p_table_owner)
-            AND table_name = UPPER(p_table_name)
-            AND enabled = 'Y';
-
-            RETURN;  -- Found override, use it
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                NULL;  -- Continue to next priority
-        END;
-
-        -- Priority 2: Check if table has active ILM policy
+        -- Priority 1: Check if table has active ILM policy
         BEGIN
             SELECT COUNT(*)
             INTO v_count
             FROM cmr.dwh_ilm_policies
             WHERE table_owner = UPPER(p_table_owner)
             AND table_name = UPPER(p_table_name)
-            AND status = 'ACTIVE';
+            AND enabled = 'Y';
 
             IF v_count > 0 THEN
                 -- Has ILM policy - get config from most recent partition (assumed HOT)
@@ -251,7 +211,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utils_helper AS
                 NULL;  -- Continue to auto-detect
         END;
 
-        -- Priority 3: Auto-detect from table structure
+        -- Priority 2: Auto-detect from table structure
         BEGIN
             -- Get settings from most recent partition
             SELECT
@@ -271,42 +231,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utils_helper AS
             ORDER BY partition_position DESC
             FETCH FIRST 1 ROW ONLY;
 
-            -- If interval is still unknown, try to detect from HIGH_VALUE intervals
-            IF p_interval = 'UNKNOWN' OR p_interval IS NULL THEN
-                -- Calculate average days between partitions
-                DECLARE
-                    v_avg_days NUMBER;
-                BEGIN
-                    SELECT AVG(days_between)
-                    INTO v_avg_days
-                    FROM (
-                        SELECT
-                            LEAD(partition_position) OVER (ORDER BY partition_position) - partition_position as days_between
-                        FROM all_tab_partitions
-                        WHERE table_owner = UPPER(p_table_owner)
-                        AND table_name = UPPER(p_table_name)
-                        ORDER BY partition_position DESC
-                        FETCH FIRST 5 ROWS ONLY
-                    )
-                    WHERE days_between IS NOT NULL;
-
-                    IF v_avg_days IS NOT NULL THEN
-                        IF v_avg_days < 3 THEN
-                            p_interval := 'DAILY';
-                        ELSIF v_avg_days BETWEEN 5 AND 9 THEN
-                            p_interval := 'WEEKLY';
-                        ELSIF v_avg_days BETWEEN 25 AND 35 THEN
-                            p_interval := 'MONTHLY';
-                        ELSIF v_avg_days > 300 THEN
-                            p_interval := 'YEARLY';
-                        END IF;
-                    END IF;
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        NULL;  -- Keep interval as UNKNOWN
-                END;
-            END IF;
-
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 p_interval := 'UNKNOWN';
@@ -316,97 +240,6 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utils_helper AS
         END;
 
     END detect_partition_config;
-
-    -- ==========================================================================
-    -- LOGGING FUNCTIONS
-    -- ==========================================================================
-
-    FUNCTION log_operation_start(
-        p_operation_name VARCHAR2,
-        p_operation_type VARCHAR2,
-        p_table_owner VARCHAR2 DEFAULT NULL,
-        p_table_name VARCHAR2 DEFAULT NULL,
-        p_partition_name VARCHAR2 DEFAULT NULL,
-        p_message VARCHAR2 DEFAULT NULL
-    ) RETURN NUMBER IS
-        PRAGMA AUTONOMOUS_TRANSACTION;
-        v_log_id NUMBER;
-    BEGIN
-        INSERT INTO cmr.dwh_partition_utilities_log (
-            operation_name,
-            operation_type,
-            table_owner,
-            table_name,
-            partition_name,
-            start_time,
-            status,
-            message
-        ) VALUES (
-            p_operation_name,
-            p_operation_type,
-            p_table_owner,
-            p_table_name,
-            p_partition_name,
-            SYSTIMESTAMP,
-            'RUNNING',
-            p_message
-        ) RETURNING log_id INTO v_log_id;
-
-        COMMIT;
-        RETURN v_log_id;
-
-    EXCEPTION
-        WHEN OTHERS THEN
-            ROLLBACK;
-            -- If logging fails, don't fail the operation
-            DBMS_OUTPUT.PUT_LINE('WARNING: Failed to log operation start: ' || SQLERRM);
-            RETURN NULL;
-    END log_operation_start;
-
-    PROCEDURE log_operation_end(
-        p_log_id NUMBER,
-        p_status VARCHAR2,
-        p_partitions_created NUMBER DEFAULT 0,
-        p_partitions_modified NUMBER DEFAULT 0,
-        p_partitions_skipped NUMBER DEFAULT 0,
-        p_rows_affected NUMBER DEFAULT NULL,
-        p_config_source VARCHAR2 DEFAULT NULL,
-        p_interval_type VARCHAR2 DEFAULT NULL,
-        p_message VARCHAR2 DEFAULT NULL,
-        p_error_message VARCHAR2 DEFAULT NULL,
-        p_sql_statement CLOB DEFAULT NULL
-    ) IS
-        PRAGMA AUTONOMOUS_TRANSACTION;
-        v_duration NUMBER;
-    BEGIN
-        IF p_log_id IS NULL THEN
-            RETURN;  -- No log to update
-        END IF;
-
-        UPDATE cmr.dwh_partition_utilities_log
-        SET end_time = SYSTIMESTAMP,
-            duration_seconds = EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time)) +
-                             EXTRACT(MINUTE FROM (SYSTIMESTAMP - start_time)) * 60 +
-                             EXTRACT(HOUR FROM (SYSTIMESTAMP - start_time)) * 3600,
-            status = p_status,
-            partitions_created = p_partitions_created,
-            partitions_modified = p_partitions_modified,
-            partitions_skipped = p_partitions_skipped,
-            rows_affected = p_rows_affected,
-            config_source = p_config_source,
-            interval_type = p_interval_type,
-            message = NVL(p_message, message),  -- Keep original if new is null
-            error_message = p_error_message,
-            sql_statement = p_sql_statement
-        WHERE log_id = p_log_id;
-
-        COMMIT;
-
-    EXCEPTION
-        WHEN OTHERS THEN
-            ROLLBACK;
-            DBMS_OUTPUT.PUT_LINE('WARNING: Failed to log operation end: ' || SQLERRM);
-    END log_operation_end;
 
 END pck_dwh_partition_utils_helper;
 /

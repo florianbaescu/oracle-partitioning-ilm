@@ -1163,7 +1163,7 @@ max_concurrent_operations = 3  -- Run 3 partitions simultaneously
 -- Framework manages concurrency limit
 ```
 
-**Recommendation**: Implement operation timeout (60 min default) to prevent indefinite blocking.
+**Recommendation**: Implement operation timeout (120 min default) to prevent indefinite blocking.
 
 ---
 

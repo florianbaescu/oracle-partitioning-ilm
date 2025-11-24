@@ -2,6 +2,33 @@
 -- Custom ILM Scheduler Jobs
 -- Automates policy evaluation and execution
 -- =============================================================================
+--
+-- ⚠️  OBSOLETE - This file has been replaced by the scheduler enhancement scripts
+--
+-- This file is kept for reference only. For new installations, use:
+--   1. scheduler_enhancement_setup.sql       - Schema objects
+--   2. scheduler_enhancement_engine.sql      - Execution engine
+--   3. scheduler_enhancement_scheduler.sql   - Main scheduler job
+--   4. scheduler_enhancement_utilities.sql   - Additional utilities (NEW)
+--   5. scheduler_enhancement_monitoring.sql  - Monitoring views
+--
+-- Key improvements in new scheduler:
+--   - Per-day scheduling (different hours for each day)
+--   - Continuous execution (LOOP until done, not periodic)
+--   - Work-based execution (checks queue before running)
+--   - Configurable cooldown between batches
+--   - Checkpointing and resumability
+--
+-- Useful components from this file that were migrated:
+--   ✓ DWH_ILM_JOB_REFRESH_ACCESS   → scheduler_enhancement_utilities.sql
+--   ✓ DWH_ILM_JOB_EVALUATE         → scheduler_enhancement_utilities.sql
+--   ✓ DWH_ILM_JOB_CLEANUP          → scheduler_enhancement_utilities.sql
+--   ✓ DWH_ILM_JOB_MONITOR_FAILURES → scheduler_enhancement_utilities.sql
+--   ✓ Helper procedures             → scheduler_enhancement_utilities.sql
+--   ✓ Alert/notification system     → Not yet migrated (copy if needed)
+--   ✓ DWH_ILM_JOB_EXECUTE          → Replaced with enhanced version
+--
+-- =============================================================================
 
 -- =============================================================================
 -- SECTION 0: CLEANUP (Make script rerunnable)
