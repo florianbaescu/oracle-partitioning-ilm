@@ -177,7 +177,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             policy_id, policy_name,
             table_owner, table_name, partition_name,
             action_type, action_sql,
-            execution_start_time, execution_end_time, duration_seconds,
+            execution_start, execution_end, duration_seconds,
             size_before_mb, size_after_mb, space_saved_mb, compression_ratio,
             status, error_code, error_message
         ) VALUES (
@@ -509,7 +509,20 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             -- ⭐ Cooldown between batches (if configured)
             IF v_schedule.batch_cooldown_minutes > 0 THEN
                 log_info('Cooldown: ' || v_schedule.batch_cooldown_minutes || ' minutes');
-                DBMS_LOCK.SLEEP(v_schedule.batch_cooldown_minutes * 60);
+                -- Use DBMS_SESSION.SLEEP (available in 18c+) or busy wait for older versions
+                BEGIN
+                    EXECUTE IMMEDIATE 'BEGIN DBMS_SESSION.SLEEP(' || v_schedule.batch_cooldown_minutes * 60 || '); END;';
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- Fallback for pre-18c: busy wait
+                        DECLARE
+                            v_end_time TIMESTAMP := SYSTIMESTAMP + NUMTODSINTERVAL(v_schedule.batch_cooldown_minutes, 'MINUTE');
+                        BEGIN
+                            WHILE SYSTIMESTAMP < v_end_time LOOP
+                                NULL;  -- Busy wait
+                            END LOOP;
+                        END;
+                END;
 
                 -- Check if window closed during cooldown
                 IF NOT p_force_run AND NOT is_in_execution_window(v_schedule) THEN
@@ -593,23 +606,23 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
         v_start_time := SYSTIMESTAMP;
 
-        -- Route to appropriate action handler
-        CASE v_queue_rec.recommended_action
+        -- Route to appropriate action handler based on policy action_type
+        CASE v_policy_rec.action_type
             WHEN 'COMPRESS' THEN
                 compress_partition(
                     v_queue_rec.table_owner,
                     v_queue_rec.table_name,
                     v_queue_rec.partition_name,
-                    v_policy_rec.tier_compression
+                    v_policy_rec.compression_type
                 );
 
-            WHEN 'MOVE_TO_TABLESPACE' THEN
+            WHEN 'MOVE' THEN
                 move_partition(
                     v_queue_rec.table_owner,
                     v_queue_rec.table_name,
                     v_queue_rec.partition_name,
-                    v_policy_rec.tier_tablespace,
-                    v_policy_rec.tier_compression
+                    v_policy_rec.target_tablespace,
+                    v_policy_rec.compression_type
                 );
 
             WHEN 'READ_ONLY' THEN
@@ -619,7 +632,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                     v_queue_rec.partition_name
                 );
 
-            WHEN 'PURGE' THEN
+            WHEN 'DROP' THEN
                 drop_partition(
                     v_queue_rec.table_owner,
                     v_queue_rec.table_name,
@@ -634,21 +647,19 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 );
 
             ELSE
-                RAISE_APPLICATION_ERROR(-20002, 'Unknown action: ' || v_queue_rec.recommended_action);
+                RAISE_APPLICATION_ERROR(-20002, 'Unknown action type: ' || v_policy_rec.action_type);
         END CASE;
 
         v_end_time := SYSTIMESTAMP;
 
         -- Update queue status
         UPDATE cmr.dwh_ilm_evaluation_queue
-        SET execution_status = 'COMPLETED',
-            execution_date = SYSDATE,
-            last_action_date = SYSDATE
+        SET execution_status = 'COMPLETED'
         WHERE queue_id = p_queue_id;
 
         COMMIT;
 
-        log_info('Action completed: ' || v_queue_rec.recommended_action ||
+        log_info('Action completed: ' || v_policy_rec.action_type ||
                  ' on ' || v_queue_rec.table_name || '.' || v_queue_rec.partition_name);
 
     EXCEPTION
@@ -657,9 +668,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             v_error_msg := SUBSTR(SQLERRM, 1, 4000);
 
             UPDATE cmr.dwh_ilm_evaluation_queue
-            SET execution_status = 'FAILED',
-                execution_date = SYSDATE,
-                error_message = v_error_msg
+            SET execution_status = 'FAILED'
             WHERE queue_id = p_queue_id;
 
             COMMIT;
