@@ -144,6 +144,63 @@ CREATE OR REPLACE PACKAGE pck_dwh_partition_utilities AUTHID CURRENT_USER AS
     );
 
     -- ==========================================================================
+    -- SECTION 4B: SINGLE PARTITION OPERATIONS (For ILM Queue Execution)
+    -- ==========================================================================
+
+    -- Compress a single partition
+    PROCEDURE compress_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    );
+
+    -- Move a single partition to tablespace
+    PROCEDURE move_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_target_tablespace VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT NULL,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    );
+
+    -- Drop a single partition
+    PROCEDURE drop_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    );
+
+    -- Truncate a single partition
+    PROCEDURE truncate_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    );
+
+    -- Make a single partition read-only
+    PROCEDURE make_partition_readonly(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    );
+
+    -- ==========================================================================
     -- SECTION 5: PARTITION STATISTICS MANAGEMENT
     -- ==========================================================================
 
@@ -1332,6 +1389,244 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             p_error_message := SQLERRM;
             RAISE;
     END;
+
+    -- ==========================================================================
+    -- SECTION 4B: SINGLE PARTITION OPERATIONS (For ILM Queue Execution)
+    -- ==========================================================================
+
+    PROCEDURE compress_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT 'QUERY HIGH',
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_sql_log CLOB;
+    BEGIN
+        -- Initialize OUT parameters
+        p_status := 'PENDING';
+        p_error_message := NULL;
+        DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
+
+        -- Compress partition
+        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                 ' MOVE PARTITION ' || p_partition_name ||
+                 ' COMPRESS FOR ' || p_compression_type;
+
+        EXECUTE IMMEDIATE v_sql;
+        DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+
+        -- Rebuild unusable local indexes
+        FOR idx IN (
+            SELECT ip.index_owner, ip.index_name
+            FROM all_ind_partitions ip
+            JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
+            WHERE i.table_owner = p_table_owner
+            AND i.table_name = p_table_name
+            AND ip.partition_name = p_partition_name
+            AND ip.status = 'UNUSABLE'
+        ) LOOP
+            v_sql := 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
+                     ' REBUILD PARTITION ' || p_partition_name;
+            EXECUTE IMMEDIATE v_sql;
+            DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+        END LOOP;
+
+        -- Gather partition statistics
+        DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => p_table_owner,
+            tabname => p_table_name,
+            partname => p_partition_name,
+            granularity => 'PARTITION'
+        );
+        DBMS_LOB.APPEND(v_sql_log, '-- Gathered statistics on partition ' || p_partition_name || CHR(10));
+
+        p_sql_executed := v_sql_log;
+        p_status := 'SUCCESS';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_sql_executed := v_sql_log;
+            p_status := 'ERROR';
+            p_error_message := SQLERRM;
+            RAISE;
+    END compress_single_partition;
+
+    PROCEDURE move_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_target_tablespace VARCHAR2,
+        p_compression_type VARCHAR2 DEFAULT NULL,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_sql_log CLOB;
+    BEGIN
+        -- Initialize OUT parameters
+        p_status := 'PENDING';
+        p_error_message := NULL;
+        DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
+
+        -- Move partition
+        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                 ' MOVE PARTITION ' || p_partition_name ||
+                 ' TABLESPACE ' || p_target_tablespace;
+
+        IF p_compression_type IS NOT NULL THEN
+            v_sql := v_sql || ' COMPRESS FOR ' || p_compression_type;
+        END IF;
+
+        EXECUTE IMMEDIATE v_sql;
+        DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+
+        -- Rebuild all local indexes in target tablespace
+        FOR idx IN (
+            SELECT ip.index_owner, ip.index_name
+            FROM all_ind_partitions ip
+            JOIN all_indexes i ON i.owner = ip.index_owner AND i.index_name = ip.index_name
+            WHERE i.table_owner = p_table_owner
+            AND i.table_name = p_table_name
+            AND ip.partition_name = p_partition_name
+        ) LOOP
+            v_sql := 'ALTER INDEX ' || idx.index_owner || '.' || idx.index_name ||
+                     ' REBUILD PARTITION ' || p_partition_name ||
+                     ' TABLESPACE ' || p_target_tablespace;
+            EXECUTE IMMEDIATE v_sql;
+            DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+        END LOOP;
+
+        -- Gather partition statistics
+        DBMS_STATS.GATHER_TABLE_STATS(
+            ownname => p_table_owner,
+            tabname => p_table_name,
+            partname => p_partition_name,
+            granularity => 'PARTITION'
+        );
+        DBMS_LOB.APPEND(v_sql_log, '-- Gathered statistics on partition ' || p_partition_name || CHR(10));
+
+        p_sql_executed := v_sql_log;
+        p_status := 'SUCCESS';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_sql_executed := v_sql_log;
+            p_status := 'ERROR';
+            p_error_message := SQLERRM;
+            RAISE;
+    END move_single_partition;
+
+    PROCEDURE drop_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_sql_log CLOB;
+    BEGIN
+        -- Initialize OUT parameters
+        p_status := 'PENDING';
+        p_error_message := NULL;
+        DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
+
+        -- Drop partition
+        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                 ' DROP PARTITION ' || p_partition_name;
+
+        EXECUTE IMMEDIATE v_sql;
+        DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+
+        p_sql_executed := v_sql_log;
+        p_status := 'SUCCESS';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_sql_executed := v_sql_log;
+            p_status := 'ERROR';
+            p_error_message := SQLERRM;
+            RAISE;
+    END drop_single_partition;
+
+    PROCEDURE truncate_single_partition(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_sql_log CLOB;
+    BEGIN
+        -- Initialize OUT parameters
+        p_status := 'PENDING';
+        p_error_message := NULL;
+        DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
+
+        -- Truncate partition
+        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                 ' TRUNCATE PARTITION ' || p_partition_name;
+
+        EXECUTE IMMEDIATE v_sql;
+        DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+
+        p_sql_executed := v_sql_log;
+        p_status := 'SUCCESS';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_sql_executed := v_sql_log;
+            p_status := 'ERROR';
+            p_error_message := SQLERRM;
+            RAISE;
+    END truncate_single_partition;
+
+    PROCEDURE make_partition_readonly(
+        p_table_owner VARCHAR2,
+        p_table_name VARCHAR2,
+        p_partition_name VARCHAR2,
+        p_sql_executed OUT CLOB,
+        p_status OUT VARCHAR2,
+        p_error_message OUT VARCHAR2
+    ) AS
+        v_sql VARCHAR2(4000);
+        v_sql_log CLOB;
+    BEGIN
+        -- Initialize OUT parameters
+        p_status := 'PENDING';
+        p_error_message := NULL;
+        DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
+        DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
+
+        -- Make partition read-only
+        v_sql := 'ALTER TABLE ' || p_table_owner || '.' || p_table_name ||
+                 ' MODIFY PARTITION ' || p_partition_name || ' READ ONLY';
+
+        EXECUTE IMMEDIATE v_sql;
+        DBMS_LOB.APPEND(v_sql_log, v_sql || ';' || CHR(10));
+
+        p_sql_executed := v_sql_log;
+        p_status := 'SUCCESS';
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_sql_executed := v_sql_log;
+            p_status := 'ERROR';
+            p_error_message := SQLERRM;
+            RAISE;
+    END make_partition_readonly;
 
 
     PROCEDURE gather_partition_statistics(
