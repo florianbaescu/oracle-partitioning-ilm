@@ -769,15 +769,29 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
         p_error_message := NULL;
         DBMS_LOB.CREATETEMPORARY(p_sql_executed, TRUE);
         DBMS_LOB.CREATETEMPORARY(v_sql_log, TRUE);
-        -- Get the highest partition date
-        SELECT MAX(TO_DATE(
-            SUBSTR(high_value, INSTR(high_value, '''') + 1,
-                   INSTR(high_value, '''', 1, 2) - INSTR(high_value, '''') - 1),
-            'YYYY-MM-DD'))
-        INTO v_max_partition_date
-        FROM user_tab_partitions
-        WHERE table_name = UPPER(p_table_name)
-        AND partition_position > 1;
+
+        -- Get the highest partition date by evaluating high_value
+        v_max_partition_date := NULL;
+        FOR rec IN (
+            SELECT high_value, partition_position
+            FROM user_tab_partitions
+            WHERE table_name = UPPER(p_table_name)
+            AND partition_position > 1
+            ORDER BY partition_position DESC
+        ) LOOP
+            BEGIN
+                -- Evaluate high_value to get actual date
+                EXECUTE IMMEDIATE 'SELECT ' || rec.high_value || ' FROM DUAL'
+                    INTO v_next_partition_date;
+
+                IF v_max_partition_date IS NULL OR v_next_partition_date > v_max_partition_date THEN
+                    v_max_partition_date := v_next_partition_date;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Skip partitions with non-date high_value
+            END;
+        END LOOP;
 
         IF v_max_partition_date IS NULL THEN
             v_max_partition_date := TRUNC(SYSDATE, 'MM');
