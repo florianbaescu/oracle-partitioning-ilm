@@ -1245,7 +1245,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
                         SELECT index_name, partition_name
                         FROM user_ind_partitions
                         WHERE index_name IN (
-                            SELECT index_name FROM user_indexes
+                            SELECT index_name FROM user_part_indexes
                             WHERE table_name = UPPER(p_table_name)
                             AND locality = 'LOCAL'
                         )
