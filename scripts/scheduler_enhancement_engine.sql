@@ -13,6 +13,7 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
     TYPE schedule_rec IS RECORD (
         schedule_id             NUMBER,
         schedule_name           VARCHAR2(100),
+        schedule_type           VARCHAR2(50),
         enabled                 CHAR(1),
         monday_hours            VARCHAR2(11),
         tuesday_hours           VARCHAR2(11),
@@ -70,6 +71,11 @@ CREATE OR REPLACE PACKAGE pck_dwh_ilm_execution_engine AUTHID CURRENT_USER AS
     -- Check if should execute now (work-based)
     FUNCTION should_execute_now(
         p_schedule_name VARCHAR2
+    ) RETURN BOOLEAN;
+
+    -- Evaluate schedule conditions
+    FUNCTION evaluate_schedule_conditions(
+        p_schedule_id NUMBER
     ) RETURN BOOLEAN;
 
     -- =========================================================================
@@ -331,13 +337,13 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_schedule schedule_rec;
     BEGIN
         SELECT
-            schedule_id, schedule_name, enabled,
+            schedule_id, schedule_name, schedule_type, enabled,
             monday_hours, tuesday_hours, wednesday_hours, thursday_hours,
             friday_hours, saturday_hours, sunday_hours,
             batch_cooldown_minutes,
             enable_checkpointing, checkpoint_frequency
         INTO v_schedule
-        FROM cmr.dwh_ilm_execution_schedules
+        FROM cmr.dwh_execution_schedules
         WHERE schedule_name = p_schedule_name
         AND enabled = 'Y';
 
@@ -424,7 +430,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
         -- Priority 1: Prevent concurrent execution
         SELECT COUNT(*) INTO v_running_count
-        FROM cmr.dwh_ilm_execution_state
+        FROM cmr.dwh_execution_state
         WHERE schedule_id = v_schedule.schedule_id
         AND status = 'RUNNING';
 
@@ -447,9 +453,145 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             RETURN FALSE;  -- Either not scheduled today (NULL) or outside time window
         END IF;
 
+        -- Priority 4: Check custom conditions
+        IF NOT evaluate_schedule_conditions(v_schedule.schedule_id) THEN
+            log_info('Custom schedule conditions not met for schedule: ' || p_schedule_name);
+            RETURN FALSE;
+        END IF;
+
         -- All checks passed
         RETURN TRUE;
     END should_execute_now;
+
+    -- =========================================================================
+    -- CONDITION EVALUATION
+    -- =========================================================================
+
+    FUNCTION evaluate_schedule_conditions(
+        p_schedule_id NUMBER
+    ) RETURN BOOLEAN
+    AS
+        v_result BOOLEAN := TRUE;
+        v_prev_operator VARCHAR2(10) := 'AND';
+        v_condition_result BOOLEAN;
+        v_sql_result NUMBER;
+        v_block CLOB;
+        v_error_msg VARCHAR2(4000);
+    BEGIN
+        -- If no conditions defined, return TRUE (no gates)
+        DECLARE
+            v_count NUMBER;
+        BEGIN
+            SELECT COUNT(*) INTO v_count
+            FROM cmr.dwh_schedule_conditions
+            WHERE schedule_id = p_schedule_id
+            AND enabled = 'Y';
+
+            IF v_count = 0 THEN
+                RETURN TRUE;
+            END IF;
+        END;
+
+        -- Evaluate each condition in order
+        FOR cond IN (
+            SELECT
+                condition_id,
+                condition_name,
+                condition_type,
+                condition_code,
+                evaluation_order,
+                logical_operator,
+                fail_on_error
+            FROM cmr.dwh_schedule_conditions
+            WHERE schedule_id = p_schedule_id
+            AND enabled = 'Y'
+            ORDER BY evaluation_order
+        ) LOOP
+            v_condition_result := FALSE;
+            v_error_msg := NULL;
+
+            BEGIN
+                -- Evaluate based on condition type
+                CASE cond.condition_type
+                    WHEN 'SQL' THEN
+                        -- Execute SQL and expect 1 or 0
+                        EXECUTE IMMEDIATE cond.condition_code INTO v_sql_result;
+                        v_condition_result := (v_sql_result = 1);
+
+                    WHEN 'FUNCTION' THEN
+                        -- Execute function call returning BOOLEAN
+                        v_block := 'DECLARE v_result BOOLEAN; BEGIN v_result := ' || cond.condition_code ||
+                                  '; :1 := CASE WHEN v_result THEN 1 ELSE 0 END; END;';
+                        EXECUTE IMMEDIATE v_block USING OUT v_sql_result;
+                        v_condition_result := (v_sql_result = 1);
+
+                    WHEN 'PLSQL' THEN
+                        -- Execute PL/SQL block with RETURN statement
+                        v_block := 'DECLARE v_result BOOLEAN; BEGIN ' || cond.condition_code ||
+                                  ' :1 := CASE WHEN v_result THEN 1 ELSE 0 END; END;';
+                        EXECUTE IMMEDIATE v_block USING OUT v_sql_result;
+                        v_condition_result := (v_sql_result = 1);
+                END CASE;
+
+                -- Update evaluation success
+                UPDATE cmr.dwh_schedule_conditions
+                SET last_evaluation_time = SYSTIMESTAMP,
+                    last_evaluation_result = CASE WHEN v_condition_result THEN 'Y' ELSE 'N' END,
+                    last_evaluation_error = NULL,
+                    evaluation_count = evaluation_count + 1,
+                    success_count = success_count + 1
+                WHERE condition_id = cond.condition_id;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    v_error_msg := SUBSTR(SQLERRM, 1, 4000);
+
+                    -- Update evaluation failure
+                    UPDATE cmr.dwh_schedule_conditions
+                    SET last_evaluation_time = SYSTIMESTAMP,
+                        last_evaluation_result = CASE WHEN cond.fail_on_error = 'Y' THEN 'N' ELSE 'Y' END,
+                        last_evaluation_error = v_error_msg,
+                        evaluation_count = evaluation_count + 1,
+                        failure_count = failure_count + 1
+                    WHERE condition_id = cond.condition_id;
+
+                    -- Handle error based on fail_on_error flag
+                    IF cond.fail_on_error = 'Y' THEN
+                        v_condition_result := FALSE;  -- Fail-safe: error = FALSE
+                        log_error('Condition ''' || cond.condition_name || ''' failed: ' || v_error_msg);
+                    ELSE
+                        v_condition_result := TRUE;   -- Continue: error = TRUE
+                        log_info('Condition ''' || cond.condition_name || ''' error ignored (fail_on_error=N): ' || v_error_msg);
+                    END IF;
+            END;
+
+            COMMIT;
+
+            -- Combine with previous result using logical operator
+            IF cond.evaluation_order = 1 THEN
+                v_result := v_condition_result;
+            ELSE
+                IF v_prev_operator = 'AND' THEN
+                    v_result := v_result AND v_condition_result;
+                ELSIF v_prev_operator = 'OR' THEN
+                    v_result := v_result OR v_condition_result;
+                END IF;
+            END IF;
+
+            v_prev_operator := cond.logical_operator;
+
+            -- Short-circuit optimization for AND chains
+            IF NOT v_result AND cond.logical_operator = 'AND' THEN
+                EXIT;  -- AND chain failed, no need to continue
+            END IF;
+        END LOOP;
+
+        RETURN v_result;
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error('Error evaluating schedule conditions: ' || SQLERRM);
+            RETURN FALSE;  -- Fail-safe on unexpected errors
+    END evaluate_schedule_conditions;
 
     -- =========================================================================
     -- BATCH EXECUTION (with Checkpointing)
@@ -461,7 +603,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         p_ops_completed NUMBER
     ) AS
     BEGIN
-        UPDATE cmr.dwh_ilm_execution_state
+        UPDATE cmr.dwh_execution_state
         SET last_checkpoint = SYSTIMESTAMP,
             last_queue_id = p_last_queue_id,
             operations_completed = p_ops_completed,
@@ -601,7 +743,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
             log_info('Batch ' || v_batch_count || ': ' || v_pending_count || ' operations pending');
 
             -- Create execution state record
-            INSERT INTO cmr.dwh_ilm_execution_state (
+            INSERT INTO cmr.dwh_execution_state (
                 execution_batch_id, schedule_id, start_time, status, operations_total
             ) VALUES (
                 v_batch_id, v_schedule.schedule_id, SYSTIMESTAMP, 'RUNNING',
@@ -617,7 +759,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                     p_max_operations => v_max_operations
                 );
 
-                UPDATE cmr.dwh_ilm_execution_state
+                UPDATE cmr.dwh_execution_state
                 SET status = 'COMPLETED',
                     end_time = SYSTIMESTAMP,
                     elapsed_seconds = EXTRACT(DAY FROM (SYSTIMESTAMP - start_time)) * 86400 +
@@ -629,7 +771,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
 
             EXCEPTION
                 WHEN OTHERS THEN
-                    UPDATE cmr.dwh_ilm_execution_state
+                    UPDATE cmr.dwh_execution_state
                     SET status = 'FAILED', end_time = SYSTIMESTAMP
                     WHERE execution_batch_id = v_batch_id;
                     COMMIT;

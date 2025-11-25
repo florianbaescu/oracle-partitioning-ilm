@@ -608,6 +608,5 @@ These scripts and documentation are provided as-is for educational and reference
 
 ---
 
-**Author**: Data Warehouse Team
 **Last Updated**: 2024-10-02
 **Version**: 1.0

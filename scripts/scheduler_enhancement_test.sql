@@ -21,22 +21,22 @@ PROMPT ========================================
 PROMPT TEST 1: Verify Schema Objects
 PROMPT ========================================
 
-SELECT 'dwh_ilm_execution_schedules' AS table_name,
+SELECT 'dwh_execution_schedules' AS table_name,
        COUNT(*) AS row_count,
        CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS status
-FROM cmr.dwh_ilm_execution_schedules
+FROM cmr.dwh_execution_schedules
 UNION ALL
-SELECT 'dwh_ilm_execution_state',
+SELECT 'dwh_execution_state',
        COUNT(*),
        'PASS'  -- OK if 0 (no executions yet)
-FROM cmr.dwh_ilm_execution_state;
+FROM cmr.dwh_execution_state;
 
 PROMPT
 PROMPT Verify DEFAULT_SCHEDULE exists:
-SELECT schedule_id, schedule_name, enabled,
+SELECT schedule_id, schedule_name, schedule_type, enabled,
        monday_hours, tuesday_hours, wednesday_hours, thursday_hours, friday_hours,
        batch_cooldown_minutes, enable_checkpointing
-FROM cmr.dwh_ilm_execution_schedules
+FROM cmr.dwh_execution_schedules
 WHERE schedule_name = 'DEFAULT_SCHEDULE';
 
 -- =============================================================================
@@ -113,7 +113,7 @@ PROMPT ========================================
 PROMPT TEST 3: Current Window Status
 PROMPT ========================================
 
-SELECT * FROM cmr.v_dwh_ilm_current_window;
+SELECT * FROM cmr.v_dwh_current_window;
 
 -- =============================================================================
 -- TEST 4: Check Queue Status
@@ -124,7 +124,7 @@ PROMPT ========================================
 PROMPT TEST 4: Queue Status
 PROMPT ========================================
 
-SELECT * FROM cmr.v_dwh_ilm_queue_summary;
+SELECT * FROM cmr.v_dwh_queue_summary;
 
 PROMPT
 PROMPT Pending Work Details:
@@ -193,16 +193,16 @@ PROMPT TEST 6: Check Execution Results
 PROMPT ========================================
 
 PROMPT Recent Batches:
-SELECT * FROM cmr.v_dwh_ilm_recent_batches
+SELECT * FROM cmr.v_dwh_recent_batches
 WHERE ROWNUM <= 5;
 
 PROMPT
 PROMPT Active Batches:
-SELECT * FROM cmr.v_dwh_ilm_active_batches;
+SELECT * FROM cmr.v_dwh_active_batches;
 
 PROMPT
 PROMPT Schedule Stats:
-SELECT * FROM cmr.v_dwh_ilm_schedule_stats;
+SELECT * FROM cmr.v_dwh_schedule_stats;
 
 -- =============================================================================
 -- TEST 7: Verify Scheduler Objects
@@ -245,7 +245,7 @@ PROMPT
 PROMPT Next Steps:
 PROMPT
 PROMPT 1. Configure schedule for your environment:
-PROMPT    UPDATE cmr.dwh_ilm_execution_schedules
+PROMPT    UPDATE cmr.dwh_execution_schedules
 PROMPT    SET monday_hours = '22:00-06:00',  -- Adjust times as needed
 PROMPT        ...
 PROMPT    WHERE schedule_name = 'DEFAULT_SCHEDULE';
@@ -254,9 +254,9 @@ PROMPT 2. Enable the scheduler job:
 PROMPT    EXEC DBMS_SCHEDULER.ENABLE('DWH_ILM_JOB_EXECUTE');
 PROMPT
 PROMPT 3. Monitor execution:
-PROMPT    SELECT * FROM cmr.v_dwh_ilm_active_batches;
-PROMPT    SELECT * FROM cmr.v_dwh_ilm_current_window;
-PROMPT    SELECT * FROM cmr.v_dwh_ilm_recent_batches;
+PROMPT    SELECT * FROM cmr.v_dwh_active_batches;
+PROMPT    SELECT * FROM cmr.v_dwh_current_window;
+PROMPT    SELECT * FROM cmr.v_dwh_recent_batches;
 PROMPT
 PROMPT 4. To stop execution:
 PROMPT    EXEC DBMS_SCHEDULER.DISABLE('DWH_ILM_JOB_EXECUTE');

@@ -8,6 +8,8 @@ This folder contains scripts that have been replaced by newer, enhanced implemen
 
 ## Files in This Folder
 
+**Total**: 5 obsolete files (replaced by enhanced implementations or consolidated)
+
 ### 1. `custom_ilm_execution_engine.sql` ❌ OBSOLETE
 
 **Replaced By**: `../scheduler_enhancement_engine.sql`
@@ -31,7 +33,32 @@ This folder contains scripts that have been replaced by newer, enhanced implemen
 
 ---
 
-### 2. `custom_ilm_scheduler.sql` ❌ OBSOLETE
+### 2. `scheduler_enhancement_monitoring.sql` ❌ OBSOLETE
+
+**Replaced By**: `../schedule_conditions_monitoring.sql`
+
+**Reason for Obsolescence**:
+- References old table names (dwh_ilm_execution_schedules, dwh_ilm_execution_state)
+- Missing schedule_type column in views
+- No condition-specific views
+- Incompatible with schedule conditions framework
+
+**What Was Migrated**:
+- ✅ `v_dwh_ilm_active_batches` → Renamed to `v_dwh_active_batches`, updated table references
+- ✅ `v_dwh_ilm_schedule_stats` → Renamed to `v_dwh_schedule_stats`, added schedule_type column
+- ✅ `v_dwh_ilm_batch_progress` → Renamed to `v_dwh_batch_progress`, updated table references
+- ✅ `v_dwh_ilm_current_window` → Renamed to `v_dwh_current_window`, updated table references
+- ✅ `v_dwh_ilm_recent_batches` → Not migrated (can be recreated if needed)
+- ✅ `v_dwh_ilm_queue_summary` → Not migrated (queue-specific, still works)
+- ✅ NEW: `v_dwh_schedule_conditions` → Condition monitoring
+- ✅ NEW: `v_dwh_condition_failures` → Failing conditions
+- ✅ NEW: `v_dwh_schedule_readiness` → Overall readiness check
+
+**Date Obsoleted**: 2025-11-24 (schedule conditions migration)
+
+---
+
+### 3. `custom_ilm_scheduler.sql` ❌ OBSOLETE
 
 **Replaced By**:
 - `../scheduler_enhancement_scheduler.sql` (main execution job)
@@ -156,5 +183,44 @@ For questions or issues with the new system:
 
 ---
 
+### 4. `schedule_conditions_migration.sql` ❌ OBSOLETE
+
+**Replaced By**: `../scheduler_enhancement_setup.sql` (consolidated)
+
+**Reason for Obsolescence**:
+- Functionality consolidated into main setup script
+- Duplicated schema migration logic
+- Separate file no longer needed
+
+**What Was Migrated**:
+- ✅ All schema migration logic → Moved to scheduler_enhancement_setup.sql Phase 1-3
+- ✅ Table creation (dwh_execution_schedules, dwh_schedule_conditions, dwh_execution_state)
+- ✅ Data migration from old tables
+- ✅ All functionality preserved
+
+**Date Obsoleted**: 2025-11-24 (consolidated into single setup file)
+
+---
+
+### 5. `schedule_conditions_monitoring.sql` ❌ OBSOLETE
+
+**Replaced By**: `../scheduler_enhancement_setup.sql` (consolidated)
+
+**Reason for Obsolescence**:
+- Functionality consolidated into main setup script
+- Duplicated view creation logic
+- Separate file no longer needed
+
+**What Was Migrated**:
+- ✅ All monitoring views → Moved to scheduler_enhancement_setup.sql Phase 4
+- ✅ v_dwh_active_batches, v_dwh_schedule_stats, v_dwh_batch_progress
+- ✅ v_dwh_current_window, v_dwh_queue_summary
+- ✅ v_dwh_schedule_conditions, v_dwh_condition_failures, v_dwh_schedule_readiness
+- ✅ All functionality preserved
+
+**Date Obsoleted**: 2025-11-24 (consolidated into single setup file)
+
+---
+
 **Last Updated**: 2025-11-24
-**Obsoleted By**: Enhanced scheduler system with complete feature parity
+**Obsoleted By**: Enhanced scheduler system with complete feature parity and consolidated setup
