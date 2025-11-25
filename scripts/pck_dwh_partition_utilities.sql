@@ -569,8 +569,8 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
                 ELSE
                     v_error_count := v_error_count + 1;
                     DBMS_LOB.APPEND(v_all_errors,
-                        rec.table_owner || '.' || rec.table_name || ': ' ||
-                        NVL(v_proc_error, 'Unknown error') || CHR(10));
+                        TO_CLOB(rec.table_owner || '.' || rec.table_name || ': ' ||
+                        NVL(v_proc_error, 'Unknown error') || CHR(10)));
                 END IF;
 
                 DBMS_OUTPUT.PUT_LINE('');
@@ -879,7 +879,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             SELECT index_name, partition_name
             FROM user_ind_partitions
             WHERE index_name IN (
-                SELECT index_name FROM user_indexes
+                SELECT index_name FROM user_part_indexes
                 WHERE table_name = UPPER(p_table_name)
                 AND locality = 'LOCAL'
             )
@@ -938,7 +938,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             SELECT index_name, partition_name
             FROM user_ind_partitions
             WHERE index_name IN (
-                SELECT index_name FROM user_indexes
+                SELECT index_name FROM user_part_indexes
                 WHERE table_name = UPPER(p_table_name)
                 AND locality = 'LOCAL'
             )
@@ -1350,7 +1350,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
                     SELECT index_name, partition_name
                     FROM user_ind_partitions
                     WHERE index_name IN (
-                        SELECT index_name FROM user_indexes
+                        SELECT index_name FROM user_part_indexes
                         WHERE table_name = UPPER(p_table_name)
                         AND locality = 'LOCAL'
                     )
