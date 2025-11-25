@@ -581,7 +581,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
                     DBMS_OUTPUT.PUT_LINE('ERROR processing ' || rec.table_owner || '.' ||
                         rec.table_name || ': ' || SQLERRM);
                     DBMS_LOB.APPEND(v_all_errors,
-                        rec.table_owner || '.' || rec.table_name || ': ' || SQLERRM || CHR(10));
+                        rec.table_owner || '.' || rec.table_name || ': ' || SUBSTR(SQLERRM, 1, 4000) || CHR(10));
                     DBMS_OUTPUT.PUT_LINE('');
             END;
         END LOOP;
@@ -1169,7 +1169,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             EXCEPTION
                 WHEN OTHERS THEN
                     DBMS_OUTPUT.PUT_LINE('Error truncating partition ' || rec.partition_name || ': ' || SQLERRM);
-                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SQLERRM || CHR(10));
+                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SUBSTR(SQLERRM, 1, 4000) || CHR(10));
                     DBMS_LOB.APPEND(v_sql_log, '-- FAILED: ' || v_sql || ';' || CHR(10));
             END;
         END LOOP;
@@ -1262,7 +1262,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             EXCEPTION
                 WHEN OTHERS THEN
                     DBMS_OUTPUT.PUT_LINE('Error compressing partition ' || rec.partition_name || ': ' || SQLERRM);
-                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SQLERRM || CHR(10));
+                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SUBSTR(SQLERRM, 1, 4000) || CHR(10));
                     DBMS_LOB.APPEND(v_sql_log, '-- FAILED: ' || v_sql || ';' || CHR(10));
             END;
         END LOOP;
@@ -1367,7 +1367,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_partition_utilities AS
             EXCEPTION
                 WHEN OTHERS THEN
                     DBMS_OUTPUT.PUT_LINE('Error moving partition ' || rec.partition_name || ': ' || SQLERRM);
-                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SQLERRM || CHR(10));
+                    DBMS_LOB.APPEND(v_errors, 'Partition ' || rec.partition_name || ': ' || SUBSTR(SQLERRM, 1, 4000) || CHR(10));
                     DBMS_LOB.APPEND(v_sql_log, '-- FAILED: ' || v_sql || ';' || CHR(10));
             END;
         END LOOP;
