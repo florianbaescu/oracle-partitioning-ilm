@@ -477,6 +477,7 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
         v_sql_result NUMBER;
         v_block CLOB;
         v_error_msg VARCHAR2(4000);
+        v_result_char CHAR(1);
     BEGIN
         -- If no conditions defined, return TRUE (no gates)
         DECLARE
@@ -534,9 +535,11 @@ CREATE OR REPLACE PACKAGE BODY pck_dwh_ilm_execution_engine AS
                 END CASE;
 
                 -- Update evaluation success
+                v_result_char := CASE WHEN v_condition_result THEN 'Y' ELSE 'N' END;
+
                 UPDATE cmr.dwh_schedule_conditions
                 SET last_evaluation_time = SYSTIMESTAMP,
-                    last_evaluation_result = CASE WHEN v_condition_result THEN 'Y' ELSE 'N' END,
+                    last_evaluation_result = v_result_char,
                     last_evaluation_error = NULL,
                     evaluation_count = evaluation_count + 1,
                     success_count = success_count + 1
