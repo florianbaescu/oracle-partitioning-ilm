@@ -316,7 +316,7 @@ CREATE TABLE cmr.dwh_execution_state (
 
 CREATE INDEX idx_exec_state_schedule ON cmr.dwh_execution_state(schedule_id, status);
 CREATE INDEX idx_exec_state_status ON cmr.dwh_execution_state(status, start_time);
-CREATE INDEX idx_exec_state_batch ON cmr.dwh_execution_state(execution_batch_id);
+-- Note: execution_batch_id already has UNIQUE constraint which creates an index
 
 COMMENT ON TABLE cmr.dwh_execution_state IS
 'Tracks batch execution state for checkpointing and resumability.
