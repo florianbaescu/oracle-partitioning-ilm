@@ -16,12 +16,11 @@ PROMPT Scheduler Enhancement Setup - Complete Installation
 PROMPT ============================================================================
 PROMPT
 PROMPT This script will:
-PROMPT 1. Cleanup old system (execution window function)
-PROMPT 2. Rename old tables (dwh_ilm_execution_* -> *_old)
-PROMPT 3. Create new generalized tables (dwh_execution_*)
-PROMPT 4. Create schedule conditions table (NEW)
-PROMPT 5. Migrate existing data
-PROMPT 6. Create/update monitoring views
+PROMPT 1. Cleanup old system (drop old tables if they exist)
+PROMPT 2. Create new generalized tables (dwh_execution_*)
+PROMPT 3. Create schedule conditions table (NEW)
+PROMPT 4. Insert default schedule
+PROMPT 5. Create monitoring views
 PROMPT
 PROMPT ============================================================================
 
@@ -49,25 +48,34 @@ END;
 /
 
 -- Delete old config entries
-DELETE FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_START';
-DELETE FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_END';
-COMMIT;
-
-DBMS_OUTPUT.PUT_LINE('✓ Deleted EXECUTION_WINDOW_START and EXECUTION_WINDOW_END from dwh_ilm_config');
+BEGIN
+    DELETE FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_START';
+    DELETE FROM cmr.dwh_ilm_config WHERE config_key = 'EXECUTION_WINDOW_END';
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('✓ Deleted EXECUTION_WINDOW_START and EXECUTION_WINDOW_END from dwh_ilm_config');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('  (Table dwh_ilm_config does not exist, skipping)');
+        ELSE
+            RAISE;
+        END IF;
+END;
+/
 
 -- =============================================================================
--- PHASE 1: RENAME OLD TABLES (if they exist)
+-- PHASE 1: DROP OLD TABLES (if they exist)
 -- =============================================================================
 
 PROMPT
 PROMPT ========================================
-PROMPT Phase 1: Renaming old tables
+PROMPT Phase 1: Dropping old tables
 PROMPT ========================================
 
--- Rename execution state table first (child table, has FK)
+-- Drop old execution state table first (child table, has FK)
 BEGIN
-    EXECUTE IMMEDIATE 'ALTER TABLE cmr.dwh_ilm_execution_state RENAME TO dwh_ilm_execution_state_old';
-    DBMS_OUTPUT.PUT_LINE('✓ Renamed dwh_ilm_execution_state -> dwh_ilm_execution_state_old');
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_execution_state CASCADE CONSTRAINTS PURGE';
+    DBMS_OUTPUT.PUT_LINE('✓ Dropped table: dwh_ilm_execution_state');
 EXCEPTION
     WHEN OTHERS THEN
         IF SQLCODE = -942 THEN
@@ -79,10 +87,10 @@ EXCEPTION
 END;
 /
 
--- Rename execution schedules table (parent table)
+-- Drop old execution schedules table (parent table)
 BEGIN
-    EXECUTE IMMEDIATE 'ALTER TABLE cmr.dwh_ilm_execution_schedules RENAME TO dwh_ilm_execution_schedules_old';
-    DBMS_OUTPUT.PUT_LINE('✓ Renamed dwh_ilm_execution_schedules -> dwh_ilm_execution_schedules_old');
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_ilm_execution_schedules CASCADE CONSTRAINTS PURGE';
+    DBMS_OUTPUT.PUT_LINE('✓ Dropped table: dwh_ilm_execution_schedules');
 EXCEPTION
     WHEN OTHERS THEN
         IF SQLCODE = -942 THEN
@@ -90,6 +98,40 @@ EXCEPTION
         ELSE
             DBMS_OUTPUT.PUT_LINE('ERROR: ' || SQLERRM);
             RAISE;
+        END IF;
+END;
+/
+
+-- Drop new tables if they exist (for clean reinstall)
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_execution_state CASCADE CONSTRAINTS PURGE';
+    DBMS_OUTPUT.PUT_LINE('✓ Dropped table: dwh_execution_state');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('  (Table dwh_execution_state does not exist, skipping)');
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_schedule_conditions CASCADE CONSTRAINTS PURGE';
+    DBMS_OUTPUT.PUT_LINE('✓ Dropped table: dwh_schedule_conditions');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('  (Table dwh_schedule_conditions does not exist, skipping)');
+        END IF;
+END;
+/
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cmr.dwh_execution_schedules CASCADE CONSTRAINTS PURGE';
+    DBMS_OUTPUT.PUT_LINE('✓ Dropped table: dwh_execution_schedules');
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLCODE = -942 THEN
+            DBMS_OUTPUT.PUT_LINE('  (Table dwh_execution_schedules does not exist, skipping)');
         END IF;
 END;
 /
@@ -340,113 +382,45 @@ COMMENT ON COLUMN cmr.dwh_ilm_evaluation_queue.batch_sequence IS
 Used to resume from checkpoint in correct order.';
 
 -- =============================================================================
--- PHASE 3: MIGRATE DATA
+-- PHASE 3: INSERT DEFAULT DATA
 -- =============================================================================
 
 PROMPT
 PROMPT ========================================
-PROMPT Phase 3: Migrating data
+PROMPT Phase 3: Inserting default data
 PROMPT ========================================
 
--- Migrate schedules
-DECLARE
-    v_rows_migrated NUMBER := 0;
-BEGIN
-    INSERT INTO cmr.dwh_execution_schedules (
-        schedule_name, schedule_type, enabled,
-        monday_hours, tuesday_hours, wednesday_hours,
-        thursday_hours, friday_hours, saturday_hours, sunday_hours,
-        batch_cooldown_minutes, enable_checkpointing, checkpoint_frequency,
-        created_date
-    )
-    SELECT
-        schedule_name,
-        'ILM' AS schedule_type,  -- All existing schedules are ILM type
-        enabled,
-        monday_hours, tuesday_hours, wednesday_hours,
-        thursday_hours, friday_hours, saturday_hours, sunday_hours,
-        batch_cooldown_minutes, enable_checkpointing, checkpoint_frequency,
-        created_date
-    FROM cmr.dwh_ilm_execution_schedules_old;
+-- Insert default schedule
+INSERT INTO cmr.dwh_execution_schedules (
+    schedule_name,
+    schedule_type,
+    schedule_description,
+    enabled,
+    monday_hours,
+    tuesday_hours,
+    wednesday_hours,
+    thursday_hours,
+    friday_hours,
+    saturday_hours,
+    sunday_hours,
+    batch_cooldown_minutes,
+    enable_checkpointing,
+    checkpoint_frequency
+) VALUES (
+    'DEFAULT_SCHEDULE',
+    'ILM',
+    'Default ILM execution schedule',
+    'Y',
+    '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00',  -- Mon-Fri: 10 PM to 6 AM
+    NULL, NULL,                                                                   -- No weekends
+    5,                                                                            -- 5-minute cooldown between batches
+    'Y',                                                                          -- Enable checkpointing
+    5                                                                             -- Checkpoint every 5 operations
+);
 
-    v_rows_migrated := SQL%ROWCOUNT;
-    COMMIT;
+COMMIT;
 
-    DBMS_OUTPUT.PUT_LINE('✓ Migrated ' || v_rows_migrated || ' schedules from dwh_ilm_execution_schedules_old');
-EXCEPTION
-    WHEN OTHERS THEN
-        IF SQLCODE = -942 THEN
-            -- Old table doesn't exist, insert default schedule
-            INSERT INTO cmr.dwh_execution_schedules (
-                schedule_name, schedule_type,
-                monday_hours, tuesday_hours, wednesday_hours, thursday_hours, friday_hours,
-                saturday_hours, sunday_hours,
-                batch_cooldown_minutes,
-                enable_checkpointing, checkpoint_frequency
-            ) VALUES (
-                'DEFAULT_SCHEDULE', 'ILM',
-                '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00', '22:00-06:00',  -- Mon-Fri
-                NULL, NULL,                                                                   -- No weekends
-                5,                                                                            -- 5-minute cooldown
-                'Y', 5                                                                        -- Checkpoint every 5 ops
-            );
-            COMMIT;
-            DBMS_OUTPUT.PUT_LINE('✓ Inserted DEFAULT_SCHEDULE (no old data to migrate)');
-        ELSE
-            DBMS_OUTPUT.PUT_LINE('ERROR migrating schedules: ' || SQLERRM);
-            RAISE;
-        END IF;
-END;
-/
-
--- Migrate execution state
-DECLARE
-    v_rows_migrated NUMBER := 0;
-BEGIN
-    -- First, get schedule_id mapping
-    INSERT INTO cmr.dwh_execution_state (
-        execution_batch_id,
-        schedule_id,
-        start_time,
-        last_checkpoint,
-        end_time,
-        status,
-        last_queue_id,
-        operations_completed,
-        operations_total,
-        elapsed_seconds
-    )
-    SELECT
-        old_state.execution_batch_id,
-        new_sched.schedule_id,  -- Map to new schedule_id
-        old_state.start_time,
-        old_state.last_checkpoint,
-        old_state.end_time,
-        old_state.status,
-        old_state.last_queue_id,
-        old_state.operations_completed,
-        old_state.operations_total,
-        old_state.elapsed_seconds
-    FROM cmr.dwh_ilm_execution_state_old old_state
-    JOIN cmr.dwh_ilm_execution_schedules_old old_sched
-        ON old_state.schedule_id = old_sched.schedule_id
-    JOIN cmr.dwh_execution_schedules new_sched
-        ON old_sched.schedule_name = new_sched.schedule_name;
-
-    v_rows_migrated := SQL%ROWCOUNT;
-    COMMIT;
-
-    DBMS_OUTPUT.PUT_LINE('✓ Migrated ' || v_rows_migrated || ' execution state records from dwh_ilm_execution_state_old');
-EXCEPTION
-    WHEN OTHERS THEN
-        IF SQLCODE = -942 THEN
-            DBMS_OUTPUT.PUT_LINE('  (No old execution state data to migrate)');
-        ELSE
-            DBMS_OUTPUT.PUT_LINE('ERROR migrating execution state: ' || SQLERRM);
-            RAISE;
-        END IF;
-END;
-/
+DBMS_OUTPUT.PUT_LINE('✓ Inserted DEFAULT_SCHEDULE');
 
 -- =============================================================================
 -- PHASE 4: CREATE MONITORING VIEWS
@@ -875,9 +849,8 @@ PROMPT   ✓ dwh_execution_schedules (generalized, with schedule_type column)
 PROMPT   ✓ dwh_execution_state (generalized)
 PROMPT   ✓ dwh_schedule_conditions (NEW - condition framework)
 PROMPT
-PROMPT Old Tables Renamed (backup):
-PROMPT   • dwh_ilm_execution_schedules_old
-PROMPT   • dwh_ilm_execution_state_old
+PROMPT Default Data Inserted:
+PROMPT   ✓ DEFAULT_SCHEDULE (ILM type, Mon-Fri 22:00-06:00)
 PROMPT
 PROMPT Views Created:
 PROMPT   ✓ v_dwh_active_batches
@@ -894,9 +867,5 @@ PROMPT Next Steps:
 PROMPT   1. Run scheduler_enhancement_engine.sql to create execution engine package
 PROMPT   2. Run scheduler_enhancement_scheduler.sql to create DBMS_SCHEDULER jobs
 PROMPT   3. (Optional) Review examples: scheduler_conditions_examples.sql
-PROMPT
-PROMPT After verification (e.g., 1 week):
-PROMPT   DROP TABLE cmr.dwh_ilm_execution_schedules_old PURGE;
-PROMPT   DROP TABLE cmr.dwh_ilm_execution_state_old PURGE;
 PROMPT
 PROMPT ============================================================================
